@@ -1,0 +1,378 @@
+// SYCL MoE expert forward implementation. Mirrors the fp/scalar semantics of
+// exllamav3/exllamav3_ext/cpu/moe_mul1.cpp: prep (suh + block hadamard) -> GEMV over packed
+// mul1 tiles -> out transform (hadamard + svh + bias) -> activation -> down GEMV -> weighted
+// gather. One kernel per stage; correctness first, fusion later.
+#include "moe_sycl.hpp"
+#include <cmath>
+#include <cstring>
+
+namespace moe_sycl {
+
+namespace {
+
+constexpr float KDQ = 0.00676727294921875f;   // k_inv = fp16(0x1eee)
+constexpr float HAD_SCALE = 0.088388347648f;  // 1/sqrt(128)
+constexpr int MAXM = 4;
+
+// pointer table categories (d_tab): layout [field][cat][expert]
+enum { CAT_GATE = 0, CAT_UP = 1, CAT_DOWN = 2 };
+enum { F_TRI = 0, F_SUH = 1, F_SVH = 2, F_BIAS = 3 };
+
+inline float f16(uint16_t h)
+{
+    _Float16 f;
+    std::memcpy(&f, &h, 2);
+    return (float)f;
+}
+
+// weight index (r*16+c) -> state slot t in the tile ring (inverse of tc_perm)
+struct InvPerm { unsigned char inv[256]; };
+
+InvPerm make_invperm()
+{
+    InvPerm p{};
+    for (int t = 0; t < 256; ++t) {
+        const int b = t >> 3, j = t & 7;
+        const int row = ((b & 3) * 2) + (j & 1) + ((j & 2) ? 8 : 0);
+        const int col = (b >> 2) + ((j & 4) ? 8 : 0);
+        p.inv[row * 16 + col] = (unsigned char)t;
+    }
+    return p;
+}
+
+// 128-wide sequentia hadamard in shared memory, same op order as the CPU scalar butterfly
+template <typename Item>
+inline void hadamard128(Item& it, int tid, sycl::local_ptr<float> v)
+{
+    for (int width = 1; width < 128; width *= 2) {
+        sycl::group_barrier(it.get_group());
+        if (tid < 64) {
+            const int base = (tid / width) * 2 * width + (tid % width);
+            const float a = v[base], b = v[base + width];
+            v[base] = a + b;
+            v[base + width] = a - b;
+        }
+    }
+    sycl::group_barrier(it.get_group());
+}
+
+} // namespace
+
+// ------------------------------------------------------------------ lifecycle
+
+void MoeSyclLayer::init(sycl::queue* q, const LayerParams& p,
+                        const std::vector<MatrixSrc>& gates,
+                        const std::vector<MatrixSrc>& ups,
+                        const std::vector<MatrixSrc>& downs)
+{
+    Q = q;
+    P = p;
+    const int E = P.num_experts;
+    std::vector<uintptr_t> tab((size_t)4 * 3 * E, 0);
+    const std::vector<MatrixSrc>* by_cat[3] = { &gates, &ups, &downs };
+    for (int c = 0; c < 3; ++c)
+        for (int e = 0; e < E; ++e) {
+            const MatrixSrc& m = (*by_cat[c])[e];
+            tab[((F_TRI * 3 + c) * E) + e]  = (uintptr_t)m.trellis;
+            tab[((F_SUH * 3 + c) * E) + e]  = (uintptr_t)m.suh;
+            tab[((F_SVH * 3 + c) * E) + e]  = (uintptr_t)m.svh;
+            tab[((F_BIAS * 3 + c) * E) + e] = (uintptr_t)m.bias;
+        }
+    d_tab = sycl::malloc_device<uintptr_t>(tab.size(), *q);
+    q->memcpy(d_tab, tab.data(), tab.size() * sizeof(uintptr_t)).wait();
+}
+
+MoeSyclLayer::~MoeSyclLayer()
+{
+    auto freep = [&](auto*& p) { if (p) { sycl::free(p, *Q); p = nullptr; } };
+    freep(d_tab);
+    freep(w_chunk); freep(w_tin); freep(w_tout); freep(w_h); freep(w_tind); freep(w_toutd);
+    freep(w_tokb); freep(w_toke);
+}
+
+void MoeSyclLayer::ensure_ws(int nc, int rows)
+{
+    auto realloc_p = [&](auto*& p, size_t count) {
+        if (p) sycl::free(p, *Q);
+        using T = std::remove_pointer_t<std::remove_reference_t<decltype(p)>>;
+        p = sycl::malloc_device<T>(count, *Q);
+        // prefault: zero-fill and sync so the device page tables are populated before any
+        // kernel pipeline touches the buffer (fresh USM pages read back as zeros to a kernel
+        // that runs in the same submission burst as the first writer on this driver)
+        Q->memset(p, 0, count * sizeof(T));
+        Q->wait();
+    };
+    if (nc > cap_nc) {
+        realloc_p(w_chunk, (size_t)nc);
+        realloc_p(w_tin,   (size_t)nc * 2 * MAXM * P.hidden);
+        realloc_p(w_tout,  (size_t)nc * 2 * MAXM * P.interm);
+        realloc_p(w_h,     (size_t)nc * MAXM * P.interm);
+        realloc_p(w_tind,  (size_t)nc * MAXM * P.interm);
+        realloc_p(w_toutd, (size_t)nc * MAXM * P.hidden);
+        realloc_p(w_toke,  (size_t)nc * MAXM);
+        cap_nc = nc;
+    }
+    if (rows > cap_rows) {
+        realloc_p(w_tokb, (size_t)rows + 1);
+        cap_rows = rows;
+    }
+}
+
+// ------------------------------------------------------------------ forward
+
+void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
+                           const uint16_t* x, float* out, int rows)
+{
+    const int H = P.hidden, I = P.interm;
+    const int k2 = 2 * P.bits + P.hb;
+    const int E = P.num_experts;
+    const int tile_u32 = 4 * k2;                    // u32 words per tile
+    const bool gated = P.gated;
+    const int nm = gated ? 2 : 1;
+    const int act = P.activation;
+    const float lim = P.act_limit != 0.0f ? P.act_limit : INFINITY;
+    sycl::queue& q = *Q;
+    ensure_ws(num_chunks, rows);
+    // NOTE: on this stack (oneAPI 2026.2 + L0 compute runtime + Xe2) the implicit
+    // in-order-queue dependencies between chained submits / H2D memcpys are NOT reliably
+    // enforced: a consumer kernel can read stale (pre-write) data while the queue is never
+    // drained. Threading explicit depends_on chains through every op of the forward fixes it
+    // (root-caused in sycl_moe/NOTES.md); it is also the maximum-overlap form of the ordering.
+    sycl::event dep;
+    auto launch = [&](auto&& fn) {
+        dep = q.submit([&](sycl::handler& cgh) { cgh.depends_on(dep); fn(cgh); });
+    };
+
+    dep = q.memcpy(w_chunk, chunks_host, num_chunks * sizeof(ChunkDev));
+    dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
+    dep = q.memcpy(w_tokb, tmap.begin.data(), tmap.begin.size() * sizeof(int), {dep});
+    dep = q.memcpy(w_toke, tmap.entry.data(), tmap.entry.size() * sizeof(int), {dep});
+
+    const uintptr_t* tab = d_tab;
+    const ChunkDev* chunks = w_chunk;
+    const int nc = num_chunks;
+    float* tin = w_tin;
+    float* tout = w_tout;
+    float* hbuf = w_h;
+    float* tind = w_tind;
+    float* toutd = w_toutd;
+    int* tokb = w_tokb;
+    int* toke = w_toke;
+
+    // ---- K1: prep gate/up inputs (suh scale + 128-block hadamard), from fp16 x
+    {
+        const int nbk = H / 128;
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> sh({128}, cgh);
+            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)(nc * nm)}, {128, 1}),
+                [=](sycl::nd_item<2> it) {
+                const int blk = (int)it.get_group(0);
+                const int unit = (int)it.get_group(1);
+                const int tid = (int)it.get_local_id(0);
+                const int j = unit / nm, lmu = unit % nm;
+                const int cat = gated ? lmu : CAT_UP;
+                const int mu = gated ? lmu : 0;
+                const int e = chunks[j].expert;
+                const int m = chunks[j].m;
+                const uint16_t* suh = (const uint16_t*)tab[(F_SUH * 3 + cat) * E + e];
+                float* dst_base = tin + ((size_t)(j * 2 + mu) * MAXM) * H;
+                for (int r = 0; r < m; ++r) {
+                    const int tok = chunks[j].token[r];
+                    sh[tid] = f16(x[(size_t)tok * H + blk * 128 + tid]) * f16(suh[blk * 128 + tid]);
+                    hadamard128(it, tid, sh.get_pointer());
+                    dst_base[(size_t)r * H + blk * 128 + tid] = sh[tid] * HAD_SCALE;
+                    sycl::group_barrier(it.get_group());
+                }
+            });
+        });
+    }
+
+    // ---- K2/K5: GEMV over mul1 tiles for one matrix class
+    const InvPerm invp = make_invperm();
+    auto gemv = [&](bool down) {
+        const int tiles_n = (down ? H : I) / 16;
+        const int tiles_k = (down ? I : H) / 16;
+        const int nbk = (down ? H : I) / 128;
+        const int units = down ? nc * nbk : nc * nm * nbk;
+        const size_t gn = (size_t)units * 128;
+        launch([&](sycl::handler& cgh) {
+            cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), [=](sycl::nd_item<1> it) {
+                const int unit = (int)it.get_group(0);
+                const int tid = (int)it.get_local_id(0);
+                const int blk = unit % nbk;
+                const int jmu = unit / nbk;
+                const int j = down ? jmu : jmu / nm;
+                const int lmu = down ? CAT_DOWN : jmu % nm;
+                const int cat = down ? CAT_DOWN : (gated ? lmu : CAT_UP);
+                const int mu = down ? 0 : (gated ? lmu : 0);
+                const int e = chunks[j].expert;
+                const int m = chunks[j].m;
+                const uint32_t* w32 = (const uint32_t*)(uintptr_t)tab[(F_TRI * 3 + cat) * E + e];
+                const float* src_tin = down ? tind + (size_t)j * MAXM * I
+                                            : tin + ((size_t)(j * 2 + mu) * MAXM) * H;
+                const int K = down ? I : H;
+
+                const int cG = blk * 128 + tid;
+                const int tile_n = cG >> 4, cin = cG & 15;
+                unsigned int addr[16];
+                for (int rk = 0; rk < 16; ++rk) {
+                    const int t = invp.inv[rk * 16 + cin];
+                    const int b1 = (((t + 1) * k2) >> 1) + 128 * k2;
+                    const int b0 = b1 - 16;
+                    const int w0 = (b0 >> 5) % tile_u32;
+                    const int w1 = ((b1 - 1) >> 5) % tile_u32;
+                    const int sh = (((b1 - 1) >> 5) + 1) * 32 - b1;
+                    addr[rk] = (unsigned)(w0 | (w1 << 8) | (sh << 16));
+                }
+                float acc[MAXM] = {0, 0, 0, 0};
+                for (int tk = 0; tk < tiles_k; ++tk) {
+                    const uint32_t* wp = w32 + ((size_t)tk * tiles_n + tile_n) * tile_u32;
+                    const float* tp = src_tin + (size_t)tk * 16;
+                    for (int rk = 0; rk < 16; ++rk) {
+                        const unsigned a = addr[rk];
+                        const uint64_t merged = ((uint64_t)wp[a & 0xff] << 32) | wp[(a >> 8) & 0xff];
+                        const uint32_t st = ((uint32_t)(merged >> (a >> 16))) & 0xffffu;
+                        const uint32_t xm = st * 0x83DCD12Du;
+                        const float wcomb = (float)((xm & 0xff) + ((xm >> 8) & 0xff) +
+                                                    ((xm >> 16) & 0xff) + (xm >> 24)) - 510.0f;
+                        for (int r = 0; r < m; ++r)
+                            acc[r] = sycl::fma(wcomb, tp[(size_t)r * K + rk], acc[r]);
+                    }
+                }
+                const int N = down ? H : I;
+                float* dst = down ? toutd + (size_t)j * MAXM * N
+                                  : tout + ((size_t)(j * 2 + mu) * MAXM) * N;
+                for (int r = 0; r < m; ++r)
+                    dst[(size_t)r * N + cG] = acc[r] * KDQ;
+            });
+        });
+    };
+
+    gemv(false);
+
+    // ---- K3: out transform (hadamard + svh + bias) + activation -> h
+    {
+        const int nbk = I / 128;
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> sh({256}, cgh);
+            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
+                [=](sycl::nd_item<2> it) {
+                const int blk = (int)it.get_group(0);
+                const int j = (int)it.get_group(1);
+                const int tid = (int)it.get_local_id(0);
+                const int e = chunks[j].expert;
+                const int m = chunks[j].m;
+                const int cG = blk * 128 + tid;
+                const uint16_t* svhu = (const uint16_t*)tab[(F_SVH * 3 + CAT_UP) * E + e];
+                const uint16_t* bu   = (const uint16_t*)tab[(F_BIAS * 3 + CAT_UP) * E + e];
+                const int mu_up = gated ? 1 : 0;   // gateless gemv stored up at slot j*2+0
+                const float* tg = tout + ((size_t)(j * 2) * MAXM) * I;
+                const float* tu = tout + ((size_t)(j * 2 + mu_up) * MAXM) * I;
+                float hg = 0.f, bi = 0.f;
+                if (gated) {
+                    const uint16_t* svhg = (const uint16_t*)tab[(F_SVH * 3 + CAT_GATE) * E + e];
+                    const uint16_t* bg = (const uint16_t*)tab[(F_BIAS * 3 + CAT_GATE) * E + e];
+                    hg = HAD_SCALE * f16(svhg[cG]);
+                    bi = bg ? f16(bg[cG]) : 0.0f;
+                }
+                const float hu = HAD_SCALE * f16(svhu[cG]);
+                const float bj = bu ? f16(bu[cG]) : 0.0f;
+                for (int r = 0; r < m; ++r) {
+                    if (gated) {
+                        sh[tid] = tg[(size_t)r * I + cG];
+                        sh[128 + tid] = tu[(size_t)r * I + cG];
+                        hadamard128(it, tid, sh.get_pointer());
+                        hadamard128(it, tid, sh.get_pointer() + 128);
+                        const float gv = sh[tid] * hg + bi;
+                        const float uv = sh[128 + tid] * hu + bj;
+                        float av;
+                        switch (act) {
+                            case 0: {
+                                const float eg = std::exp(std::min(-gv, 80.0f));
+                                av = std::min(gv / (1.0f + eg), lim) * sycl::clamp(uv, -lim, lim);
+                                break; }
+                            case 1: {
+                                const float cdf = 0.5f * (1.0f + erff(gv * 0.70710678f));
+                                av = std::min(gv * cdf, lim) * sycl::clamp(uv, -lim, lim);
+                                break; }
+                            case 3: {
+                                const float gvc = std::min(gv, lim);
+                                const float uvc = sycl::clamp(uv, -lim, lim);
+                                av = (uvc + 1.0f) * gvc / (1.0f + std::exp(std::min(-1.702f * gvc, 80.0f)));
+                                break; }
+                            default: av = gv; break;
+                        }
+                        hbuf[(size_t)j * MAXM * I + (size_t)r * I + cG] = av;
+                    } else {
+                        sh[tid] = tu[(size_t)r * I + cG];
+                        hadamard128(it, tid, sh.get_pointer());
+                        const float uv = sh[tid] * hu + bj;
+                        const float rv = uv > 0.0f ? uv : 0.0f;
+                        hbuf[(size_t)j * MAXM * I + (size_t)r * I + cG] = rv * rv;
+                    }
+                    sycl::group_barrier(it.get_group());
+                }
+            });
+        });
+    }
+
+    // ---- K4: prep down inputs (from fp32 h)
+    {
+        const int nbk = I / 128;
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> sh({128}, cgh);
+            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
+                [=](sycl::nd_item<2> it) {
+                const int blk = (int)it.get_group(0);
+                const int j = (int)it.get_group(1);
+                const int tid = (int)it.get_local_id(0);
+                const int e = chunks[j].expert;
+                const int m = chunks[j].m;
+                const uint16_t* suh = (const uint16_t*)tab[(F_SUH * 3 + CAT_DOWN) * E + e];
+                for (int r = 0; r < m; ++r) {
+                    sh[tid] = hbuf[(size_t)j * MAXM * I + (size_t)r * I + blk * 128 + tid] * f16(suh[blk * 128 + tid]);
+                    hadamard128(it, tid, sh.get_pointer());
+                    tind[(size_t)j * MAXM * I + (size_t)r * I + blk * 128 + tid] = sh[tid] * HAD_SCALE;
+                    sycl::group_barrier(it.get_group());
+                }
+            });
+        });
+    }
+
+    gemv(true);
+
+    // ---- K6: down out-transform + weighted gather into out
+    {
+        const int nbk = H / 128;
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> sh({128}, cgh);
+            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)rows}, {128, 1}),
+                [=](sycl::nd_item<2> it) {
+                const int blk = (int)it.get_group(0);
+                const int t = (int)it.get_group(1);
+                const int tid = (int)it.get_local_id(0);
+                const int cG = blk * 128 + tid;
+                float acc = 0.0f;
+                const int b0 = tokb[t], b1 = tokb[t + 1];
+                for (int p = b0; p < b1; ++p) {
+                    const int ent = toke[p];
+                    const int j = ent >> 2, s = ent & 3;
+                    const int e = chunks[j].expert;
+                    const float wgt = chunks[j].weight[s];
+                    const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
+                    const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
+                    sh[tid] = toutd[((size_t)j * MAXM + s) * H + cG];
+                    hadamard128(it, tid, sh.get_pointer());
+                    float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
+                    if (be) v += f16(be[cG]);
+                    acc += wgt * v;
+                    sycl::group_barrier(it.get_group());
+                }
+                out[(size_t)t * H + cG] = acc;
+            });
+        });
+    }
+}
+
+
+} // namespace moe_sycl
