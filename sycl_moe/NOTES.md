@@ -82,6 +82,27 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 4. nd_range: global dim must be a multiple of local in EVERY dim; use {N*128, groups} with
    local {128,1}. get_group(dim) is the GROUP id, get_global_id the item id.
 5. icpx -O3 crashed silently on poc_dequant; use -O2.
+6. GEMV perf anatomy (E=12, rows=1, 10 experts, 2bit, B70):
+   - apack register-addressed gemv: K2 216us / K5 56us (nsl=1), total 343.
+   - split-K nsl=2 halves K2 (127us), total 260. nsl=4 adds partial-sum cost.
+   - replacing per-weight apack extraction by CONSTANT addresses per rk was 3.5x
+     faster (36us!) -> the per-weight address arithmetic (u64 extract + derived
+     dynamic indexes + 64-bit variable shifts), NOT the loads, dominates. A
+     rate-specialized path with constexpr shifts should approach ~60-70us K2+K5.
+     First attempt (aligned "column window" fast path) FAILED numerically: the
+     scalar spec's cross-word bit extraction is NOT the naive LSB-contiguous ring
+     read (merged=(w[b0/32]<<32|w[(b1-1)/32])>>(aligned shift) mixes word halves
+     when crossing a boundary). Any fast path must be validated per-window against
+     decode_state_scalar first (t21.cpp does this on the host; it caught the flaw).
+   - dot_acc/dp4a SYCL ext is NOT hardware accelerated on this stack (same speed
+     as manual bytes); don't plan around it.
+   - shared staging + per-tile WG barriers was SLOWER than plain global loads
+     (barrier cost ~0.3-0.5us/iter at 128-wide groups); avoid WG barriers in hot loops.
+   - K1/K3/K4/K6 together ~40us at rows=1; hadamard via shared+barriers is the
+     likely cost there; a shuffle-based subgroup hadamard could cut it.
+7. State of play: GPU decode 260us vs CPU-native-ISA 295us (both 10 experts/layer);
+   GPU prefill-ish rows=8 690us vs CPU 4600us. Integration is the next milestone;
+   revisit gemv instruction diet afterwards (target K2+K5 <= 90us).
 
 ## Findings / gotchas
 - Xe2 sub-group = 16 lanes; prefer explicit nd_range with local_size 16/32/64 multiples.
