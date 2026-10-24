@@ -100,6 +100,22 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
      (barrier cost ~0.3-0.5us/iter at 128-wide groups); avoid WG barriers in hot loops.
    - K1/K3/K4/K6 together ~40us at rows=1; hadamard via shared+barriers is the
      likely cost there; a shuffle-based subgroup hadamard could cut it.
+8. THE QUEUE-ORDERING BUG, FINAL FORM (took a day; reread before touching anything async):
+   on oneAPI 2026.2 + NEO 2.41 + B70, within an IN-ORDER sycl::queue, q.memcpy() does NOT
+   wait for kernels submitted earlier via q.submit(), and event .wait() can complete before
+   the data is host-readable. Only EXPLICIT cgh.depends_on / memcpy(...,{deps}) edges are
+   honored. Every op in the pipeline (H2D, kernels, D2H) is now chained through returned
+   events; b70_forward keeps g_last_ev across calls. If anything ever reads back zeros or
+   "stale" data again: check for a missing dependency edge FIRST, not for cache bugs.
+   corollary: 'retry fixes it' / 'probe fixes it' / 'second call is right' all had the same
+   cause (extra queue ops acted as implicit syncs).
+9. b70 plugin: env EXL3_MOE_B70=1 (routes compute; forces swizzle off for layout parity),
+   EXL3_MOE_B70_LIB=<path libb70moe.so>. Registration warms workspaces + bounce + pinned
+   staging (rows cap 64, chunks cap 1024; bump in b70_register_layer if slot geometry grows).
+   source sycl_moe/env.sh before ANY torch-ext python (JIT hash consistency + gcc-15 shim in
+   .toolfix; without it a full 190-file CUDA rebuild explodes in ninja).
+10. Current integrated numbers (E=12/topk=10/2bit/rows=1): b70 205us/layer vs CPU native 295
+    (swizzled) / 452 (native layout). xval rms vs CPU scalar 1.05e-6.
 7. State of play: GPU decode 260us vs CPU-native-ISA 295us (both 10 experts/layer);
    GPU prefill-ish rows=8 690us vs CPU 4600us. Integration is the next milestone;
    revisit gemv instruction diet afterwards (target K2+K5 <= 90us).
