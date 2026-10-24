@@ -85,6 +85,7 @@ void MoeSyclLayer::init(sycl::queue* q, const LayerParams& p,
             tab[((F_SVH * 3 + c) * E) + e]  = (uintptr_t)m.svh;
             tab[((F_BIAS * 3 + c) * E) + e] = (uintptr_t)m.bias;
         }
+    nsl = getenv("MOE_NSL") ? atoi(getenv("MOE_NSL")) : 2;
     d_tab = sycl::malloc_device<uintptr_t>(tab.size(), *q);
     q->memcpy(d_tab, tab.data(), tab.size() * sizeof(uintptr_t)).wait();
 }
@@ -108,10 +109,10 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     };
     if (nc > cap_nc) {
         realloc_p(w_tin,   (size_t)nc * 2 * MAXM * P.hidden);
-        realloc_p(w_tout,  (size_t)nc * 2 * MAXM * P.interm);
+        realloc_p(w_tout,  (size_t)nc * 2 * nsl * MAXM * P.interm);
         realloc_p(w_h,     (size_t)nc * MAXM * P.interm);
         realloc_p(w_tind,  (size_t)nc * MAXM * P.interm);
-        realloc_p(w_toutd, (size_t)nc * MAXM * P.hidden);
+        realloc_p(w_toutd, (size_t)nc * nsl * MAXM * P.hidden);
         cap_nc = nc;
     }
     (void)rows;
@@ -264,6 +265,7 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
         if (prof) pev.push_back(dep);
     };
 
+    const int NSL = nsl;
     const uintptr_t* tab = d_tab;
     const ChunkDev* chunks = w_chunk;
     const int* d_tokb = (const int*)((const char*)w_chunk + off_tokb);
@@ -305,17 +307,16 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
     // ---- K2/K5: GEMV over mul1 tiles for one matrix class
     const InvPerm invp = make_invperm();
     GemvBase gb;
-    gb.nsl = 1;
     gb.tab = d_tab; gb.chunks = w_chunk;
     gb.tin = w_tin; gb.tout = w_tout; gb.tind = w_tind; gb.toutd = w_toutd;
     gb.E = E; gb.nc = nc; gb.nm = nm; gb.H = H; gb.I = I; gb.gated = gated ? 1 : 0;
+    gb.nsl = nsl;
     auto gemv = [&](bool down) {
         gb.tiles_n = (down ? H : I) / 16;
         gb.tiles_k = (down ? I : H) / 16;
         gb.nbk = (down ? H : I) / 128;
         gb.down = down ? 1 : 0;
-        gb.nsl = getenv("MOE_NSL") ? atoi(getenv("MOE_NSL")) : 4;
-        const int units = (down ? nc * gb.nbk : nc * nm * gb.nbk) * gb.nsl;
+        const int units = (down ? nc * gb.nbk : nc * nm * gb.nbk) * NSL;
         const size_t gn = (size_t)units * 128;
         launch([&](sycl::handler& cgh) {
             switch (k2) {
@@ -345,13 +346,8 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
                 const uint16_t* svhu = (const uint16_t*)tab[(F_SVH * 3 + CAT_UP) * E + e];
                 const uint16_t* bu   = (const uint16_t*)tab[(F_BIAS * 3 + CAT_UP) * E + e];
                 const int mu_up = gated ? 1 : 0;   // gateless gemv stored up at slot j*2+0
-                auto sum_sl = [&](const float* base, size_t idx) {
-                    float s = 0.f;
-                    for (int q = 0; q < NSL_C; ++q) s += base[(size_t)q * MAXM * I + idx];
-                    return s;
-                };
-                const float* tg = tout + (size_t)(j * 2) * NSL_C * MAXM * I;
-                const float* tu = tout + (size_t)(j * 2 + mu_up) * NSL_C * MAXM * I;
+                const float* tg = tout + (size_t)(j * 2) * NSL * MAXM * I;
+                const float* tu = tout + (size_t)(j * 2 + mu_up) * NSL * MAXM * I;
                 float hg = 0.f, bi = 0.f;
                 if (gated) {
                     const uint16_t* svhg = (const uint16_t*)tab[(F_SVH * 3 + CAT_GATE) * E + e];
@@ -363,8 +359,14 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
                 const float bj = bu ? f16(bu[cG]) : 0.0f;
                 for (int r = 0; r < m; ++r) {
                     if (gated) {
-                        sh[tid] = tg[(size_t)r * I + cG];
-                        sh[128 + tid] = tu[(size_t)r * I + cG];
+                        {
+                            float sg = 0.f, su = 0.f;
+                            for (int qq = 0; qq < NSL; ++qq) {
+                                sg += tg[(size_t)qq * MAXM * I + (size_t)r * I + cG];
+                                su += tu[(size_t)qq * MAXM * I + (size_t)r * I + cG];
+                            }
+                            sh[tid] = sg; sh[128 + tid] = su;
+                        }
                         hadamard128(it, tid, sh.get_pointer());
                         hadamard128(it, tid, sh.get_pointer() + 128);
                         const float gv = sh[tid] * hg + bi;
@@ -388,7 +390,12 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
                         }
                         hbuf[(size_t)j * MAXM * I + (size_t)r * I + cG] = av;
                     } else {
-                        sh[tid] = tu[(size_t)r * I + cG];
+                        {
+                            float su = 0.f;
+                            for (int qq = 0; qq < NSL; ++qq)
+                                su += tu[(size_t)qq * MAXM * I + (size_t)r * I + cG];
+                            sh[tid] = su;
+                        }
                         hadamard128(it, tid, sh.get_pointer());
                         const float uv = sh[tid] * hu + bj;
                         const float rv = uv > 0.0f ? uv : 0.0f;
@@ -446,7 +453,12 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
                     const float wgt = chunks[j].weight[s];
                     const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
                     const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
-                    sh[tid] = toutd[((size_t)j * MAXM + s) * H + cG];
+                    {
+                        float sv = 0.f;
+                        for (int qq = 0; qq < NSL; ++qq)
+                            sv += toutd[((size_t)(j * NSL + qq) * MAXM + s) * H + cG];
+                        sh[tid] = sv;
+                    }
                     hadamard128(it, tid, sh.get_pointer());
                     float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
                     if (be) v += f16(be[cG]);

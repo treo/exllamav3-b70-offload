@@ -71,6 +71,7 @@ private:
     sycl::queue* Q = nullptr;
     LayerParams P;
     int cap_nc = 0, cap_rows = 0;
+    int nsl = 4;               // split-K slices in the GEMV kernels
     std::vector<sycl::event> pev;
 
     uintptr_t* d_tab = nullptr;      // 12 x E pointer table (see TabField/cats in .cpp)
