@@ -55,6 +55,34 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
    resident in B70 VRAM (uploaded at layer registration), x/out hop via USM-host bounce
    buffers. Parent CUDA side unchanged.
 
+## Status log
+- [x] PoC1 poc_dequant.cpp: tile state extraction + mul1 dequant, exact for K 1..8 incl .5 rates.
+- [x] moe_sycl.{hpp,cpp}: full layer forward (K1 prep, K2 gemv gu, K3 trans+act, K4 prep d,
+      K5 gemv d, K6 trans+gather), fp32 scalar-tier semantics, native tile layout, MAXM=4
+      chunks, gated (silu/gelu/swiglu_oai) + gateless relu2, optional bias.
+- [x] bench_layer.cpp: synthetic layer harness, checks vs moe_host_ref (fp32 transcription of
+      the CPU scalar path); passes at ~3e-6 max_rel across E/rows/topk/bits/hb/act combos.
+- [ ] perf: naive version runs 19-47 GB/s effective (target 300-500). Profile, optimize.
+- [ ] cross-check vs real ext (exl3_moe_cpu_forward, scalar ISA).
+- [ ] integrate.
+
+## BIG LESSONS
+1. STATE WINDOWS MUST BE MASKED TO 16 BITS. merged>>shift leaves up to 31 bits; the scalar
+   CPU spec casts to uint16_t. A missing &0xffff gave plausible-looking garbage. Compare
+   the device against the SPEC (host reference), not sim-vs-device (same bug hides).
+2. ONEAPI 2026.2 / L0 / Xe2: implicit in-order queue ordering between chained q.submit()
+   and H2D q.memcpy() was NOT enforced; consumer kernels read STALE data (zeros) unless the
+   queue is drained (q.wait) or explicit cgh.depends_on(prev_event) chains are used.
+   Symptom: first forward wrong, later forwards right. FIX: chain every op with depends_on
+   (permanent in moe_sycl.cpp). Barriers (ext_oneapi_submit_barrier) and empty separator
+   kernels did NOT help; only true event dependencies did.
+3. Probe reads are also queue ops: they serialize and change what later probes see. When
+   chasing nondeterminism, dump state ONCE right after q.wait; beware summing big probe
+   buffers that span memory written by other kernels (false positives).
+4. nd_range: global dim must be a multiple of local in EVERY dim; use {N*128, groups} with
+   local {128,1}. get_group(dim) is the GROUP id, get_global_id the item id.
+5. icpx -O3 crashed silently on poc_dequant; use -O2.
+
 ## Findings / gotchas
 - Xe2 sub-group = 16 lanes; prefer explicit nd_range with local_size 16/32/64 multiples.
 - Bench harness build: source /opt/intel/oneapi/setvars.sh && icpx -fsycl -O2 x.cpp -o x
