@@ -46,6 +46,7 @@ struct MoeCpuLayer
     int interm_size;      // n of gate/up, k of down
     int activation;       // 0 = silu, 1 = gelu, 2 = relu2 (gateless), 3 = swiglu_oai
     float act_limit;      // swiglu_oai clamp
+    int64_t b70 = -1;     // handle into the optional B70/SYCL plugin (EXL3_MOE_B70=1)
 };
 
 // Register a layer: per-expert tensor lists (CPU, contiguous). Returns a handle.

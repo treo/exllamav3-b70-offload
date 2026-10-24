@@ -53,9 +53,13 @@ public:
               const std::vector<MatrixSrc>& ups, const std::vector<MatrixSrc>& downs);
     ~MoeSyclLayer();
 
-    // x [rows,H] fp16 device; out [rows,H] fp32 device (zeroed then written).
-    void forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
-                 const uint16_t* x, float* out, int rows);
+    // x [rows,H] fp16 device; out [rows,H] fp32 device (written exhaustively by K6).
+    // Returns the final queue event; callers doing further queue ops (e.g. D2H readback)
+    // MUST depends_on it: this stack does not reliably serialize plain q->memcpy on
+    // preceding q.submit kernels within an in-order queue (root-caused, see NOTES.md).
+    sycl::event forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
+                        const uint16_t* x, float* out, int rows,
+                        const sycl::event* pre_dep = nullptr);
 
     const LayerParams& params() const { return P; }
 

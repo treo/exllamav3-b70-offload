@@ -142,10 +142,9 @@ int main(int argc, char** argv)
         uint16_t* dx2 = sycl::malloc_device<uint16_t>(hx2.size(), q);
         float* dout2 = sycl::malloc_device<float>(ref_out.size(), q);
         q.memcpy(dx2, hx2.data(), hx2.size() * 2).wait();
-        layer2.forward(chunks.data(), (int)chunks.size(), tmap, dx2, dout2, rows);
-        q.wait();
+        sycl::event e2 = layer2.forward(chunks.data(), (int)chunks.size(), tmap, dx2, dout2, rows);
         std::vector<float> got(ref_out.size());
-        q.memcpy(got.data(), dout2, got.size() * 4).wait();
+        q.memcpy(got.data(), dout2, got.size() * 4, {e2}).wait();
         double se = 0, ss = 0, maxrel = 0; size_t worst = 0;
         for (size_t i = 0; i < got.size(); ++i) {
             const double d = std::fabs((double)ref_out[i] - got[i]);
@@ -276,10 +275,9 @@ int main(int argc, char** argv)
     uint16_t* dx = sycl::malloc_device<uint16_t>(hx.size(), q);
     float* dout = sycl::malloc_device<float>((size_t)rows * H, q);
     q.memcpy(dx, hx.data(), hx.size() * 2).wait();
-    layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
-    q.wait();
+    sycl::event e_fw = layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
     std::vector<float> got((size_t)rows * H);
-    q.memcpy(got.data(), dout, got.size() * 4).wait();
+    q.memcpy(got.data(), dout, got.size() * 4, {e_fw}).wait();
 
     if (a.verbose) {
         for (int wsb = 0; wsb < 5; ++wsb) {

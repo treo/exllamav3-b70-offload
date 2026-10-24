@@ -219,8 +219,8 @@ struct GemvK
 
 // ------------------------------------------------------------------ forward
 
-void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
-                           const uint16_t* x, float* out, int rows)
+sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
+                           const uint16_t* x, float* out, int rows, const sycl::event* pre_dep)
 {
     const int H = P.hidden, I = P.interm;
     const int k2 = 2 * P.bits + P.hb;
@@ -258,7 +258,8 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
 
     // NOTE: implicit in-order ordering between chained submits/memcpys is NOT enforced on
     // this stack (oneAPI 2026.2 + L0 + Xe2); explicit depends_on chains are required.
-    sycl::event dep = q.memcpy(w_chunk, hb, blob_sz);
+    sycl::event dep = pre_dep ? q.memcpy(w_chunk, hb, blob_sz, {*pre_dep})
+                              : q.memcpy(w_chunk, hb, blob_sz);
     if (prof) { pev.clear(); pev.push_back(dep); }
     auto launch = [&](auto&& fn) {
         dep = q.submit([&](sycl::handler& cgh) { cgh.depends_on(dep); fn(cgh); });
@@ -469,6 +470,7 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
             });
         });
     }
+    return dep;
 }
 
 } // namespace moe_sycl

@@ -1,0 +1,9 @@
+E 12
+H 2560
+I 640
+bits 2
+hb 0
+act 0
+gateless 0
+rows 1
+topk 10

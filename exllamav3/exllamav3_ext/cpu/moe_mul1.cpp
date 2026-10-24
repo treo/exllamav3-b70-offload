@@ -25,6 +25,7 @@
 #ifdef __linux__
 #include <pthread.h>
 #include <sched.h>
+#include <dlfcn.h>
 #else
 // min/max macro suppression is handled globally (-DNOMINMAX in setup.py): this TU uses
 // std::min/max/clamp throughout
@@ -62,6 +63,62 @@ namespace { std::atomic<bool> g_prof_enabled { false }; }
 void exl3_moe_cpu_set_prof(bool enabled)
 {
     g_prof_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+// -------------------------------------------------------------------------------------------
+//   Optional B70 (Level Zero / SYCL) expert-compute backend
+// -------------------------------------------------------------------------------------------
+//
+// EXL3_MOE_B70=1 routes registered layers' expert compute to an Intel Arc GPU through the
+// libb70moe plugin (dlopened; built from sycl_moe/). Weights stay in the CPU arena at layer
+// registration and are uploaded to the B70 once per layer; only token rows and outputs cross
+// PCIe per job. STAGE jobs and everything else remain CPU-side. The plugin's kernels read
+// NATIVE mul1 tiles, so the band swizzle is forced off while the backend is active (the CPU
+// kernels have a native path; this only trades a little CPU throughput for layout parity).
+
+struct B70Backend
+{
+    using InitFn = int (*)();
+    using RegFn = int64_t (*)(int, int, int, int, int, int, float, int,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*);
+    using FwdFn = void (*)(int64_t, const void*, const int32_t*, const void*, float*, int, int);
+    using FreeFn = void (*)(int64_t);
+
+    bool enabled = false;
+    bool usable = false;
+    InitFn init = nullptr;
+    RegFn register_layer = nullptr;
+    FwdFn forward = nullptr;
+    FreeFn free_layer = nullptr;
+
+    B70Backend()
+    {
+#ifdef __linux__
+        const char* e = std::getenv("EXL3_MOE_B70");
+        enabled = e && e[0] != '\0' && std::strcmp(e, "0") != 0;
+        if (!enabled) return;
+        const char* path = std::getenv("EXL3_MOE_B70_LIB");
+        void* h = dlopen(path && path[0] ? path : "libb70moe.so", RTLD_NOW | RTLD_LOCAL);
+        if (!h) {
+            fprintf(stderr, "[b70] dlopen failed (%s); falling back to CPU\n", dlerror());
+            return;
+        }
+        init = (InitFn)dlsym(h, "b70_init");
+        register_layer = (RegFn)dlsym(h, "b70_register_layer");
+        forward = (FwdFn)dlsym(h, "b70_forward");
+        free_layer = (FreeFn)dlsym(h, "b70_free_layer");
+        usable = init && register_layer && forward && free_layer && init() == 0;
+        if (!usable) fprintf(stderr, "[b70] plugin present but unusable; falling back to CPU\n");
+#endif
+    }
+};
+
+B70Backend& b70()
+{
+    static B70Backend b;
+    return b;
 }
 
 namespace {
@@ -3632,6 +3689,8 @@ bool exl3_moe_cpu_has_avx512_vbmi() { return g_isa == Isa::Vbmi; }
 // avx2_swz2 header comment); half rates stay native on this tier.
 int exl3_moe_cpu_swizzle_group(double K)
 {
+    // B70 compute reads native tiles; keep native bytes everywhere when it is active
+    if (b70().enabled) return 0;
     const int bits = static_cast<int>(K);
     if (g_isa >= Isa::Bw) return bits != 8 ? 8 : 0;
     if (g_isa == Isa::Avx2) return K == bits && bits >= 1 && bits <= 8 ? 2 : 0;
@@ -3730,6 +3789,29 @@ int64_t exl3_moe_cpu_make_layer
     TORCH_CHECK(layer->downs[0].k == layer->interm_size && layer->downs[0].n == layer->hidden_size,
                 "expert shape mismatch");
 
+    if (b70().usable) {
+        const size_t E2 = E;
+        auto ptrs = [&](const std::vector<at::Tensor>& v, std::vector<uint64_t>& o) {
+            o.clear();
+            for (auto& t : v) o.push_back((uint64_t)(uintptr_t)t.data_ptr());
+        };
+        std::vector<uint64_t> gt, gs, gv, gb2, ut, us, uv, ub, dt, ds2, dv, db;
+        ptrs(gate_trellis, gt); ptrs(gate_suh, gs); ptrs(gate_svh, gv); ptrs(gate_bias, gb2);
+        ptrs(up_trellis, ut);   ptrs(up_suh, us);   ptrs(up_svh, uv);   ptrs(up_bias, ub);
+        ptrs(down_trellis, dt); ptrs(down_suh, ds2); ptrs(down_svh, dv); ptrs(down_bias, db);
+        const bool gated2 = !gate_trellis.empty();
+        const int64_t h = b70().register_layer(
+            (int)E2, layer->hidden_size, layer->interm_size,
+            layer->ups[0].bits, layer->ups[0].hb,
+            layer->activation, layer->act_limit, gated2 ? 1 : 0,
+            gated2 ? gt.data() : nullptr, gated2 ? gs.data() : nullptr, gated2 ? gv.data() : nullptr,
+            gated2 && !gb2.empty() ? gb2.data() : nullptr,
+            ut.data(), us.data(), uv.data(), !ub.empty() ? ub.data() : nullptr,
+            dt.data(), ds2.data(), dv.data(), !db.empty() ? db.data() : nullptr);
+        if (h >= 0) layer->b70 = h;
+        else fprintf(stderr, "[b70] layer registration failed; this layer stays on CPU\n");
+    }
+
     std::lock_guard<std::mutex> lock(g_layers_mutex);
     g_layers.push_back(layer_owner.release());
     return static_cast<int64_t>(g_layers.size() - 1);
@@ -3740,6 +3822,8 @@ void exl3_moe_cpu_free_layer(int64_t handle)
     std::lock_guard<std::mutex> lock(g_layers_mutex);
     if (handle >= 0 && handle < static_cast<int64_t>(g_layers.size()))
     {
+        if (g_layers[handle] && g_layers[handle]->b70 >= 0 && b70().free_layer)
+            b70().free_layer(g_layers[handle]->b70);
         delete g_layers[handle];
         g_layers[handle] = nullptr;
     }
@@ -3810,6 +3894,10 @@ void exl3_moe_cpu_forward_raw(
 )
 {
     const MoeCpuLayer* layer = get_layer(handle);
+    if (layer->b70 >= 0 && b70().usable) {
+        b70().forward(layer->b70, x, sel, wts, out, rows, topk);
+        return;
+    }
     const int m_total = rows;
     const int top_k = topk;
 
