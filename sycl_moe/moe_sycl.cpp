@@ -10,6 +10,7 @@
 // buffered over k.
 #include "moe_sycl.hpp"
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace moe_sycl {
@@ -116,6 +117,105 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     (void)rows;
 }
 
+// ------------------------------------------------------------------ gemv functor
+//
+// K2 = 2*bits+hb as a compile-time constant (0 = runtime fallback). One lane owns one
+// output column; its 16 per-row ring addresses are computed once into apack (2x24-bit
+// entries per u64; anything with a dynamic index spills and tanks perf).
+
+struct GemvBase
+{
+    static constexpr int MAXM_ = 4;
+    const uintptr_t* tab;
+    const ChunkDev* chunks;
+    const float *tin, *tind;
+    float *tout, *toutd;
+    int E, nc, nm, H, I, nbk, tiles_n, tiles_k, gated, down;
+    int nsl;                 // k-slices per unit
+};
+
+template <int K2V>
+struct GemvK
+{
+    GemvBase b;
+    int rt_k2 = 0;    // used only when K2V == 0
+
+    void operator()(sycl::nd_item<1> it) const
+    {
+        const int k2 = K2V > 0 ? K2V : rt_k2;
+        constexpr int tile_u32_v = K2V > 0 ? 4 * K2V : 0;
+        const int tile_u32 = K2V > 0 ? tile_u32_v : 4 * k2;
+        const int unit = (int)it.get_group(0);
+        const int tid = (int)it.get_local_id(0);
+        const int sl = unit % b.nsl;
+        const int ub = unit / b.nsl;
+        const int blk = ub % b.nbk;
+        const int jmu = ub / b.nbk;
+        const int tk_lo = (b.tiles_k * sl) / b.nsl;
+        const int tk_hi = (b.tiles_k * (sl + 1)) / b.nsl;
+        const bool down = b.down != 0;
+        const int j = down ? jmu : jmu / b.nm;
+        const int lmu = down ? CAT_DOWN : jmu % b.nm;
+        const int cat = down ? CAT_DOWN : (b.gated ? lmu : CAT_UP);
+        const int mu = down ? 0 : (b.gated ? lmu : 0);
+        const int e = b.chunks[j].expert;
+        const int m = b.chunks[j].m;
+        const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[(F_TRI * 3 + cat) * b.E + e];
+        const float* src_tin = down ? b.tind + (size_t)j * GemvBase::MAXM_ * b.I
+                                    : b.tin + ((size_t)(j * 2 + mu) * GemvBase::MAXM_) * b.H;
+        const int K = down ? b.I : b.H;
+
+        const int cG = blk * 128 + tid;
+        const int tile_n = cG >> 4, cin = cG & 15;
+        unsigned long long apack[8] = {0,0,0,0,0,0,0,0};
+#pragma unroll
+        for (int rk = 0; rk < 16; ++rk) {
+            const int row = rk, col = cin;
+            const int bb = ((col & 7) << 2) | ((row >> 1) & 3);
+            const int jj = (row & 1) | ((row & 8) ? 2 : 0) | ((col & 8) ? 4 : 0);
+            const int t = (bb << 3) | jj;
+            const int b1 = K2V > 0 ? (((t + 1) * K2V) >> 1) + 128 * K2V
+                                   : (((t + 1) * k2) >> 1) + 128 * k2;
+            const int b0 = b1 - 16;
+            const int w0 = K2V > 0 ? (b0 >> 5) % tile_u32_v : (b0 >> 5) % tile_u32;
+            const int w1 = K2V > 0 ? ((b1 - 1) >> 5) % tile_u32_v : ((b1 - 1) >> 5) % tile_u32;
+            const int sh = (((b1 - 1) >> 5) + 1) * 32 - b1;
+            apack[rk >> 1] |= (unsigned long long)(w0 | (w1 << 8) | (sh << 16)) << ((rk & 1) * 24);
+        }
+#define MOE_GETADDR(rkc) ((unsigned)((apack[(rkc) >> 1] >> (((rkc) & 1) * 24)) & 0xffffffu))
+        float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+        const uint32_t* wp = w32 + ((size_t)tk_lo * b.tiles_n + tile_n) * tile_u32;
+        const float* tp = src_tin + tk_lo * 16;
+        const int tn_stride = (int)(b.tiles_n * tile_u32);
+        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += tn_stride, tp += 16) {
+#pragma unroll
+            for (int rk = 0; rk < 16; ++rk) {
+                const unsigned a = MOE_GETADDR(rk);
+                const uint32_t v0 = wp[a & 0xff], v1 = wp[(a >> 8) & 0xff];
+                const uint64_t merged = ((uint64_t)v0 << 32) | v1;
+                const uint32_t st16 = ((uint32_t)(merged >> (a >> 16))) & 0xffffu;
+                const uint32_t xm = st16 * 0x83DCD12Du;
+                const uint32_t t1 = (xm & 0x00ff00ffu) + ((xm >> 8) & 0x00ff00ffu);
+                const uint32_t bs = (t1 & 0xffffu) + (t1 >> 16);
+                const float wcomb = (float)(int)bs - 510.0f;
+                const float* xr = tp + rk;
+                acc0 = sycl::fma(wcomb, xr[0], acc0);
+                if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
+                if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
+                if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
+            }
+        }
+#undef MOE_GETADDR
+        const int N = down ? b.H : b.I;
+        float* dst = down ? b.toutd + ((size_t)j * b.nsl + sl) * GemvBase::MAXM_ * N
+                          : b.tout + ((size_t)(j * 2 + mu) * b.nsl + sl) * GemvBase::MAXM_ * N;
+        dst[cG] = acc0 * KDQ;
+        if (m > 1) dst[N + cG] = acc1 * KDQ;
+        if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
+        if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+    }
+};
+
 // ------------------------------------------------------------------ forward
 
 void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
@@ -203,82 +303,27 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
     }
 
     // ---- K2/K5: GEMV over mul1 tiles for one matrix class
-
+    const InvPerm invp = make_invperm();
+    GemvBase gb;
+    gb.nsl = 1;
+    gb.tab = d_tab; gb.chunks = w_chunk;
+    gb.tin = w_tin; gb.tout = w_tout; gb.tind = w_tind; gb.toutd = w_toutd;
+    gb.E = E; gb.nc = nc; gb.nm = nm; gb.H = H; gb.I = I; gb.gated = gated ? 1 : 0;
     auto gemv = [&](bool down) {
-        const int tiles_n = (down ? H : I) / 16;
-        const int tiles_k = (down ? I : H) / 16;
-        const int nbk = (down ? H : I) / 128;
-        const int units = down ? nc * nbk : nc * nm * nbk;
+        gb.tiles_n = (down ? H : I) / 16;
+        gb.tiles_k = (down ? I : H) / 16;
+        gb.nbk = (down ? H : I) / 128;
+        gb.down = down ? 1 : 0;
+        gb.nsl = getenv("MOE_NSL") ? atoi(getenv("MOE_NSL")) : 4;
+        const int units = (down ? nc * gb.nbk : nc * nm * gb.nbk) * gb.nsl;
         const size_t gn = (size_t)units * 128;
         launch([&](sycl::handler& cgh) {
-            cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), [=](sycl::nd_item<1> it) {
-                const int unit = (int)it.get_group(0);
-                const int tid = (int)it.get_local_id(0);
-                const int blk = unit % nbk;
-                const int jmu = unit / nbk;
-                const int j = down ? jmu : jmu / nm;
-                const int lmu = down ? CAT_DOWN : jmu % nm;
-                const int cat = down ? CAT_DOWN : (gated ? lmu : CAT_UP);
-                const int mu = down ? 0 : (gated ? lmu : 0);
-                const int e = chunks[j].expert;
-                const int m = chunks[j].m;
-                const uint32_t* w32 = (const uint32_t*)(uintptr_t)tab[(F_TRI * 3 + cat) * E + e];
-                const float* src_tin = down ? tind + (size_t)j * MAXM * I
-                                            : tin + ((size_t)(j * 2 + mu) * MAXM) * H;
-                const int K = down ? I : H;
-
-                const int cG = blk * 128 + tid;
-                const int tile_n = cG >> 4, cin = cG & 15;
-                // ring addresses for this column's 16 states, packed 4-per-u64 so the unrolled
-                // loop uses register-indexed extraction (a stack array here spills to local
-                // memory and tanks the kernel ~100x; see NOTES.md)
-                unsigned long long apack[8] = {0,0,0,0,0,0,0,0};
-#pragma unroll
-                for (int rk = 0; rk < 16; ++rk) {
-                    // closed-form inverse tc_perm: idx = row*16+col -> state slot t
-                    const int row = rk, col = cin;
-                    const int b = ((col & 7) << 2) | ((row >> 1) & 3);
-                    const int jj = (row & 1) | ((row & 8) ? 2 : 0) | ((col & 8) ? 4 : 0);
-                    const int t = (b << 3) | jj;
-                    const int b1 = (((t + 1) * k2) >> 1) + 128 * k2;
-                    const int b0 = b1 - 16;
-                    const int w0 = (b0 >> 5) % tile_u32;
-                    const int w1 = ((b1 - 1) >> 5) % tile_u32;
-                    const int sh = (((b1 - 1) >> 5) + 1) * 32 - b1;
-                    apack[rk >> 1] |= (unsigned long long)(w0 | (w1 << 8) | (sh << 16)) << ((rk & 1) * 24);
-                }
-#define MOE_GETADDR(rkc) ((unsigned)((apack[(rkc) >> 1] >> (((rkc) & 1) * 24)) & 0xffffffu))
-                // per-row tin pointer values for this k-step (loaded straight from global;
-                // uniform within the work group)
-                float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
-                const uint32_t* wp = w32 + (size_t)tile_n * tile_u32;
-                const float* tp = src_tin;
-                for (int tk = 0; tk < tiles_k; ++tk, wp += (size_t)tiles_n * tile_u32, tp += 16) {
-#pragma unroll
-                    for (int rk = 0; rk < 16; ++rk) {
-                        const unsigned a = MOE_GETADDR(rk);
-                        const uint32_t v0 = wp[a & 0xff], v1 = wp[(a >> 8) & 0xff];
-                        const uint64_t merged = ((uint64_t)v0 << 32) | v1;
-                        const uint32_t st16 = ((uint32_t)(merged >> (a >> 16))) & 0xffffu;
-                        const uint32_t xm = st16 * 0x83DCD12Du;
-                        const float wcomb = (float)((xm & 0xff) + ((xm >> 8) & 0xff) +
-                                                    ((xm >> 16) & 0xff) + (xm >> 24)) - 510.0f;
-                        const float* xr = tp + rk;
-                        acc0 = sycl::fma(wcomb, xr[0], acc0);
-                        if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
-                        if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
-                        if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
-                    }
-                }
-#undef MOE_GETADDR
-                const int N = down ? H : I;
-                float* dst = down ? toutd + (size_t)j * MAXM * N
-                                  : tout + ((size_t)(j * 2 + mu) * MAXM) * N;
-                dst[cG] = acc0 * KDQ;
-                if (m > 1) dst[N + cG] = acc1 * KDQ;
-                if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
-                if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
-            });
+            switch (k2) {
+                case 4: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4>{gb}); break;
+                case 5: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5>{gb}); break;
+                case 8: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8>{gb}); break;
+                default: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<0>{gb, k2}); break;
+            }
         });
     };
 
@@ -300,8 +345,13 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
                 const uint16_t* svhu = (const uint16_t*)tab[(F_SVH * 3 + CAT_UP) * E + e];
                 const uint16_t* bu   = (const uint16_t*)tab[(F_BIAS * 3 + CAT_UP) * E + e];
                 const int mu_up = gated ? 1 : 0;   // gateless gemv stored up at slot j*2+0
-                const float* tg = tout + ((size_t)(j * 2) * MAXM) * I;
-                const float* tu = tout + ((size_t)(j * 2 + mu_up) * MAXM) * I;
+                auto sum_sl = [&](const float* base, size_t idx) {
+                    float s = 0.f;
+                    for (int q = 0; q < NSL_C; ++q) s += base[(size_t)q * MAXM * I + idx];
+                    return s;
+                };
+                const float* tg = tout + (size_t)(j * 2) * NSL_C * MAXM * I;
+                const float* tu = tout + (size_t)(j * 2 + mu_up) * NSL_C * MAXM * I;
                 float hg = 0.f, bi = 0.f;
                 if (gated) {
                     const uint16_t* svhg = (const uint16_t*)tab[(F_SVH * 3 + CAT_GATE) * E + e];

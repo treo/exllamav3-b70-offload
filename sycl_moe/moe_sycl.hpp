@@ -61,6 +61,7 @@ public:
 
     // profiling: keep an event per submitted kernel (memcpys stay chained but untracked)
     bool prof = false;
+    bool int8 = true;                // int8-accumulate GEMV (mirrors CPU VNNI/AVX2 tiers)
     const std::vector<sycl::event>& events() const { return pev; }
 
     // debug access to workspaces (device pointers)
@@ -79,6 +80,10 @@ private:
     char* h_blob2 = nullptr;
     bool h_flip = false;
     float *w_tin = nullptr;          // nc x 2 x 4 x H
+    int32_t* w_tinq = nullptr;       // nc x 2 x 4 x H, int8 in low byte of each i32
+    int32_t* w_rowc = nullptr;       // nc x 2 x 4 x 2: {q, sum_x8} per gemv row
+    int32_t* w_tindq = nullptr;      // nc x 4 x I quantized
+    int32_t* w_rowcd = nullptr;      // nc x 4 x 2
     float *w_tout = nullptr;         // nc x 2 x 4 x I
     float *w_h = nullptr;            // nc x 4 x I
     float *w_tind = nullptr;         // nc x 4 x I

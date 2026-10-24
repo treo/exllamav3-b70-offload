@@ -8,6 +8,8 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <map>
+#include <fstream>
 #include "exl3_ref.h"
 #include "moe_host_ref.hpp"
 #include "moe_sycl.hpp"
@@ -19,6 +21,7 @@ struct Args
     int E = 16, rows = 1, topk = 10, bits = 2, hb = 0, act = 0, iters = 50;
     bool gated = true, check = true, verbose = false;
     uint64_t seed = 7;
+    const char* load = nullptr;
 };
 
 int main(int argc, char** argv)
@@ -37,6 +40,7 @@ int main(int argc, char** argv)
         else if (s == "--nocheck") a.check = false;
         else if (s == "--gateless") a.gated = false;
         else if (s == "--v") a.verbose = true;
+        else if (s == "--load") a.load = argv[++i];
         else { printf("unknown arg %s\n", s.c_str()); return 1; }
     }
     if (!a.gated && a.act != 2) { printf("gateless => act=2 (relu2)\n"); a.act = 2; }
@@ -48,6 +52,124 @@ int main(int argc, char** argv)
 
     exl3ref::Rng rng(a.seed);
     const int pu = exl3ref::tile_u16(a.bits, a.hb);
+
+    if (a.load) {
+        // ---- load a layer + inputs + CPU reference output produced by xval_cpu.py ----
+        const std::string dir(a.load);
+        auto kv = [&](void) {};
+        std::map<std::string, std::string> meta;
+        { std::ifstream mf(dir + "/meta.txt"); std::string k, v; while (mf >> k >> v) meta[k] = v; }
+        a.E = std::stoi(meta["E"]); a.rows = std::stoi(meta["rows"]); a.topk = std::stoi(meta["topk"]);
+        a.bits = std::stoi(meta["bits"]); a.hb = std::stoi(meta["hb"]); a.act = std::stoi(meta["act"]);
+        a.gated = std::stoi(meta["gateless"]) == 0;
+        const int E = a.E, rows = a.rows, topk = a.topk, act = a.act;
+        const int pu2 = exl3ref::tile_u16(a.bits, a.hb);
+        auto load_vec = [&](const std::string& name, size_t count) {
+            std::vector<uint16_t> v(count);
+            std::ifstream f(dir + "/" + name + ".bin", std::ios::binary);
+            if (!f) { printf("missing %s\n", name.c_str()); exit(1); }
+            f.read((char*)v.data(), count * 2);
+            return v;
+        };
+        moe_ref::Layer L2;
+        L2.hidden = H; L2.interm = I; L2.bits = a.bits; L2.hb = a.hb;
+        L2.activation = act; L2.act_limit = 0.f; L2.gated = a.gated;
+        std::vector<MatrixSrc> gs(E), us(E), ds(E);
+        std::vector<std::vector<uint16_t*> > keepers;
+        auto up16 = [&](const std::vector<uint16_t>& v) {
+            uint16_t* p = sycl::malloc_device<uint16_t>(v.size(), q);
+            keepers.push_back({p});
+            q.memcpy(p, v.data(), v.size() * 2).wait();
+            return (const uint16_t*)p;
+        };
+        for (int e = 0; e < E; ++e) {
+            moe_ref::Matrix m;
+            auto fill = [&](MatrixSrc& d, const char* pre, int k, int n) {
+                auto tr = load_vec(std::string(pre) + "_tr_" + std::to_string(e), (size_t)(k/16)*(n/16)*pu2);
+                auto suh = load_vec(std::string(pre) + "_suh_" + std::to_string(e), k);
+                auto svh = load_vec(std::string(pre) + "_svh_" + std::to_string(e), n);
+                d.trellis = up16(tr); d.suh = up16(suh); d.svh = up16(svh); d.bias = nullptr;
+                m.trellis = std::move(tr); m.suh = std::move(suh); m.svh = std::move(svh);
+            };
+            if (a.gated) { fill(gs[e], "gate", H, I); L2.gates.push_back(m); }
+            m = moe_ref::Matrix{}; fill(us[e], "up", H, I);
+            m.k = H; m.n = I; L2.ups.push_back(m);
+            m = moe_ref::Matrix{}; fill(ds[e], "down", I, H);
+            m.k = I; m.n = H; L2.downs.push_back(m);
+        }
+        auto hx2 = load_vec("x", (size_t)rows * H);
+        std::vector<int> sel2((size_t)rows * topk);
+        { std::ifstream f(dir + "/sel.bin", std::ios::binary); f.read((char*)sel2.data(), sel2.size() * 4); }
+        auto wts2 = load_vec("wts", (size_t)rows * topk);
+        std::vector<float> ref_out((size_t)rows * H);
+        { std::ifstream f(dir + "/out_cpu.bin", std::ios::binary); f.read((char*)ref_out.data(), ref_out.size() * 4); }
+
+        // chunks (expert-asc, MAX_M=4) + CSR, same grouping as the CPU forward
+        std::vector<std::vector<std::pair<int, float>>> per_expert(E);
+        for (int t = 0; t < rows; ++t)
+            for (int j = 0; j < topk; ++j)
+                per_expert[sel2[(size_t)t * topk + j]].emplace_back(
+                    t, exl3ref::f16_to_f32(wts2[(size_t)t * topk + j]));
+        std::vector<ChunkDev> chunks;
+        for (int e = 0; e < E; ++e) {
+            auto& lst = per_expert[e];
+            for (size_t i = 0; i < lst.size(); i += 4) {
+                ChunkDev ch{};
+                ch.expert = e;
+                ch.m = (int)std::min<size_t>(4, lst.size() - i);
+                for (int r = 0; r < ch.m; ++r) { ch.token[r] = lst[i + r].first; ch.weight[r] = lst[i + r].second; }
+                chunks.push_back(ch);
+            }
+        }
+        TokenMap tmap;
+        {
+            std::vector<std::vector<int>> tok(rows);
+            for (size_t j = 0; j < chunks.size(); ++j)
+                for (int r = 0; r < chunks[j].m; ++r)
+                    tok[chunks[j].token[r]].push_back((int)j * 4 + r);
+            tmap.begin.assign(rows + 1, 0);
+            for (int t = 0; t < rows; ++t) {
+                tmap.begin[t] = (int)tmap.entry.size();
+                for (int x : tok[t]) tmap.entry.push_back(x);
+            }
+            tmap.begin[rows] = (int)tmap.entry.size();
+        }
+        LayerParams p2;
+        p2.num_experts = E; p2.hidden = H; p2.interm = I; p2.bits = a.bits; p2.hb = a.hb;
+        p2.activation = act; p2.act_limit = 0.f; p2.gated = a.gated;
+        MoeSyclLayer layer2;
+        layer2.init(&q, p2, gs, us, ds);
+        uint16_t* dx2 = sycl::malloc_device<uint16_t>(hx2.size(), q);
+        float* dout2 = sycl::malloc_device<float>(ref_out.size(), q);
+        q.memcpy(dx2, hx2.data(), hx2.size() * 2).wait();
+        layer2.forward(chunks.data(), (int)chunks.size(), tmap, dx2, dout2, rows);
+        q.wait();
+        std::vector<float> got(ref_out.size());
+        q.memcpy(got.data(), dout2, got.size() * 4).wait();
+        double se = 0, ss = 0, maxrel = 0; size_t worst = 0;
+        for (size_t i = 0; i < got.size(); ++i) {
+            const double d = std::fabs((double)ref_out[i] - got[i]);
+            se += d * d; ss += (double)ref_out[i] * ref_out[i];
+            const double r = d / (std::fabs((double)ref_out[i]) + 1e-12);
+            if (r > maxrel && d > 1e-4 * std::sqrt(ss / got.size())) { maxrel = r; worst = i; }
+        }
+        printf("xval vs CPU: rms_rel %.3e  worst(abs>1e-4*rms) %.3e @%zu (cpu %g gpu %g)  ref_rms %.3e\n",
+               std::sqrt(se / std::max(ss, 1e-300)), maxrel, worst, ref_out[worst], got[worst],
+               std::sqrt(ss / got.size()));
+        // bench GPU forward with this shape
+        for (int i = 0; i < 5; ++i) layer2.forward(chunks.data(), (int)chunks.size(), tmap, dx2, dout2, rows);
+        q.wait();
+        std::vector<float> times;
+        for (int i = 0; i < a.iters; ++i) {
+            auto t0 = std::chrono::steady_clock::now();
+            layer2.forward(chunks.data(), (int)chunks.size(), tmap, dx2, dout2, rows);
+            q.wait();
+            times.push_back(std::chrono::duration<float, std::micro>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::sort(times.begin(), times.end());
+        printf("xval bench: median %.1f us (wall incl sync)\n", times[times.size() / 2]);
+        return 0;
+    }
 
     // ---------------------------------------------------- synthetic layer weights
     moe_ref::Layer L;

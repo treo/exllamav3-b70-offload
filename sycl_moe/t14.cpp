@@ -42,7 +42,20 @@ void run(sycl::queue& q, uint32_t* w, float* tin, float* out, int NC, int NM, in
                 for (int tk = 0; tk < TK; ++tk, wp += (size_t)tiles_n * tile_u32, tp += 16) {
     #pragma unroll
                     for (int rk = 0; rk < 16; ++rk) {
-                        const unsigned a = MODE == 5 ? (unsigned)(rk / 2 | ((rk / 2) << 8) | (16 << 16)) : (unsigned)GETADDR(rk);
+                        unsigned a;
+                        if (MODE == 7) {
+                            const int row = rk;
+                            const int b = ((cin & 7) << 2) | ((row >> 1) & 3);
+                            const int jj = (row & 1) | ((row & 8) ? 2 : 0) | ((cin & 8) ? 4 : 0);
+                            const int t = (b << 3) | jj;
+                            const int bb1 = (((t + 1) * k2) >> 1) + 128 * k2;
+                            const int bb0 = bb1 - 16;
+                            a = (unsigned)(((bb0 >> 5) % tile_u32) | ((((bb1 - 1) >> 5) % tile_u32) << 8) | (((((bb1 - 1) >> 5) + 1) * 32 - bb1) << 16));
+                        } else if (MODE == 5) {
+                            a = (unsigned)(rk / 2 | ((rk / 2) << 8) | (16 << 16));
+                        } else {
+                            a = (unsigned)GETADDR(rk);
+                        }
                         const uint32_t v0 = wp[a & 0xff], v1 = wp[(a >> 8) & 0xff];
                         if (MODE == 0) { acc += (float)(v0 + v1); continue; }
                         const uint64_t merged = ((uint64_t)v0 << 32) | v1;
@@ -51,6 +64,7 @@ void run(sycl::queue& q, uint32_t* w, float* tin, float* out, int NC, int NM, in
                         const uint32_t xm = st16 * 0x83DCD12Du;
                         if (MODE == 2) { acc += (float)xm; continue; }
                         if (MODE == 5) { acc += (float)st16; continue; }
+                        if (MODE == 7 && rk == 0) acc += 0.f;  // keep st path
                         const float wcomb = (float)((xm & 0xff) + ((xm >> 8) & 0xff) +
                                                     ((xm >> 16) & 0xff) + (xm >> 24)) - 510.0f;
                         if (MODE == 3) { acc += wcomb; continue; }
@@ -84,5 +98,6 @@ int main() {
     run<4>(q, w, tin, out, NC, NM, TK, TNB, K);
     run<5>(q, w, tin, out, NC, NM, TK, TNB, K);
     run<6>(q, w, tin, out, NC, NM, TK, TNB, K);
+    run<7>(q, w, tin, out, NC, NM, TK, TNB, K);
     return 0;
 }
