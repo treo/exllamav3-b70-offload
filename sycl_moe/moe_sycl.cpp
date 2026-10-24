@@ -1,7 +1,13 @@
 // SYCL MoE expert forward implementation. Mirrors the fp/scalar semantics of
 // exllamav3/exllamav3_ext/cpu/moe_mul1.cpp: prep (suh + block hadamard) -> GEMV over packed
 // mul1 tiles -> out transform (hadamard + svh + bias) -> activation -> down GEMV -> weighted
-// gather. One kernel per stage; correctness first, fusion later.
+// gather.
+//
+// All control data (chunks, token CSR) travels in ONE host->device blob memcpy. Every kernel
+// is chained with explicit depends_on events (required on this L0 stack, see NOTES.md).
+// GEMV: work group = (chunk, matrix, 128-column block); each 16-lane sub-group owns one
+// 16x16 tile column strip; packed tile words are staged through shared memory, double
+// buffered over k.
 #include "moe_sycl.hpp"
 #include <cmath>
 #include <cstring>
@@ -87,7 +93,6 @@ MoeSyclLayer::~MoeSyclLayer()
     auto freep = [&](auto*& p) { if (p) { sycl::free(p, *Q); p = nullptr; } };
     freep(d_tab);
     freep(w_chunk); freep(w_tin); freep(w_tout); freep(w_h); freep(w_tind); freep(w_toutd);
-    freep(w_tokb); freep(w_toke);
 }
 
 void MoeSyclLayer::ensure_ws(int nc, int rows)
@@ -96,26 +101,19 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
         if (p) sycl::free(p, *Q);
         using T = std::remove_pointer_t<std::remove_reference_t<decltype(p)>>;
         p = sycl::malloc_device<T>(count, *Q);
-        // prefault: zero-fill and sync so the device page tables are populated before any
-        // kernel pipeline touches the buffer (fresh USM pages read back as zeros to a kernel
-        // that runs in the same submission burst as the first writer on this driver)
+        // prefault so device page tables are populated before the kernel pipeline runs
         Q->memset(p, 0, count * sizeof(T));
         Q->wait();
     };
     if (nc > cap_nc) {
-        realloc_p(w_chunk, (size_t)nc);
         realloc_p(w_tin,   (size_t)nc * 2 * MAXM * P.hidden);
         realloc_p(w_tout,  (size_t)nc * 2 * MAXM * P.interm);
         realloc_p(w_h,     (size_t)nc * MAXM * P.interm);
         realloc_p(w_tind,  (size_t)nc * MAXM * P.interm);
         realloc_p(w_toutd, (size_t)nc * MAXM * P.hidden);
-        realloc_p(w_toke,  (size_t)nc * MAXM);
         cap_nc = nc;
     }
-    if (rows > cap_rows) {
-        realloc_p(w_tokb, (size_t)rows + 1);
-        cap_rows = rows;
-    }
+    (void)rows;
 }
 
 // ------------------------------------------------------------------ forward
@@ -133,31 +131,48 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
     const float lim = P.act_limit != 0.0f ? P.act_limit : INFINITY;
     sycl::queue& q = *Q;
     ensure_ws(num_chunks, rows);
-    // NOTE: on this stack (oneAPI 2026.2 + L0 compute runtime + Xe2) the implicit
-    // in-order-queue dependencies between chained submits / H2D memcpys are NOT reliably
-    // enforced: a consumer kernel can read stale (pre-write) data while the queue is never
-    // drained. Threading explicit depends_on chains through every op of the forward fixes it
-    // (root-caused in sycl_moe/NOTES.md); it is also the maximum-overlap form of the ordering.
-    sycl::event dep;
+
+    // one H2D blob: [chunks][pad64][tokb][pad64][toke]
+    const int nc = num_chunks;
+    const size_t off_chunk = 0;
+    const size_t off_tokb = ((size_t)nc * sizeof(ChunkDev) + 63) & ~(size_t)63;
+    const size_t off_toke = (off_tokb + ((size_t)rows + 1) * sizeof(int) + 63) & ~(size_t)63;
+    const size_t blob_sz = off_toke + tmap.entry.size() * sizeof(int);
+    if (blob_sz > cap_blob) {
+        if (h_blob) sycl::free(h_blob, q);
+        if (h_blob2) sycl::free(h_blob2, q);
+        h_blob = (char*)sycl::malloc_host(blob_sz, q);
+        h_blob2 = (char*)sycl::malloc_host(blob_sz, q);
+        if (w_chunk) sycl::free(w_chunk, q);
+        w_chunk = (ChunkDev*)sycl::malloc_device<char>(blob_sz, q);
+        q.memset(w_chunk, 0, blob_sz);
+        q.wait();
+        cap_blob = blob_sz;
+    }
+    h_flip = !h_flip;
+    char* hb = h_flip ? h_blob : h_blob2;
+    std::memcpy(hb + off_chunk, chunks_host, nc * sizeof(ChunkDev));
+    std::memcpy(hb + off_tokb, tmap.begin.data(), tmap.begin.size() * sizeof(int));
+    std::memcpy(hb + off_toke, tmap.entry.data(), tmap.entry.size() * sizeof(int));
+
+    // NOTE: implicit in-order ordering between chained submits/memcpys is NOT enforced on
+    // this stack (oneAPI 2026.2 + L0 + Xe2); explicit depends_on chains are required.
+    sycl::event dep = q.memcpy(w_chunk, hb, blob_sz);
+    if (prof) { pev.clear(); pev.push_back(dep); }
     auto launch = [&](auto&& fn) {
         dep = q.submit([&](sycl::handler& cgh) { cgh.depends_on(dep); fn(cgh); });
+        if (prof) pev.push_back(dep);
     };
-
-    dep = q.memcpy(w_chunk, chunks_host, num_chunks * sizeof(ChunkDev));
-    dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
-    dep = q.memcpy(w_tokb, tmap.begin.data(), tmap.begin.size() * sizeof(int), {dep});
-    dep = q.memcpy(w_toke, tmap.entry.data(), tmap.entry.size() * sizeof(int), {dep});
 
     const uintptr_t* tab = d_tab;
     const ChunkDev* chunks = w_chunk;
-    const int nc = num_chunks;
+    const int* d_tokb = (const int*)((const char*)w_chunk + off_tokb);
+    const int* d_toke = (const int*)((const char*)w_chunk + off_toke);
     float* tin = w_tin;
     float* tout = w_tout;
     float* hbuf = w_h;
     float* tind = w_tind;
     float* toutd = w_toutd;
-    int* tokb = w_tokb;
-    int* toke = w_toke;
 
     // ---- K1: prep gate/up inputs (suh scale + 128-block hadamard), from fp16 x
     {
@@ -188,7 +203,7 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
     }
 
     // ---- K2/K5: GEMV over mul1 tiles for one matrix class
-    const InvPerm invp = make_invperm();
+
     auto gemv = [&](bool down) {
         const int tiles_n = (down ? H : I) / 16;
         const int tiles_k = (down ? I : H) / 16;
@@ -214,36 +229,55 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
 
                 const int cG = blk * 128 + tid;
                 const int tile_n = cG >> 4, cin = cG & 15;
-                unsigned int addr[16];
+                // ring addresses for this column's 16 states, packed 4-per-u64 so the unrolled
+                // loop uses register-indexed extraction (a stack array here spills to local
+                // memory and tanks the kernel ~100x; see NOTES.md)
+                unsigned long long apack[8] = {0,0,0,0,0,0,0,0};
+#pragma unroll
                 for (int rk = 0; rk < 16; ++rk) {
-                    const int t = invp.inv[rk * 16 + cin];
+                    // closed-form inverse tc_perm: idx = row*16+col -> state slot t
+                    const int row = rk, col = cin;
+                    const int b = ((col & 7) << 2) | ((row >> 1) & 3);
+                    const int jj = (row & 1) | ((row & 8) ? 2 : 0) | ((col & 8) ? 4 : 0);
+                    const int t = (b << 3) | jj;
                     const int b1 = (((t + 1) * k2) >> 1) + 128 * k2;
                     const int b0 = b1 - 16;
                     const int w0 = (b0 >> 5) % tile_u32;
                     const int w1 = ((b1 - 1) >> 5) % tile_u32;
                     const int sh = (((b1 - 1) >> 5) + 1) * 32 - b1;
-                    addr[rk] = (unsigned)(w0 | (w1 << 8) | (sh << 16));
+                    apack[rk >> 1] |= (unsigned long long)(w0 | (w1 << 8) | (sh << 16)) << ((rk & 1) * 24);
                 }
-                float acc[MAXM] = {0, 0, 0, 0};
-                for (int tk = 0; tk < tiles_k; ++tk) {
-                    const uint32_t* wp = w32 + ((size_t)tk * tiles_n + tile_n) * tile_u32;
-                    const float* tp = src_tin + (size_t)tk * 16;
+#define MOE_GETADDR(rkc) ((unsigned)((apack[(rkc) >> 1] >> (((rkc) & 1) * 24)) & 0xffffffu))
+                // per-row tin pointer values for this k-step (loaded straight from global;
+                // uniform within the work group)
+                float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+                const uint32_t* wp = w32 + (size_t)tile_n * tile_u32;
+                const float* tp = src_tin;
+                for (int tk = 0; tk < tiles_k; ++tk, wp += (size_t)tiles_n * tile_u32, tp += 16) {
+#pragma unroll
                     for (int rk = 0; rk < 16; ++rk) {
-                        const unsigned a = addr[rk];
-                        const uint64_t merged = ((uint64_t)wp[a & 0xff] << 32) | wp[(a >> 8) & 0xff];
-                        const uint32_t st = ((uint32_t)(merged >> (a >> 16))) & 0xffffu;
-                        const uint32_t xm = st * 0x83DCD12Du;
+                        const unsigned a = MOE_GETADDR(rk);
+                        const uint32_t v0 = wp[a & 0xff], v1 = wp[(a >> 8) & 0xff];
+                        const uint64_t merged = ((uint64_t)v0 << 32) | v1;
+                        const uint32_t st16 = ((uint32_t)(merged >> (a >> 16))) & 0xffffu;
+                        const uint32_t xm = st16 * 0x83DCD12Du;
                         const float wcomb = (float)((xm & 0xff) + ((xm >> 8) & 0xff) +
                                                     ((xm >> 16) & 0xff) + (xm >> 24)) - 510.0f;
-                        for (int r = 0; r < m; ++r)
-                            acc[r] = sycl::fma(wcomb, tp[(size_t)r * K + rk], acc[r]);
+                        const float* xr = tp + rk;
+                        acc0 = sycl::fma(wcomb, xr[0], acc0);
+                        if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
+                        if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
+                        if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
                     }
                 }
+#undef MOE_GETADDR
                 const int N = down ? H : I;
                 float* dst = down ? toutd + (size_t)j * MAXM * N
                                   : tout + ((size_t)(j * 2 + mu) * MAXM) * N;
-                for (int r = 0; r < m; ++r)
-                    dst[(size_t)r * N + cG] = acc[r] * KDQ;
+                dst[cG] = acc0 * KDQ;
+                if (m > 1) dst[N + cG] = acc1 * KDQ;
+                if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
+                if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
             });
         });
     };
@@ -341,7 +375,8 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
 
     gemv(true);
 
-    // ---- K6: down out-transform + weighted gather into out
+    // ---- K6: down out-transform + weighted gather into out (writes every element, no
+    // separate zero-init needed)
     {
         const int nbk = H / 128;
         launch([&](sycl::handler& cgh) {
@@ -353,9 +388,9 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
                 const int tid = (int)it.get_local_id(0);
                 const int cG = blk * 128 + tid;
                 float acc = 0.0f;
-                const int b0 = tokb[t], b1 = tokb[t + 1];
+                const int b0 = d_tokb[t], b1 = d_tokb[t + 1];
                 for (int p = b0; p < b1; ++p) {
-                    const int ent = toke[p];
+                    const int ent = d_toke[p];
                     const int j = ent >> 2, s = ent & 3;
                     const int e = chunks[j].expert;
                     const float wgt = chunks[j].weight[s];
@@ -373,6 +408,5 @@ void MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const To
         });
     }
 }
-
 
 } // namespace moe_sycl

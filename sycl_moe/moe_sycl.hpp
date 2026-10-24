@@ -59,6 +59,10 @@ public:
 
     const LayerParams& params() const { return P; }
 
+    // profiling: keep an event per submitted kernel (memcpys stay chained but untracked)
+    bool prof = false;
+    const std::vector<sycl::event>& events() const { return pev; }
+
     // debug access to workspaces (device pointers)
     float* ws(int i) { return i == 0 ? w_tin : i == 1 ? w_tout : i == 2 ? w_h : i == 3 ? w_tind : w_toutd; }
 
@@ -66,9 +70,14 @@ private:
     sycl::queue* Q = nullptr;
     LayerParams P;
     int cap_nc = 0, cap_rows = 0;
+    std::vector<sycl::event> pev;
 
     uintptr_t* d_tab = nullptr;      // 12 x E pointer table (see TabField/cats in .cpp)
-    ChunkDev* w_chunk = nullptr;
+    ChunkDev* w_chunk = nullptr;   // also holds the token CSR blob behind the chunks
+    size_t cap_blob = 0;           // bytes allocated for w_chunk
+    char* h_blob = nullptr;        // pinned host staging for the control blob (ping-pong)
+    char* h_blob2 = nullptr;
+    bool h_flip = false;
     float *w_tin = nullptr;          // nc x 2 x 4 x H
     float *w_tout = nullptr;         // nc x 2 x 4 x I
     float *w_h = nullptr;            // nc x 4 x I

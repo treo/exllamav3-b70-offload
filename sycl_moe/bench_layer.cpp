@@ -347,6 +347,7 @@ int main(int argc, char** argv)
 
     // ---------------------------------------------------- bench
     // warmup
+    layer.prof = a.verbose;
     for (int i = 0; i < 5; ++i) layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
     q.wait();
     std::vector<float> times;
@@ -357,6 +358,15 @@ int main(int argc, char** argv)
         e0.wait(); e1.wait();
         times.push_back((float)(e1.get_profiling_info<sycl::info::event_profiling::command_end>() -
                                 e0.get_profiling_info<sycl::info::event_profiling::command_end>()) * 1e-3f);
+    }
+    if (a.verbose) {
+        const char* names[6] = {"K1 prep_gu", "K2 gemv_gu", "K3 act", "K4 prep_d", "K5 gemv_d", "K6 gather"};
+        printf("per-kernel us (last iter):\n");
+        auto& evs = layer.events();
+        for (size_t kk = 0; kk + 1 < evs.size() && kk < 6; ++kk)
+            printf("  %-12s %8.1f\n", names[kk],
+                (double)(evs[kk + 1].get_profiling_info<sycl::info::event_profiling::command_end>() -
+                         evs[kk].get_profiling_info<sycl::info::event_profiling::command_end>()) * 1e-3);
     }
     std::sort(times.begin(), times.end());
     const float med = times[times.size() / 2];
