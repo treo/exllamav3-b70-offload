@@ -457,3 +457,8 @@ NEXT levers (not this session):
   - m=1 decode int8 mode: single-slot (127) quantization when m==1 && no wide rows, nsl
     tuning for the 8-kernel pipeline, and skip the vl half of the affine at m=1 (2 of 8
     fragment rows instead of 8).
+
+Production C-ABI per-forward (bench_b70_py.py on xval_s, rows=1, this build):
+  fp32 tier 110.7 us (rms 6.05e-7 vs ext) | int8-forced 124.0 us (rms 1.36e-3).
+The synthetic bench_layer rows=1 penalty (-20~35%) largely vanishes through the real
+handoff path (fixed ~40us of submit/handoff amortized); auto still keeps m=1 on fp32.

@@ -119,13 +119,15 @@ The win is proportional to how much of the model the 3090 can't hold: at `-mcs 2
 
 ```bash
 cd sycl_moe
-icpx -fsycl -O3 moe_sycl.cpp bench_layer.cpp -o bench_layer
+icpx -fsycl -O3 -ffp-contract=off -foffload-fp32-prec-div moe_sycl.cpp bench_layer.cpp -o bench_layer
 ./bench_layer --e 12 --rows 1 --topk 10 --iters 50         # checks against fp32 host ref
 ./bench_layer --e 12 --rows 1 --topk 10 --iters 50 --v     # + per-kernel spans/gaps
 ./bench_layer --bits 2 --hb 1 ...                          # 2.5bpw tile family (K=5)
 ./bench_layer --bits 4 --hb 6 ...                          # 4.5bpw family (K2=14 fallback)
 ./bench_layer --gateless ...                               # relu2 gateless experts
 ./bench_layer --e 12 --rows 1 --topk 10 --act 1            # gelu-erf (0=silu default, 3=swiglu_oai)
+EXL3_MOE_B70_INT8=1 ./bench_layer ... --i8trace            # int8 tier + per-stage integer verifier
+                                                         # (stages B..G must all print OK)
 ```
 
 Methodology note (cost us a day, see NOTES.md): **never A/B with `--v`** — SYCL
