@@ -65,7 +65,10 @@ and, on over-budget / device failure (never fatal):
 ```
 
 If the plugin is missing or no SYCL GPU exists, everything falls back to the CPU worker
-silently (`[b70] dlopen failed; falling back to CPU` / `plugin present but unusable`).
+silently (`[b70] dlopen failed; falling back to CPU` / `[b70moe] no SYCL GPU: ...`).
+Caveat: a *malformed* `ONEAPI_DEVICE_SELECTOR` value (e.g. `opencl:none`) aborts inside the
+oneAPI runtime during dlopen, before any plugin code runs — the selector is parsed by
+adapter static init. Use a valid value or unset it.
 
 ## Benchmarks
 

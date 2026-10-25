@@ -13,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 #include <mutex>
+#include <exception>
 #include <vector>
 #include "moe_sycl.hpp"
 using moe_sycl::g_alloc_bytes;
@@ -47,7 +48,18 @@ bool ensure_ctx()
     std::lock_guard<std::mutex> lk(g.mu);
     if (g.ok) return true;
     try {
-        static sycl::queue queue{sycl::gpu_selector_v};
+        // NOTE the explicit async_handler: the DEFAULT one calls std::terminate, and this
+        // stack routes some device-selector/adapter init failures through the async path
+        // (e.g. a malformed ONEAPI_DEVICE_SELECTOR kills the worker despite try/catch).
+        static sycl::queue queue{sycl::gpu_selector_v,
+                                 sycl::async_handler{[](sycl::exception_list el) {
+                                     for (auto& e : el) {
+                                         try { std::rethrow_exception(e); }
+                                         catch (const sycl::exception& se) {
+                                             fprintf(stderr, "[b70moe] async: %s\n", se.what());
+                                         } catch (...) {}
+                                     }
+                                 }}};
         g.q = &queue;
         printf("[b70moe] device: %s\n",
                g.q->get_device().get_info<sycl::info::device::name>().c_str());
