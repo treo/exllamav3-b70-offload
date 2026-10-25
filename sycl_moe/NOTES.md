@@ -666,3 +666,42 @@ Measurement traps hit during this study, both real:
   alive is what caught it. Double ghost confirmed by: nsl=1 immune, nsl>=2 broken,
   ~40-60% missing values, pad-zeros intact. Rule: before claiming a grid bug, compute
   groups = global/local, not global.
+
+## Command-latency engineering for decode (fused prep+quant, owner-gather K6)
+
+The rows=1 wall is COMMANDS, not math: time is work-INDEPENDENT (topk 1..10 all measure
+the same), the --bare per-iter barrier round trip alone is 33us, and every chained queue
+op adds ~8-15us. Two structural cuts, both tiers:
+
+1. OWNER-GATHER K6 (both tiers): one WG per (128-col block, token) walks its token's tmap
+   entries in ASCENDING order. Kills the out memset command AND the fp32 atomic scatter;
+   sums now match the CPU reference's order exactly (atomics did not). rows1 spans grow
+   (5->21us: only nbk*rows WGs) but the SUSTAINED total drops ~18us anyway - launch
+   latency outranks span time at decode. rows32+ improved too (660->635: no atomic storm).
+2. FUSED PREP+QUANT (int8): PrepQuantI8 replaces K1+Q1 - 256-thread WG per (slot, token
+   row-pair), two 128-threads teams Hadamard 10 blocks each with results kept in
+   registers (vals[10]) across the shared amax, then quantize BOTH vh and vl rows from
+   the same values (one stage-P per token per matrix, tin never written). f32 spellings
+   identical to K1->Q1 (trace bit-exact everywhere). rows1 222->183 cumulative with (1);
+   E128/rows128 3599->3457; xval 1.355e-3; forced model int8 decode 67.8 vs float 70.9
+   (auto keeps float for rows=1 - the 9% m=1 gap is DPAS geometry + chain, not fixable
+   without abandoning joint_matrix loads, which always fetch all 8 A rows = 1KB/kf block
+   whether 1 or 8 tokens live).
+
+Two traps met again: (a) fused kernel indexed chunks[j].token[r] (DPAS row) instead of
+token[tok] - invisible at rows=1 (r=0 only live row), caught by the rows=2 trace; and the
+rp decode is tok = frag*4 + (rp&3), NOT (rp>>1)&3 - the r>>1 already happened. (b) The
+struct-insertion edit silently deleted QuantIn's final qsb write (oldText/newText tail
+mismatch) - symptoms were qsxu={0,0} and a wild-goose "adding a struct breaks other
+kernels" bisect that ended at `diff moe_sycl_min3.cpp moe_sycl.cpp`, not a compiler bug.
+Lesson: after ANY newText rewrite of a block, diff the RESULT against intent, don't
+trust the anchor echoed back.
+
+Probe result: host writes to sycl::malloc_device memory SEGFAULT on this driver
+(L0/B70, oneAPI 2026.2) - the "skip the H2D memcpy by writing the blob directly" idea
+is dead; malloc_shared would page-migrate per access and lose worse.
+
+Current sustained floor budget at rows=1 (int8 183 / float 168): memcpy ~10 + per-command
+chain (7 int8 / 6 float commands incl. barriers) ~60-80 + real kernel spans ~90. The
+remaining big int8 cut would be K34i8+Q2 (needs 5-block-wide WGs for the row amax, same
+register-carry trick), worth maybe -10us; below that it is one fused megakernel or stop.

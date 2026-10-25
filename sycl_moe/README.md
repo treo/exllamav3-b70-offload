@@ -18,13 +18,18 @@ VNNI-packed u8 B operands and always-wide vh/vl int8 activation rows — the sam
 identity the CPU VNNI tier computes. It is stage-bit-exact against the external
 `bench_layer --i8trace` model, ~1.4e-3 rms vs the CPU scalar extension, and ≤0.25% wikitext
 ppl on all three Qwen3.8-Flash-Next models (≈10× closer than the CPU AVX2 tier). Sustained
-worker-layer A/B (bench_layer, min-of-3): speedup x1.17 at 2 rows, x1.5 at 4, x2.4 at 8,
-**x3.0 at 32**, x2.65 at 64 — up to 8 tokens ride one weight stream per chunk (two m8
+worker-layer A/B (bench_layer, min-of-2 sustained): speedup x1.49 at 2 rows, x1.90 at 4,
+x2.10 at 8, **x3.2 at 32-64** — up to 8 tokens ride one weight stream per chunk (two m8
 fragments share every staged B band), while the fp32 tier pays per (chunk × row) and caps
-at 4 rows. Single-row decode is ~20% slower on int8 (m8 fragments run 25% full), so
-auto mode keeps rows=1 forwards on the fp32 scalar-semantics pipeline; `EXL3_MOE_B70_INT8=1/0`
-forces either tier. End-to-end (2.05bpw -mcs256): prefill 2048 1456 (CPU worker) → 1711
-(B70 fp32) → **1871-1880 tok/s** (B70 auto/int8), decode unchanged ~70-72. See NOTES
+at 4 rows. Narrow-chunk passes (every chunk ≤4 tokens) run a slimmer DPAS instantiation
+without the second fragment, and the whole int8 pipeline is two commands shorter than
+float (fused prep+quantize, owner-gather epilogue — no tin round-trip, no out memset,
+no atomics). Single-row decode still ends ~9% behind fp32 (m8 fragments run 12% full and
+the per-forward command floor ~33 µs binds), so auto mode keeps rows=1 forwards on the
+fp32 scalar-semantics pipeline; `EXL3_MOE_B70_INT8=1/0` forces either tier. End-to-end
+(2.05bpw -mcs256): prefill 2048 1456 (CPU worker) → 1711 (B70 fp32) → **1869-1880 tok/s**
+(B70 auto/int8), decode ~70-72 (fp32 tier; forced int8 measures 67.8 — float wins m=1
+in the real model too). See NOTES
 'int8 re-port' and 'SUSTAINED-CLOCK TIER A/B' for the packed-VNNI dataflow, the
 negative-splat trap, and why short benchmark windows lie about this GPU.
 
@@ -39,6 +44,9 @@ negative-splat trap, and why short benchmark windows lie about this GPU.
   -foffload-fp32-prec-div`. Without them the device's fused mul+round and approximate
   `127/amax`-style divisions flip int8-quantization ties vs the CPU reference (visible
   as ±1 x8 steps at rounding boundaries; the `--i8trace` stage-B gate catches it).
+- `EXL3_MOE_I8FUSE=0` — split the fused prep+quantize kernel back into K1+Q1 (lab A/B;
+  fused is the default int8 path and sets `i8fuse()`, which i8trace stage B mirrors by
+  host-preping x with `moe_ref::prep_row` instead of reading the never-written tin).
 - `EXL3_MOE_I8SLIM=0` — lab-forbid the slim decode kernel. When every chunk carries
   ≤4 tokens the int8 pipeline auto-selects an `F1=false` Gemv8 instantiation that drops
   the second m8 fragment (load, DPAS, store) and a matching QuantIn that skips frag1
