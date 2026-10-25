@@ -146,7 +146,7 @@ struct GemvBase
     int nsl;                 // k-slices per unit
 };
 
-template <int K2V>
+template <int K2V, bool MMA>
 struct GemvK
 {
     // Column-window GEMV on the stream-repacked layout (see moe_sycl.hpp repack note):
@@ -240,27 +240,36 @@ struct GemvK
                 const uint32_t bs = (t1 & 0xffffu) + (t1 >> 16);
                 const float wcomb = (float)(int)bs - 510.0f;
                 const float* xr = tp + rk;
-                // two chains per output row (rk parity) to break the serial-FMA latency
+                // two chains per output row (rk parity) to break the serial-FMA latency.
+                // MMA=false (single-slot chunks, i.e. decode) drops the other rows: at m=1
+                // they were predicated off but still issued (VTune: ~30% of the loop body).
                 if (rk & 1) { accB0 = sycl::fma(wcomb, xr[0], accB0);
-                    if (m > 1) accB1 = sycl::fma(wcomb, xr[K], accB1);
-                    if (m > 2) accB2 = sycl::fma(wcomb, xr[2 * K], accB2);
-                    if (m > 3) accB3 = sycl::fma(wcomb, xr[3 * K], accB3);
+                    if (MMA) {
+                        if (m > 1) accB1 = sycl::fma(wcomb, xr[K], accB1);
+                        if (m > 2) accB2 = sycl::fma(wcomb, xr[2 * K], accB2);
+                        if (m > 3) accB3 = sycl::fma(wcomb, xr[3 * K], accB3);
+                    }
                 } else { acc0 = sycl::fma(wcomb, xr[0], acc0);
-                    if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
-                    if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
-                    if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
+                    if (MMA) {
+                        if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
+                        if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
+                        if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
+                    }
                 }
             }
 #pragma unroll
             for (int i = 0; i < NW; ++i) g[i] = gn[i];
         }
-        acc0 += accB0; acc1 += accB1; acc2 += accB2; acc3 += accB3;
+        acc0 += accB0;
         float* dst = down ? b.toutd + ((size_t)j * b.nsl + sl) * MAXM * N
                           : b.tout + ((size_t)(j * 2 + mu) * b.nsl + sl) * MAXM * N;
         dst[cG] = acc0 * KDQ;
-        if (m > 1) dst[N + cG] = acc1 * KDQ;
-        if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
-        if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+        if (MMA) {
+            acc1 += accB1; acc2 += accB2; acc3 += accB3;
+            if (m > 1) dst[N + cG] = acc1 * KDQ;
+            if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
+            if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+        }
     }
 };
 
@@ -393,8 +402,9 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         if (prof) pev.push_back(dep);
     };
 
-    int maxm_rows = 1;
+    int maxm_rows = 1, maxm_nm = 1;
     for (int j = 0; j < nc; ++j) maxm_rows = std::max(maxm_rows, (int)chunks_host[j].m);
+    maxm_nm = maxm_rows;   // (kept separate for future per-class relaxation)
     const int NSL_GU = [&]{
         int base = nc * nm * (I / 128), w = nsl;
         // auto up to 8: real-model decode (few rows, latency-bound) wants the extra
@@ -458,13 +468,19 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         gb.nbk = (down ? H : I) / 128;
         gb.down = down ? 1 : 0;
         gb.nsl = down ? NSL_D : NSL_GU;
+        // single-slot chunks (decode) take the MMA=false specialization: the m>1 FMA chains
+        // were predicated off but still issued ~30% of the inner loop (VTune, Xe2)
+        const bool single = down ? (maxm_rows == 1) : (maxm_nm == 1);
         const int units = (down ? nc * gb.nbk : nc * nm * gb.nbk) * gb.nsl;
         const size_t gn = (size_t)units * 128;
         launch([&](sycl::handler& cgh) {
             switch (k2) {
-                case 4: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4>{gb}); break;
-                case 5: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5>{gb}); break;
-                case 8: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8>{gb}); break;
+                case 4: if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4, false>{gb});
+                        else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4, true>{gb});  break;
+                case 5: if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5, false>{gb});
+                        else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5, true>{gb});  break;
+                case 8: if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8, false>{gb});
+                        else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8, true>{gb});  break;
                 default: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvFallback{gb, k2}); break;
             }
         });
