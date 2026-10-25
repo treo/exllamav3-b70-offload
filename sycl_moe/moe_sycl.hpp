@@ -8,6 +8,18 @@
 
 namespace moe_sycl {
 
+// Host helper: convert a native mul1 trellis (u16 array, tiles of 8*K2 u16 = 4*K2 u32 words)
+// into the GPU "stream" layout: state t's 16-bit window lives at bit
+// P0 - ((K2*t + (K2&1)) >> 1) of a plain ascending bitstream whose k-th word is the native
+// ring's (-k mod W)-th u32 word. The conversion itself is just a per-tile u32 word reversal.
+inline void repack_native_to_stream_words(uint32_t* dst, const uint32_t* src, size_t ntiles, int K2)
+{
+    const int W = 4 * K2;
+    for (size_t i = 0; i < ntiles; ++i)
+        for (int k = 0; k < W; ++k)
+            dst[i * W + k] = src[i * W + ((W - k) % W)];
+}
+
 // One expert matrix's packed weights + scales, already resident on the device.
 struct MatrixSrc
 {

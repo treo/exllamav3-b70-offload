@@ -76,10 +76,19 @@ int main(int argc, char** argv)
         L2.activation = act; L2.act_limit = 0.f; L2.gated = a.gated;
         std::vector<MatrixSrc> gs(E), us(E), ds(E);
         std::vector<std::vector<uint16_t*> > keepers;
-        auto up16 = [&](const std::vector<uint16_t>& v) {
+        const int K2load = 2 * a.bits + a.hb;
+        auto up16 = [&](const std::vector<uint16_t>& v, bool trellis = false) {
+            std::vector<uint32_t> rp;
+            const void* datap = v.data();
+            if (trellis) {
+                rp.resize(v.size() / 2);
+                moe_sycl::repack_native_to_stream_words(rp.data(), (const uint32_t*)v.data(),
+                                                        v.size() / (2 * 4 * (size_t)K2load), K2load);
+                datap = rp.data();
+            }
             uint16_t* p = sycl::malloc_device<uint16_t>(v.size(), q);
             keepers.push_back({p});
-            q.memcpy(p, v.data(), v.size() * 2).wait();
+            q.memcpy(p, datap, v.size() * 2).wait();
             return (const uint16_t*)p;
         };
         for (int e = 0; e < E; ++e) {
@@ -88,7 +97,7 @@ int main(int argc, char** argv)
                 auto tr = load_vec(std::string(pre) + "_tr_" + std::to_string(e), (size_t)(k/16)*(n/16)*pu2);
                 auto suh = load_vec(std::string(pre) + "_suh_" + std::to_string(e), k);
                 auto svh = load_vec(std::string(pre) + "_svh_" + std::to_string(e), n);
-                d.trellis = up16(tr); d.suh = up16(suh); d.svh = up16(svh); d.bias = nullptr;
+                d.trellis = up16(tr, true); d.suh = up16(suh); d.svh = up16(svh); d.bias = nullptr;
                 m.trellis = std::move(tr); m.suh = std::move(suh); m.svh = std::move(svh);
             };
             if (a.gated) { fill(gs[e], "gate", H, I); L2.gates.push_back(m); }
@@ -248,15 +257,25 @@ int main(int argc, char** argv)
 
     // ---------------------------------------------------- upload weights, run device
     std::vector<std::vector<uint16_t*>> keep(3);
-    auto upload = [&](std::vector<uint16_t*>& dst, const std::vector<uint16_t>& src) {
-        dst.push_back(sycl::malloc_device<uint16_t>(src.size(), q));
-        q.memcpy(dst.back(), src.data(), src.size() * 2).wait();
+    const int K2cur = 2 * a.bits + a.hb;
+    auto upload = [&](std::vector<uint16_t*>& dst, const std::vector<uint16_t>& src, bool trellis = false) {
+        std::vector<uint32_t> rp;
+        const void* datap = src.data();
+        size_t bytes = src.size() * 2;
+        if (trellis) {
+            rp.resize(src.size() / 2);
+            moe_sycl::repack_native_to_stream_words(rp.data(), (const uint32_t*)src.data(),
+                                                    src.size() / (2 * 4 * (size_t)K2cur), K2cur);
+            datap = rp.data();
+        }
+        dst.push_back(sycl::malloc_device<uint16_t>(bytes / 2, q));
+        q.memcpy(dst.back(), datap, bytes).wait();
         return dst.back();
     };
     std::vector<MatrixSrc> gs(a.E), us(a.E), ds(a.E);
     for (int e = 0; e < a.E; ++e) {
         auto fill = [&](MatrixSrc& d, const moe_ref::Matrix& m) {
-            d.trellis = upload(keep[0], m.trellis);
+            d.trellis = upload(keep[0], m.trellis, true);
             d.suh = upload(keep[1], m.suh);
             d.svh = upload(keep[1], m.svh);
             d.bias = nullptr;

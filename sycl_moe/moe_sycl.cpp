@@ -138,14 +138,112 @@ struct GemvBase
 template <int K2V>
 struct GemvK
 {
+    // Column-window GEMV on the stream-repacked layout (see moe_sycl.hpp repack note):
+    // state(rk, cin) = 16 ascending bits at P0 - adv(tmin+d(rk)); each lane loads the NW
+    // words covering its column's 16 windows once per k-step, builds a pre-shifted bit
+    // stream and extracts with compile-time shifts and pair selections only.
     GemvBase b;
-    int rt_k2 = 0;    // used only when K2V == 0
+
+    static constexpr int W = 4 * K2V;
+    static constexpr int KE = K2V & 1;
+    static constexpr int AD27 = (27 * K2V + KE) >> 1;
+    static constexpr int NW = (AD27 + 16 + 31 + 31) / 32 + 1;
 
     void operator()(sycl::nd_item<1> it) const
     {
-        const int k2 = K2V > 0 ? K2V : rt_k2;
-        constexpr int tile_u32_v = K2V > 0 ? 4 * K2V : 0;
-        const int tile_u32 = K2V > 0 ? tile_u32_v : 4 * k2;
+        const int unit = (int)it.get_group(0);
+        const int tid = (int)it.get_local_id(0);
+        const int sl = unit % b.nsl;
+        const int ub = unit / b.nsl;
+        const int blk = ub % b.nbk;
+        const int jmu = ub / b.nbk;
+        const bool down = b.down != 0;
+        const int j = down ? jmu : jmu / b.nm;
+        const int lmu = down ? CAT_DOWN : jmu % b.nm;
+        const int cat = down ? CAT_DOWN : (b.gated ? lmu : CAT_UP);
+        const int mu = down ? 0 : (b.gated ? lmu : 0);
+        const int e = b.chunks[j].expert;
+        const int m = b.chunks[j].m;
+        const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[(F_TRI * 3 + cat) * b.E + e];
+        const float* src_tin = down ? b.tind + (size_t)j * MAXM * b.I
+                                    : b.tin + ((size_t)(j * 2 + mu) * MAXM) * b.H;
+        const int K = down ? b.I : b.H;
+        const int N = down ? b.H : b.I;
+
+        const int cG = blk * 128 + tid;
+        const int tile_n = cG >> 4, cin = cG & 15;
+        const int A2 = (K2V * (32 * (cin & 7) + 4 * ((cin >> 3) & 1))) >> 1;
+        const int G = (32 - (K2V >> 1)) - A2 - AD27;
+        const int wb = G >> 5;
+        const int pre = G - (wb << 5);
+        int widx[NW];
+#pragma unroll
+        for (int i = 0; i < NW; ++i) widx[i] = ((wb + i) % W + W) % W;
+
+        float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+        float accB0 = 0, accB1 = 0, accB2 = 0, accB3 = 0;
+        const size_t row_step = (size_t)b.tiles_n * W;
+        const int tk_lo = (b.tiles_k * sl) / b.nsl;
+        const int tk_hi = (b.tiles_k * (sl + 1)) / b.nsl;
+        const uint32_t* wp = w32 + (size_t)tile_n * W + (size_t)tk_lo * row_step;
+        const float* tp = src_tin + tk_lo * 16;
+        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step, tp += 16) {
+            uint32_t g[NW];
+#pragma unroll
+            for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+            uint32_t h[NW];
+            if (pre == 0) {
+#pragma unroll
+                for (int i = 0; i < NW; ++i) h[i] = g[i];
+            } else {
+#pragma unroll
+                for (int i = 0; i + 1 < NW; ++i)
+                    h[i] = (g[i] >> pre) | (g[i + 1] << (32 - pre));
+                h[NW - 1] = g[NW - 1] >> pre;
+            }
+#pragma unroll
+            for (int rk = 0; rk < 16; ++rk) {
+                const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                const int rel = AD27 - ((K2V * d + KE) >> 1);
+                const uint64_t pair = ((uint64_t)h[(rel >> 5) + 1] << 32) | h[rel >> 5];
+                const uint32_t st16 = (uint32_t)(pair >> (rel & 31)) & 0xffffu;
+                const uint32_t xm = st16 * 0x83DCD12Du;
+                const uint32_t t1 = (xm & 0x00ff00ffu) + ((xm >> 8) & 0x00ff00ffu);
+                const uint32_t bs = (t1 & 0xffffu) + (t1 >> 16);
+                const float wcomb = (float)(int)bs - 510.0f;
+                const float* xr = tp + rk;
+                // two chains per output row (rk parity) to break the serial-FMA latency
+                if (rk & 1) { accB0 = sycl::fma(wcomb, xr[0], accB0);
+                    if (m > 1) accB1 = sycl::fma(wcomb, xr[K], accB1);
+                    if (m > 2) accB2 = sycl::fma(wcomb, xr[2 * K], accB2);
+                    if (m > 3) accB3 = sycl::fma(wcomb, xr[3 * K], accB3);
+                } else { acc0 = sycl::fma(wcomb, xr[0], acc0);
+                    if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
+                    if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
+                    if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
+                }
+            }
+        }
+        acc0 += accB0; acc1 += accB1; acc2 += accB2; acc3 += accB3;
+        float* dst = down ? b.toutd + ((size_t)j * b.nsl + sl) * MAXM * N
+                          : b.tout + ((size_t)(j * 2 + mu) * b.nsl + sl) * MAXM * N;
+        dst[cG] = acc0 * KDQ;
+        if (m > 1) dst[N + cG] = acc1 * KDQ;
+        if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
+        if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+    }
+};
+
+// runtime-rate fallback (apack addressing, native layout) for exotic K2
+struct GemvFallback
+{
+    GemvBase b;
+    int rt_k2 = 0;
+
+    void operator()(sycl::nd_item<1> it) const
+    {
+        const int k2 = rt_k2;
+        const int tile_u32 = 4 * k2;
         const int unit = (int)it.get_group(0);
         const int tid = (int)it.get_local_id(0);
         const int sl = unit % b.nsl;
@@ -162,24 +260,21 @@ struct GemvK
         const int e = b.chunks[j].expert;
         const int m = b.chunks[j].m;
         const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[(F_TRI * 3 + cat) * b.E + e];
-        const float* src_tin = down ? b.tind + (size_t)j * GemvBase::MAXM_ * b.I
-                                    : b.tin + ((size_t)(j * 2 + mu) * GemvBase::MAXM_) * b.H;
+        const float* src_tin = down ? b.tind + (size_t)j * MAXM * b.I
+                                    : b.tin + ((size_t)(j * 2 + mu) * MAXM) * b.H;
         const int K = down ? b.I : b.H;
-
         const int cG = blk * 128 + tid;
         const int tile_n = cG >> 4, cin = cG & 15;
         unsigned long long apack[8] = {0,0,0,0,0,0,0,0};
 #pragma unroll
         for (int rk = 0; rk < 16; ++rk) {
-            const int row = rk, col = cin;
-            const int bb = ((col & 7) << 2) | ((row >> 1) & 3);
-            const int jj = (row & 1) | ((row & 8) ? 2 : 0) | ((col & 8) ? 4 : 0);
+            const int bb = ((cin & 7) << 2) | ((rk >> 1) & 3);
+            const int jj = (rk & 1) | ((rk & 8) ? 2 : 0) | ((cin & 8) ? 4 : 0);
             const int t = (bb << 3) | jj;
-            const int b1 = K2V > 0 ? (((t + 1) * K2V) >> 1) + 128 * K2V
-                                   : (((t + 1) * k2) >> 1) + 128 * k2;
+            const int b1 = (((t + 1) * k2) >> 1) + 128 * k2;
             const int b0 = b1 - 16;
-            const int w0 = K2V > 0 ? (b0 >> 5) % tile_u32_v : (b0 >> 5) % tile_u32;
-            const int w1 = K2V > 0 ? ((b1 - 1) >> 5) % tile_u32_v : ((b1 - 1) >> 5) % tile_u32;
+            const int w0 = (b0 >> 5) % tile_u32;
+            const int w1 = ((b1 - 1) >> 5) % tile_u32;
             const int sh = (((b1 - 1) >> 5) + 1) * 32 - b1;
             apack[rk >> 1] |= (unsigned long long)(w0 | (w1 << 8) | (sh << 16)) << ((rk & 1) * 24);
         }
@@ -192,7 +287,9 @@ struct GemvK
 #pragma unroll
             for (int rk = 0; rk < 16; ++rk) {
                 const unsigned a = MOE_GETADDR(rk);
-                const uint32_t v0 = wp[a & 0xff], v1 = wp[(a >> 8) & 0xff];
+                const unsigned i0 = (tile_u32 - (a & 0xff)) % tile_u32;
+                const unsigned i1 = (tile_u32 - ((a >> 8) & 0xff)) % tile_u32;
+                const uint32_t v0 = wp[i0], v1 = wp[i1];
                 const uint64_t merged = ((uint64_t)v0 << 32) | v1;
                 const uint32_t st16 = ((uint32_t)(merged >> (a >> 16))) & 0xffffu;
                 const uint32_t xm = st16 * 0x83DCD12Du;
@@ -208,8 +305,8 @@ struct GemvK
         }
 #undef MOE_GETADDR
         const int N = down ? b.H : b.I;
-        float* dst = down ? b.toutd + ((size_t)j * b.nsl + sl) * GemvBase::MAXM_ * N
-                          : b.tout + ((size_t)(j * 2 + mu) * b.nsl + sl) * GemvBase::MAXM_ * N;
+        float* dst = down ? b.toutd + ((size_t)j * b.nsl + sl) * MAXM * N
+                          : b.tout + ((size_t)(j * 2 + mu) * b.nsl + sl) * MAXM * N;
         dst[cG] = acc0 * KDQ;
         if (m > 1) dst[N + cG] = acc1 * KDQ;
         if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
@@ -324,7 +421,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 case 4: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4>{gb}); break;
                 case 5: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5>{gb}); break;
                 case 8: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8>{gb}); break;
-                default: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<0>{gb, k2}); break;
+                default: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvFallback{gb, k2}); break;
             }
         });
     };

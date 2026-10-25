@@ -56,6 +56,17 @@ bool ensure_ctx()
     return true;
 }
 
+// repacked upload: per-tile u32 word reversal (native ring -> column-window stream)
+const uint16_t* upload_trellis(const uint16_t* host, size_t n_u16, int K2)
+{
+    std::vector<uint32_t> tmp(n_u16 / 2);
+    moe_sycl::repack_native_to_stream_words(tmp.data(), (const uint32_t*)host, n_u16 / (2 * 4 * (size_t)K2), K2);
+    uint32_t* p = sycl::malloc_device<uint32_t>(tmp.size(), *g.q);
+    g.q->memcpy(p, tmp.data(), tmp.size() * 4).wait();
+    g.uploads.back()->keep.push_back((uint16_t*)p);
+    return (const uint16_t*)p;
+}
+
 const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
 {
     if (!host) return required ? nullptr : nullptr;
@@ -103,7 +114,7 @@ int64_t b70_register_layer
     std::vector<moe_sycl::MatrixSrc> gs(E), us(E), ds(E);
     auto fill = [&](moe_sycl::MatrixSrc& m, const uint64_t* tr, const uint64_t* suh,
                     const uint64_t* svh, const uint64_t* bias, int e, int tri_sz, int k, int n) {
-        m.trellis = (const uint16_t*)upload_u16((const uint16_t*)tr[e], tri_sz, true);
+        m.trellis = upload_trellis((const uint16_t*)tr[e], tri_sz, 2 * bits + hb);
         m.suh = (const uint16_t*)upload_u16((const uint16_t*)suh[e], (size_t)k, true);
         m.svh = (const uint16_t*)upload_u16((const uint16_t*)svh[e], (size_t)n, true);
         m.bias = bias && bias[e] ? (const uint16_t*)upload_u16((const uint16_t*)bias[e], (size_t)n, true) : nullptr;
