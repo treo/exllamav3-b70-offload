@@ -224,3 +224,26 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 - Soak: 2x heavy ppl passes on 4.05bpw @mcs448 (partially resident B70): rc=0, no
   registration/forward failures, ppl spread 3.39274/3.39073 = 6e-4 rel from K6 relaxed
   fp32 atomics (nondeterministic order - acceptable, matches CUDA-backend norms).
+
+## Trellis cheat-sheet microbench session (lab_dot.cpp)
+- Harness lesson (bit me twice): Xe2 clock ramp on light-duty microbenches INVERTS
+  rankings. A cold run said flat-bytesum beats mask-chain 2.6x; with 1.5s burn-in the
+  effect flips. ALWAYS burn in (>=1.5s continuous launch) and interleave variants, x2 rounds.
+- Recipe B (native layout) extraction + funnel helpers validated bit-exact against the
+  cheat-sheet K=4 test vectors on B70 (incl tail-bit wrap state 0 and edge states).
+- ADOPTED: GemvK/GemvFallback 16-bit windows extracted with 32-bit funnel shifts
+  (lo>>s | ((hi<<1)<<(31-s))) instead of (uint64(hi)<<32|lo)>>s: decode 174.0->169.2us
+  mean (10 paired runs, funnel better 8/10); fallback also drops the 64-bit merge.
+  Results bit-identical (xval 6.06e-7 unchanged; every max_rel family unchanged).
+- REJECTED esimd dp4a: dp4a<i32> on (u32,u32) lowers to SIGNED-operand uudp4a sibling
+  (llvm.genx.sudp4a) => WRONG bytesums, and simd<,1> scalar use in generic kernels is
+  ~2.5x slower than the 5-op mask chain regardless. Do not touch esimd outside esimd kernels.
+- REJECTED flat byte tree ((x&0xff)+(x>>8&0xff)+...): at stable clocks IGC's pair-chain
+  selection (it fuses masks into dual-issued and/add pairs, see asm '$' numbering) is
+  already optimal; flat = +6%.
+- REJECTED -510 folding (acc += bs*x, nx -= 510*x per k): cold-run artifact; neutral-to-worse
+  at stable clocks, and perturbs the fp32-tier rounding for nothing.
+- ISA note: no spills in GemvK paths (-abortOnSpill 4 in effect; scr.* absent from dump).
+  Inner loop per state: ~9 int ALU (mul, 2x(and+add fused), shr, funnel pair) + cvt + fma.
+  We are at the instruction-issue floor for the FLOAT-tier formulation; only an int8/DPAS
+  tier redesign moves it further.
