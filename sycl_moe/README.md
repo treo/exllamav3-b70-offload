@@ -12,6 +12,17 @@ the real extension at ~6e-7 rms (see Benchmarks below), and bit-checked per-kern
 the tile decoder. The AVX2/int8 tier deviates ~1.4% from scalar; B70 output is *closer* to
 the fp32 reference than that tier.
 
+Prefill-class jobs (some expert chunk carrying ≥2 token rows) can run the **int8 / XMX
+DPAS tier** instead: joint_matrix m8n16k32 with the mul1 product words fed as VNNI-packed
+u8 B operands and always-wide vh/vl int8 activation rows — the same integer identity the
+CPU VNNI tier computes. It is stage-bit-exact against the external `bench_layer --i8trace`
+model, ~1.4e-3 rms vs the CPU scalar extension, and ≤0.25% wikitext ppl on all three
+Qwen3.8-Flash-Next models (≈10× closer than the CPU AVX2 tier). Measured (2.05bpw -mcs256):
+prefill 2048 1456 (CPU) → 1711 (B70 fp32) → **1880 tok/s** (B70 int8), decode unchanged;
+synthetic rows=1 decode is ~20% slower on int8, which is why single-row forwards stay fp32
+in auto mode (`EXL3_MOE_B70_INT8=1/0` forces either tier; see NOTES 'int8 re-port' for the
+packed-VNNI dataflow and the negative-splat trap).
+
 ## Requirements
 
 - Intel Arc Pro B70 (or Xe2) GPU, `xe` kernel driver, compute-runtime ≥ 26.x
@@ -19,6 +30,10 @@ the fp32 reference than that tier.
   bit-identical results, ~2.6% faster synthetic decode; an earlier '-O3 crashes icpx'
   note turned out unreproducible — see NOTES if the compiler ever dies on these TUs,
   fall back to `-O2` and re-file).
+- **FP flags are part of correctness**: always build with `-ffp-contract=off
+  -foffload-fp32-prec-div`. Without them the device's fused mul+round and approximate
+  `127/amax`-style divisions flip int8-quantization ties vs the CPU reference (visible
+  as ±1 x8 steps at rounding boundaries; the `--i8trace` stage-B gate catches it).
 - Linux (the plugin hooks are `__linux__`-only; nothing changes on other platforms)
 
 ## Build
@@ -26,7 +41,8 @@ the fp32 reference than that tier.
 ```bash
 source sycl_moe/env.sh          # oneAPI setvars + torch-JIT env recipe + EXL3_MOE_B70_LIB
 cd sycl_moe
-icpx -fsycl -O3 -fPIC -shared b70_lib.cpp moe_sycl.cpp -o libb70moe.so \
+icpx -fsycl -O3 -ffp-contract=off -foffload-fp32-prec-div -fPIC -shared \
+    b70_lib.cpp moe_sycl.cpp -o libb70moe.so \
     -Xlinker -rpath -Xlinker /opt/intel/oneapi/compiler/2026.2/lib
 ```
 

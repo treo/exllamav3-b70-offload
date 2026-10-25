@@ -375,3 +375,85 @@ Re-port increments (each ends green under --i8trace before the next starts):
       window decode + prod words; trace stage C bit-exact (integers!).
   I3  K34i8 act-fused + QuantIn down + Gemv8 down: stages E/F.
   I4  K6i8 gather: stage G. Then quality (add wide-pair rows IF trace-clean), speed, ppl.
+
+## int8 re-port session (this commit) — DONE, shipped as auto tier
+
+Increments I1..I4 landed together and went green: QuantIn + Gemv8 GU (stages B,C), then
+K34i8/QuantIn-down/Gemv8-down (D,E,F), then K6i8 (G). 13-config --i8trace battery green
+(all three rate families, gateless, act 0/1/3, rows 1..32). t30.cpp = single-hot-A Gemv8
+isolation lab (modes hot/one/rnd/sat/q25/rneg/...; 'tm/tq' = timing with production
+geometry; every probe now EXACT at K2560xN640x20slots).
+
+THE ROOT CAUSE of the old 1.014*want-475925 stage-C fingerprint, finally:
+  x8 * 0x01010101 DOES NOT SPLAT NEGATIVES. -1 * 0x01010101 = 0xFEFEFEFF, not 0xFFFFFFFF.
+  The DPAS A bytes must be (x8 & 0xff) * 0x01010101 (the cheat-sheet/CPU store_x8 spellings
+  mask first: (uchar)x8 * 0x01010101). Both the old kernel AND the old harness stage-B
+  expectation carried the same bug, so stage B "passed" while stage C drifted; only the
+  three other bytes of each negative activation word were wrong, which is exactly a
+  small-scale + constant-offset distortion of the dot products. The t30 'rnd' mode
+  (random SIGNED A) reproduced it in 10 minutes where weeks of pipeline tracing did not,
+  because t30 computes its reference from low-byte semantics and random-signed data.
+  Trap cost: HIGH. Rule: any splat/mask expression on signed bytes gets an explicit
+  & 0xff and a lab mode with negative values including -1 and -(1..8) mixes.
+
+SECOND TRAP (measurement): the t31 ablation "wins" (V6/V8/V9 at 37us vs 62us) were an
+artifact — the bandb-store and second-mad blocks were gated by `#if VARIANT == 0||1||4`,
+so VARIANT 6/8/9 silently SKIPPED HALF THE WORK (second tile of every pair). Always make
+removed-work variants by TOGGLING A RUNTIME FLAG INSIDE ALWAYS-CODED SOURCE, or diff the
+generated asm, before believing an ablation delta. Honest numbers (t31 V0/V12 + t30 tq):
+  full pair-loop ~= single-tile ping-pong ~= 55-62us for the gu lab shape; PKA pair-decode
+  helps in the pair-loop shape (-19%, V12 vs V0), ~neutral in single-tile (kept anyway).
+Rejected for real: depth-4 rotated word pipeline (105->149us, the (tk&3)-indexed register
+array defeats the unroller); jb-from-global scratch (slower AND alignment-crashy: nsl
+values where (slot*nsl+sl)*nfl*512 % 64 != 0 fault the 2D block engine — device loss, the
+same symptom as the Gemv8P OOB read; watch SLM/global alignment for anything jm-loaded).
+
+THIRD TRAP: device approx-div + FMA contraction flip quantization ties vs host (x*rq then
++-0.5 rounding). Fixed by building EVERYTHING (bench + plugin) with -ffp-contract=off
+-foffload-fp32-prec-div (now in the README build line; without them --i8trace stage B
+fails sporadically by +-1 x8 on random data — 'CONSTW' uniform probes hide it).
+
+Harness fixes (bench_layer i8_trace was NOT the innocent arbiter it pretended to be):
+  * stage D/G folded -510*B with an EXTRA x128 (gb already summed B over the 128 i-iters)
+    — would have demanded a 16384x fold from the kernel;
+  * gateless tin readback was half-size (K1 writes ts=2j slots even when nm=1) -> NaN garbage
+    compared as 'want 00000000';
+  * swiglu_oai applied uv twice (av=(uv+1)*sigmoid*gv, then hv=av*uv);
+  * stage G gate loosened to rel 1e-3/abs 1e-6 (fp32 endpoint + atomic ordering ulp noise);
+  * check gate: int8 tier judged by rms<=3% (NOT max_rel, which cancels-pathologically);
+  * float stage-check block skipped when int8_active;
+  * trace collapses [slot][nsl][8][N] split-K acc buffers via layer.i8nsl().
+
+Production design as shipped: QuantIn always-wide @8192 levels (|vh|,|vl|<=64 — DPAS i16
+pair-safety, NOT actually proven necessary: uniform sat=127 passed, mixed +-127 not),
+a8 [slot][k/8][8r x 8i32] slabs, Affine{A=KDQ*q_eff, B=-510*A*sx} per DPAS row folded as
++128*B at element 0 after the Hadamard (== H*(B*ones)); split-K: acc [slot][nsl][8][N]
+i32, slice sums in K34i8/K6i8, auto nsl by the float lane-target heuristic (cap 8 gu /
+4 d, halved for multi-row), MOE_NSL override clamped to 8 for this tier; nsl=1 stays
+exact for tiny shapes.
+
+TIER POLICY (auto): int8 iff K2 in {4,5,8} AND some chunk has m>=2. Rationale (min-of-3
+interleaved, bench E12/16 topk10-12): rows=1 float 172-186 vs int8 205-223 (m8 fragment
+runs 25% full at m=1 + quant/pass overhead); rows>=4 int8 wins or ties, and real-model
+prefill gains 10-25%. EXL3_MOE_B70_INT8=1/0 forces (the trace harness relies on =1).
+
+MEASURED GATES (real models, this box):
+  ppl r20 l2048 (auto tier; fresh CPU baselines same session):
+    2.05bpw -mcs384  CPU 3.963241 -> B70 int8 3.972811  (+0.24%)
+    2.68bpw -mcs384  CPU 3.823990 -> B70 int8 3.820485  (-0.09%, partial residency)
+    4.05bpw -mcs448  CPU 3.732906 -> B70 int8 3.739851  (+0.19%, 27 layers fell back)
+  perf -mcs256 2.05: prefill2048 CPU 1456 | B70-float 1711 | B70-int8 1880 tok/s;
+    decode ctx0: CPU 67.9 | B70-float 72.2 | B70-int8-forced 72.3 (auto: float path) —
+    NOTE the synthetic rows=1 int8 regression does NOT show on the real model, but auto
+    keeps fp32 for m=1 anyway (cheap insurance).
+  4.05 -mcs448 decode auto: 49.4-50.4 t/s (matches float-tier's 49-51 record).
+
+NEXT levers (not this session):
+  - MAXM=8 chunker (host protocol change; m8 fragments want 8 rows; NOTES 'boss followups').
+  - in-bench G2/G5 still ~1.7x the lab-alone time: interposition of Q1/K34i8 evicts the
+    8MB gu working set between gemvs; consider wider WGs (128 lanes, 8 frags/WG, per-SG
+    2KB slabs) to co-schedule staging with the fp32 kernels' block order, or interleave
+    gu+down gemvs of DIFFERENT experts in one kernel launch (L2 locality per expert run).
+  - m=1 decode int8 mode: single-slot (127) quantization when m==1 && no wide rows, nsl
+    tuning for the 8-kernel pipeline, and skip the vl half of the affine at m=1 (2 of 8
+    fragment rows instead of 8).

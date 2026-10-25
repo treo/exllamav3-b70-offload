@@ -52,7 +52,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
     layer.peek(a8u.data(), layer.i8buf(0), a8u.size() * 4);
     std::vector<float> qsxu((size_t)slots * 8 * 2);
     layer.peek(qsxu.data(), layer.i8buf(2), qsxu.size() * 4);
-    std::vector<int32_t> accgu((size_t)slots * 8 * I);
+    std::vector<int32_t> accgu((size_t)slots * layer.i8nsl(0) * 8 * I);
     layer.peek(accgu.data(), layer.i8buf(4), accgu.size() * 4);
     std::vector<float> tind((size_t)nc * 4 * I);
     layer.peek(tind.data(), layer.ws(3), tind.size() * 4);
@@ -60,8 +60,24 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
     layer.peek(a8d.data(), layer.i8buf(1), a8d.size() * 4);
     std::vector<float> qsxd((size_t)nc * 8 * 2);
     layer.peek(qsxd.data(), layer.i8buf(3), qsxd.size() * 4);
-    std::vector<int32_t> accd((size_t)nc * 8 * H);
+    std::vector<int32_t> accd((size_t)nc * layer.i8nsl(1) * 8 * H);
     layer.peek(accd.data(), layer.i8buf(5), accd.size() * 4);
+
+    // accgu/accd arrive as [slot][nsl][8][N] split-K slices; collapse to [slot][8][N] with
+    // the SAME i32 add semantics the consumers use (values are far from int overflow).
+    auto collapse = [](std::vector<int32_t>& a, int nslots, int nsl, int N) {
+        if (nsl == 1) return;
+        std::vector<int32_t> out((size_t)nslots * 8 * N, 0);
+        for (int slot = 0; slot < nslots; ++slot)
+            for (int q = 0; q < nsl; ++q)
+                for (int r = 0; r < 8; ++r)
+                    for (int n = 0; n < N; ++n)
+                        out[((size_t)slot * 8 + r) * N + n] +=
+                            a[((size_t)slot * nsl + q) * 8 * N + (size_t)r * N + n];
+        a = std::move(out);
+    };
+    collapse(accgu, slots, layer.i8nsl(0), I);
+    collapse(accd, nc, layer.i8nsl(1), H);
 
     int fails = 0;
     auto closef = [](float a, float b) {
@@ -933,13 +949,16 @@ int main(int argc, char** argv)
     }
     if (a.verbose) {
         const char* names[6] = {"K1 prep_gu", "K2 gemv_gu", "K34 act+prep_d", "K5 gemv_d", "K6 gather", "-"};
+        const char* n8[8] = {"K1 prep_gu", "Q1 quant_u", "G2 gemv8_gu", "K34i8 act", "Q2 quant_d",
+                             "G5 gemv8_d", "memset out", "K6i8 gather"};
         printf("per-kernel us (last iter; span = kernel start->end, gap = prev end->start):\n");
         auto& evs = layer.events();
         uint64_t prev_end = 0;
-        for (size_t kk = 1; kk < evs.size() && kk <= 6; ++kk) {
+        const size_t kev = layer.int8_active ? 8 : 6;
+        for (size_t kk = 1; kk < evs.size() && kk <= kev; ++kk) {
             uint64_t st = evs[kk].get_profiling_info<sycl::info::event_profiling::command_start>();
             uint64_t en = evs[kk].get_profiling_info<sycl::info::event_profiling::command_end>();
-            printf("  %-12s span %8.1f  gap %8.1f\n", names[kk - 1],
+            printf("  %-12s span %8.1f  gap %8.1f\n", layer.int8_active ? n8[kk - 1] : names[kk - 1],
                 (double)(en - st) * 1e-3, prev_end ? (double)(st - prev_end) * 1e-3 : 0.0);
             prev_end = en;
         }

@@ -133,15 +133,16 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
         grow_p(4, w_toutd, (size_t)nc * 8 * MAXM * P.hidden);
         cap_nc = nc;
     }
-    // int8 slabs grow on their own schedule: a float layer may have preset cap_nc larger
-    if (use8_ && nc > cap_nc8) {
+    // int8 slabs: grow_p no-ops when the existing cap already fits; sizing must happen on
+    // EVERY nc/nsl combination the layer may see (warm batches use nsl=1, decode up to 8).
+    if (use8_) {
         grow_p(5, w_a8u,   (size_t)nc * nm_ws_ * (P.hidden / 8) * 64);
         grow_p(6, w_a8d,   (size_t)nc * (P.interm / 8) * 64);
         grow_p(7, w_qsxu,  (size_t)nc * nm_ws_ * 8 * 2);
         grow_p(8, w_qsxd,  (size_t)nc * 8 * 2);
-        grow_p(9, w_accgu, (size_t)nc * nm_ws_ * 8 * P.interm);
-        grow_p(10, w_accd, (size_t)nc * 8 * P.hidden);
-        cap_nc8 = nc;
+        grow_p(9, w_accgu, (size_t)nc * nm_ws_ * 8 * P.interm * nsl8_gu_);
+        grow_p(10, w_accd, (size_t)nc * 8 * P.hidden * nsl8_d_);
+        if (nc > cap_nc8) cap_nc8 = nc;
     }
     (void)rows;
 }
@@ -494,15 +495,15 @@ struct Gemv8Base
     const uintptr_t* tab;
     const ChunkDev* chunks;
     const int32_t* a8;       // operand slabs from QuantIn
-    int32_t* acc;            // [slot][8][N] raw i32 (KDQ/q/-510 folded later via Affine)
-    int E, nc, nm, H, I, nfl, down;
+    int32_t* acc;            // [slot][nsl][8][N] raw i32 slices (KDQ/q/-510 folded later via Affine)
+    int E, nc, nm, H, I, nfl, down, nsl;
 };
 
 template <int K2V>
 struct Gemv8
 {
     Gemv8Base b;
-    sycl::local_accessor<unsigned char, 1> slab;   // 1024B: two 512B packed-B bands
+    sycl::local_accessor<unsigned char, 1> slab;   // 2048B: two ping-pong tiles x two 512B bands
 
     auto get(sycl::ext::oneapi::experimental::properties_tag) const
     {
@@ -517,9 +518,11 @@ struct Gemv8
 
     void operator()(sycl::nd_item<2> it) const
     {
-        const int nf = (int)it.get_group(0);       // 16-col fragment == tile_n index
+        const int gid = (int)it.get_group(0);      // (nf, slice) flattened, slice-major
         const int slot = (int)it.get_group(1);     // gu: j*nm + lmu; down: j
         const int tid = (int)it.get_local_id(0);   // == lane, 16 per WG
+        const int nf = gid % b.nfl;
+        const int sl = gid / b.nfl;
         const bool down = b.down != 0;
         const int j = down ? slot : slot / b.nm;
         const int lmu = down ? 0 : slot % b.nm;
@@ -544,7 +547,10 @@ struct Gemv8
         uint32_t* const sl32 = (uint32_t*)slb;
         const int32_t* const pa0 = b.a8 + (size_t)slot * (K / 8) * 64;   // [kfrag][64] i32
         const size_t row_step = (size_t)b.nfl * W;
-        const uint32_t* wp = w32 + (size_t)nf * W;
+        // split-K: this slice covers [tk_lo, tk_hi); slice sums happen in K34i8/K6i8
+        const int tk_lo = (tiles_k * sl) / b.nsl;
+        const int tk_hi = (tiles_k * (sl + 1)) / b.nsl;
+        const uint32_t* wp = w32 + (size_t)nf * W + (size_t)tk_lo * row_step;
 
         sycl::sub_group sg = it.get_sub_group();
         mx8::joint_matrix<sycl::sub_group, signed char, mx8::use::a, 8, 32,
@@ -554,10 +560,21 @@ struct Gemv8
         mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc;
         mx8::joint_matrix_fill(sg, jc, 0);
 
-        for (int tk = 0; tk < tiles_k; ++tk, wp += row_step) {
-            uint32_t g[NW];
+        // depth-2 word pipeline: tile tk+1's column words load while tk stages/barriers/
+        // mads. Ping-pong bands keep ONE barrier per tile (the WAR on a reused band is
+        // covered by the previous iteration's barrier). Depth-4 buffer rotation was tried
+        // and is WORSE (G2 105 -> 149us): the (tk&3)-indexed register state defeats the
+        // unroller. Two-tiles-per-iteration: no win either (t31 with both tiles actually
+        // processed; an earlier apparent win was an ablation artifact). Do not re-litigate.
+        uint32_t g[NW], gn[NW];
 #pragma unroll
-            for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+        for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step) {
+            if (tk + 1 < tk_hi) {
+                const uint32_t* wpn = wp + row_step;
+#pragma unroll
+                for (int i = 0; i < NW; ++i) gn[i] = wpn[widx[i]];
+            }
             uint32_t h[NW];
             if (pre == 0) {
 #pragma unroll
@@ -568,16 +585,39 @@ struct Gemv8
                     h[i] = (g[i] >> pre) | (g[i + 1] << (32 - pre));
                 h[NW - 1] = g[NW - 1] >> pre;
             }
+            uint32_t* const band = sl32 + (tk & 1) * 256;
+            // Window extraction. For K2=4 the state windows PAIR: rows (rk, rk+2) for
+            // rk in {0,1,4,5,8,9,12,13} sit exactly 16 bits apart, so one 32-bit funnel
+            // per pair yields both states (hi16=row A, lo16=row B): ~4.5 ops/state vs ~7.
+            // t31 full-work A/B (V12 vs V0, both tiles processed): -19% tile-loop time.
+            // Other rates (K2=5 half-bit stagger, K2=8 32-bit steps) keep the generic
+            // extractor; a K2=8 variant was not tried (rel steps are multiples of 4).
+            if constexpr (K2V == 4) {
+                static constexpr int PKA[8] = {0, 1, 4, 5, 8, 9, 12, 13};
 #pragma unroll
-            for (int rk = 0; rk < 16; ++rk) {
-                const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
-                const int rel = AD27 - ((K2V * d + KE) >> 1);
-                const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
-                const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
-                // packed-VNNI dword store, lab_jm8 addressing: band (rk>>3), quad row (rk&7), col cin
-                sl32[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = st16 * 0x83DCD12Du;
+                for (int p = 0; p < 8; ++p) {
+                    const int rk = PKA[p], rkB = rk + 2;
+                    const int dA = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                    const int relA = AD27 - ((K2V * dA + KE) >> 1);
+                    const int relB = relA - 16;
+                    const int a = relB >> 5, s = relB & 31;
+                    const uint32_t w = s ? ((h[a] >> s) | (h[a + 1] << (32 - s))) : h[a];
+                    band[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = (w >> 16) * 0x83DCD12Du;
+                    band[(rkB >> 3) * 128 + (rkB & 7) * 16 + cin] = (w & 0xffffu) * 0x83DCD12Du;
+                }
+            } else {
+#pragma unroll
+                for (int rk = 0; rk < 16; ++rk) {
+                    const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                    const int rel = AD27 - ((K2V * d + KE) >> 1);
+                    const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
+                    const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
+                    // packed-VNNI dword store, lab_jm8 addressing: band (rk>>3), quad (rk&7), col cin
+                    band[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = st16 * 0x83DCD12Du;
+                }
             }
             sg.barrier();
+            unsigned char* const bnd = slb + (tk & 1) * 1024;
 #pragma unroll
             for (int fk = 0; fk < 2; ++fk) {
                 auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
@@ -586,15 +626,16 @@ struct Gemv8
                 mx8::joint_matrix_load(sg, ja, pag, 32);
                 mx8::joint_matrix_load(sg, jb,
                     sycl::address_space_cast<sycl::access::address_space::local_space,
-                                             sycl::access::decorated::yes>(slb + fk * 512),
+                                             sycl::access::decorated::yes>(bnd + fk * 512),
                     16 * 4);   // packed stride = N * VNNI bytes
                 mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
             }
-            sg.barrier();      // band reuse safety before the next tile's stores
+#pragma unroll
+            for (int i = 0; i < NW; ++i) g[i] = gn[i];
         }
         auto pcg = sycl::address_space_cast<sycl::access::address_space::global_space,
                                             sycl::access::decorated::yes>(
-            b.acc + (size_t)slot * 8 * N + nf * 16);
+            b.acc + ((size_t)slot * b.nsl + sl) * 8 * N + nf * 16);
         mx8::joint_matrix_store(sg, jc, pcg, N, mx8::layout::row_major);
     }
 };
@@ -606,13 +647,21 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 {
     const int H = P.hidden, I = P.interm;
     const int k2 = 2 * P.bits + P.hb;
-    // EXL3_MOE_B70_INT8 tri-state: =1 force on (lab), =0 force off, unset -> member default.
-    // The DPAS tier only exists for the stream-layout rates (int8_ok, computed in init()).
+    // Tier policy. Measured on B70 (bench_layer, E12/topk10): rows=1 decode float 185us vs
+    // int8 239us (m8 fragments are 25% full, QuantIn+wide-pairs cost is not amortized);
+    // rows=4: 361 vs 253; rows=8: 1056 vs 404; rows=32: 2853 vs 1182. So AUTO = DPAS only
+    // when some chunk carries >= 2 token rows. EXL3_MOE_B70_INT8: =1 force int8 (lab),
+    // =0 force float; unset -> auto (respects member int8 = true). Only stream-layout
+    // rates can use the DPAS tier at all (int8_ok, from init()).
     static const int g_int8_env = []{
         const char* e = std::getenv("EXL3_MOE_B70_INT8");
         return !e ? -1 : (e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1);
     }();
-    use8_ = int8_ok && (g_int8_env >= 0 ? (bool)g_int8_env : int8);
+    int maxm_scan = 1;
+    for (int j = 0; j < num_chunks; ++j) maxm_scan = std::max(maxm_scan, (int)chunks_host[j].m);
+    if (g_int8_env == 0)      use8_ = false;
+    else if (g_int8_env == 1) use8_ = int8_ok;
+    else                      use8_ = int8_ok && int8 && (maxm_scan >= 2);
     int8_active = use8_;
     const int E = P.num_experts;
     const int tile_u32 = 4 * k2;                    // u32 words per tile
@@ -620,6 +669,25 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     const int nm = gated ? 2 : 1;
     const int act = P.activation;
     const float lim = P.act_limit != 0.0f ? P.act_limit : INFINITY;
+    // int8 split-K degrees (must be resolved BEFORE ensure_ws: the acc buffers are sized
+    // by them). Same lane-target heuristic as the float tier: the DPAS gemv runs one
+    // sub-group per (fragment,slice,slot), so unsliced decode shapes run far below the
+    // 2048-thread fill; slice-sum consumers are K34i8/K6i8 (multi-row: slices cost traffic).
+    int nsl8_gu = 1, nsl8_d = 1;
+    if (use8_) {
+        const int mxm = maxm_scan;
+        const int lanes_u = num_chunks * nm * I;
+        const int lanes_d = num_chunks * H;
+        if (nsl > 0) { nsl8_gu = std::min(8, nsl); nsl8_d = nsl8_gu; }
+        else {
+            while (nsl8_gu < 8 && lanes_u * nsl8_gu < 80000) ++nsl8_gu;
+            if (mxm > 1 && nsl8_gu > 4) nsl8_gu = 4;
+            while (nsl8_d < 8 && lanes_d * nsl8_d < 80000) ++nsl8_d;
+            if (nsl8_d > 4) nsl8_d = 4;               // down has more fragments: softer cap
+            if (mxm > 1 && nsl8_d > 2) nsl8_d = 2;
+        }
+    }
+    nsl8_gu_ = nsl8_gu; nsl8_d_ = nsl8_d;
     sycl::queue& q = *Q;
     ensure_ws(num_chunks, rows);
 
@@ -719,7 +787,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         Affine* const qsxu = (Affine*)w_qsxu;
         Affine* const qsxd = (Affine*)w_qsxd;
         const int slots = nc * nm;
-        Gemv8Base g8{ d_tab, w_chunk, nullptr, nullptr, E, nc, nm, H, I, 0, 0 };
+        Gemv8Base g8{ d_tab, w_chunk, nullptr, nullptr, E, nc, nm, H, I, 0, 0, 1 };
 
         // Q1: quantize the rotated gu inputs (one WG of 256 per (slot, DPAS row))
         launch([&](sycl::handler& cgh) {
@@ -728,15 +796,16 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 QuantIn{ tin, w_a8u, qsxu, chunks, H, nm, gated ? 1 : 2, red });
         });
 
-        // K2p: gate/up DPAS gemm, one sub-group per (16-col fragment, slot)
+        // K2p: gate/up DPAS gemm, one sub-group per (16-col fragment, slice, slot)
         {
-            g8.a8 = w_a8u; g8.acc = accgu; g8.nfl = I / 16; g8.down = 0;
+            g8.a8 = w_a8u; g8.acc = accgu; g8.nfl = I / 16; g8.down = 0; g8.nsl = nsl8_gu;
+            const size_t g0 = (size_t)(I / 16) * 16 * nsl8_gu;
             launch([&](sycl::handler& cgh) {
-                sycl::local_accessor<unsigned char, 1> slm({1024}, cgh);
+                sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
                 switch (k2) {
-                    case 4: cgh.parallel_for(sycl::nd_range<2>({(size_t)(I / 16) * 16, (size_t)slots}, {16, 1}), Gemv8<4>{g8, slm}); break;
-                    case 5: cgh.parallel_for(sycl::nd_range<2>({(size_t)(I / 16) * 16, (size_t)slots}, {16, 1}), Gemv8<5>{g8, slm}); break;
-                    default: cgh.parallel_for(sycl::nd_range<2>({(size_t)(I / 16) * 16, (size_t)slots}, {16, 1}), Gemv8<8>{g8, slm}); break;
+                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4>{g8, slm}); break;
+                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<5>{g8, slm}); break;
+                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<8>{g8, slm}); break;
                 }
             });
         }
@@ -762,8 +831,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     const uint16_t* bu   = (const uint16_t*)tab[(F_BIAS * 3 + CAT_UP) * E + e];
                     const int slotg = gated ? j * 2 : j;      // int8 slots: gateless uses j
                     const int slotu = gated ? j * 2 + 1 : j;
-                    const int32_t* ag = accgu + (size_t)slotg * 8 * I;
-                    const int32_t* au = accgu + (size_t)slotu * 8 * I;
+                    const int nq = nsl8_gu;
+                    const int32_t* ag = accgu + (size_t)slotg * nq * 8 * I;
+                    const int32_t* au = accgu + (size_t)slotu * nq * 8 * I;
+                    // slice sums are exact i32 (partials bounded by the same |C| limit)
+                    auto accsum = [&](const int32_t* base, size_t row) -> int {
+                        int s = 0;
+                        for (int qq = 0; qq < nq; ++qq) s += base[((size_t)qq * 8 + row) * I + cG];
+                        return s;
+                    };
                     const Affine* qg = qsxu + slotg * 8;
                     const Affine* qu = qsxu + slotu * 8;
                     const float hu = HAD_SCALE * f16(svhu[cG]);
@@ -780,15 +856,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         const Affine up0 = qu[2 * r], up1 = qu[2 * r + 1];     // up parts
                         if (gated) {
                             const Affine gt0 = qg[2 * r], gt1 = qg[2 * r + 1];  // gate parts
-                            sh[tid]       = gt0.A * (float)ag[(size_t)(2 * r) * I + cG]
-                                          + gt1.A * (float)ag[(size_t)(2 * r + 1) * I + cG];
-                            sh[128 + tid] = up0.A * (float)au[(size_t)(2 * r) * I + cG]
-                                          + up1.A * (float)au[(size_t)(2 * r + 1) * I + cG];
+                            sh[tid]       = gt0.A * (float)accsum(ag, 2 * r)
+                                          + gt1.A * (float)accsum(ag, 2 * r + 1);
+                            sh[128 + tid] = up0.A * (float)accsum(au, 2 * r)
+                                          + up1.A * (float)accsum(au, 2 * r + 1);
                             bfold_g = 128.0f * (gt0.B + gt1.B);
                             bfold_u = 128.0f * (up0.B + up1.B);
                         } else {
-                            sh[tid] = up0.A * (float)au[(size_t)(2 * r) * I + cG]
-                                    + up1.A * (float)au[(size_t)(2 * r + 1) * I + cG];
+                            sh[tid] = up0.A * (float)accsum(au, 2 * r)
+                                    + up1.A * (float)accsum(au, 2 * r + 1);
                             bfold_u = 128.0f * (up0.B + up1.B);
                         }
                         if (gated) {
@@ -838,13 +914,14 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 QuantIn{ tind, w_a8d, qsxd, chunks, I, 1, 1, red });
         });
         {
-            g8.a8 = w_a8d; g8.acc = accd8; g8.nfl = H / 16; g8.down = 1;
+            g8.a8 = w_a8d; g8.acc = accd8; g8.nfl = H / 16; g8.down = 1; g8.nsl = nsl8_d;
+            const size_t g0 = (size_t)(H / 16) * 16 * nsl8_d;
             launch([&](sycl::handler& cgh) {
-                sycl::local_accessor<unsigned char, 1> slm({1024}, cgh);
+                sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
                 switch (k2) {
-                    case 4: cgh.parallel_for(sycl::nd_range<2>({(size_t)(H / 16) * 16, (size_t)nc}, {16, 1}), Gemv8<4>{g8, slm}); break;
-                    case 5: cgh.parallel_for(sycl::nd_range<2>({(size_t)(H / 16) * 16, (size_t)nc}, {16, 1}), Gemv8<5>{g8, slm}); break;
-                    default: cgh.parallel_for(sycl::nd_range<2>({(size_t)(H / 16) * 16, (size_t)nc}, {16, 1}), Gemv8<8>{g8, slm}); break;
+                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4>{g8, slm}); break;
+                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<5>{g8, slm}); break;
+                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<8>{g8, slm}); break;
                 }
             });
         }
@@ -875,8 +952,14 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
                         const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
                         const Affine cd0 = qsxd[j * 8 + 2 * s], cd1 = qsxd[j * 8 + 2 * s + 1];
-                        sh[tid] = cd0.A * (float)accd8[((size_t)j * 8 + 2 * s) * H + cG]
-                                + cd1.A * (float)accd8[((size_t)j * 8 + 2 * s + 1) * H + cG];
+                        const int nq = nsl8_d;
+                        const int32_t* ad = accd8 + (size_t)j * nq * 8 * H;
+                        int s0 = 0, s1 = 0;
+                        for (int qq = 0; qq < nq; ++qq) {
+                            s0 += ad[((size_t)qq * 8 + 2 * s) * H + cG];
+                            s1 += ad[((size_t)qq * 8 + 2 * s + 1) * H + cG];
+                        }
+                        sh[tid] = cd0.A * (float)s0 + cd1.A * (float)s1;
                         hadamard128(it, tid, sh.get_pointer());
                         if (tid == 0) sh[0] += 128.0f * (cd0.B + cd1.B);
                         float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));

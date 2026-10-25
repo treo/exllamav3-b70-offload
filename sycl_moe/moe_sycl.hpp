@@ -79,9 +79,9 @@ public:
 
     // profiling: keep an event per submitted kernel (memcpys stay chained but untracked)
     bool prof = false;
-    bool int8 = false;               // int8/XMX DPAS tier (mirrors CPU VNNI semantics); runtime
-                                     // override: EXL3_MOE_B70_INT8=1/0 (tri-state, see .cpp).
-                                     // Active only for the stream-layout rates K2 in {4,5,8}.
+    bool int8 = true;                // int8/XMX DPAS tier AUTO-eligible (multi-row shapes).
+                                     // EXL3_MOE_B70_INT8=1 forces on, =0 forces off; see
+                                     // forward() for the measured per-shape policy.
     bool int8_active = false;        // set by forward(): the tier actually used for the last call
     const std::vector<sycl::event>& events() const { return pev; }
 
@@ -107,6 +107,8 @@ public:
             default: return w_accd;
         }
     }
+    // accgu/accd are [slot][nsl][8][N] slice buffers; the trace must sum slices itself.
+    int i8nsl(int which) const { return which ? nsl8_d_ : nsl8_gu_; }   // 0 gu, 1 down
 
 private:
     sycl::queue* Q = nullptr;
@@ -139,6 +141,7 @@ private:
     bool int8_ok = false;            // rate/geometry supports the DPAS tier
     bool use8_ = false;              // tier resolved for the last forward (read by ensure_ws)
     int nm_ws_ = 1;                  // gated ? 2 : 1, cached for ensure_ws sizing
+    int nsl8_gu_ = 1, nsl8_d_ = 1;   // int8 split-K degrees of the last forward
     int *w_tokb = nullptr;           // rows+1
     int *w_toke = nullptr;           // rows * topk (cap by alloc size)
 
