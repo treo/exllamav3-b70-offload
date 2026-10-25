@@ -103,6 +103,7 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
         g_ws.cap[slot] = np ? count : 0;
         g_alloc_bytes += np ? count * sizeof(T) : 0;
         p = np;
+        if (!p) return;
         // prefault so device page tables are populated before the kernel pipeline runs
         Q->memset(p, 0, count * sizeof(T));
         Q->wait();

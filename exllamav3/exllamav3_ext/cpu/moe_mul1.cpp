@@ -83,7 +83,7 @@ struct B70Backend
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*);
-    using FwdFn = void (*)(int64_t, const void*, const int32_t*, const void*, float*, int, int);
+    using FwdFn = int (*)(int64_t, const void*, const int32_t*, const void*, float*, int, int);
     using FreeFn = void (*)(int64_t);
 
     bool enabled = false;
@@ -3895,8 +3895,10 @@ void exl3_moe_cpu_forward_raw(
 {
     const MoeCpuLayer* layer = get_layer(handle);
     if (layer->b70 >= 0 && b70().usable) {
-        b70().forward(layer->b70, x, sel, wts, out, rows, topk);
-        return;
+        if (b70().forward(layer->b70, x, sel, wts, out, rows, topk) == 0) return;
+        // device-side failure (typically launch-time OOM): pin this layer to the CPU path
+        fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
+        const_cast<MoeCpuLayer*>(layer)->b70 = -1;
     }
     const int m_total = rows;
     const int top_k = topk;

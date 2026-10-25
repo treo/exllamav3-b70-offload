@@ -30,6 +30,8 @@ struct Global
     std::mutex mu;
     std::vector<Upload*> uploads;
     bool ok = false;
+    size_t budget = ~(size_t)0;  // device bytes we allow ourselves to hold
+    bool dev_full = false;       // a registration failed; stop trying (CPU covers the rest)
 };
 
 Global g;
@@ -49,6 +51,10 @@ bool ensure_ctx()
         g.q = &queue;
         printf("[b70moe] device: %s\n",
                g.q->get_device().get_info<sycl::info::device::name>().c_str());
+        // Leave a fat margin for scratch pools, queue/page-table allocations and driver
+        // bookkeeping; running right up to physical VRAM makes LAUNCHES fault asynchronously
+        // with UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY instead of failing an allocation cleanly.
+        g.budget = (size_t)(g.q->get_device().get_info<sycl::info::device::global_mem_size>() * 0.60);
         g.ok = true;
     } catch (const std::exception& e) {
         fprintf(stderr, "[b70moe] no SYCL GPU: %s\n", e.what());
@@ -60,25 +66,27 @@ bool ensure_ctx()
 // repacked upload: per-tile u32 word reversal (native ring -> column-window stream)
 const uint16_t* upload_trellis(const uint16_t* host, size_t n_u16, int K2)
 {
+    if (g.dev_full || g_alloc_bytes + n_u16 * 2 > g.budget) return nullptr;
     std::vector<uint32_t> tmp(n_u16 / 2);
     moe_sycl::repack_native_to_stream_words(tmp.data(), (const uint32_t*)host, n_u16 / (2 * 4 * (size_t)K2), K2);
     uint32_t* p = sycl::malloc_device<uint32_t>(tmp.size(), *g.q);
     if (!p) { fprintf(stderr, "[b70moe] OOM trellis upload %zu words\n", tmp.size()); return nullptr; }
+    g.uploads.back()->keep.push_back((uint16_t*)p);   // recorded before the copy so a throwing
+    g_alloc_bytes += tmp.size() * 4;                  // wait() still rolls back cleanly
     g.q->memcpy(p, tmp.data(), tmp.size() * 4).wait();
-    g.uploads.back()->keep.push_back((uint16_t*)p);
-    g_alloc_bytes += tmp.size() * 4;
     return (const uint16_t*)p;
 }
 
 const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
 {
-    if (!host) return required ? nullptr : nullptr;
+    if (!host) return nullptr;
+    if (g.dev_full || g_alloc_bytes + n * 2 > g.budget) return nullptr;
     uint16_t* p = sycl::malloc_device<uint16_t>(n, *g.q);
     if (!p) { fprintf(stderr, "[b70moe] OOM allocating %zu u16\n", n); return nullptr; }
-    if (!host) { fprintf(stderr, "[b70moe] null host source!\n"); sycl::free(p, *g.q); return nullptr; }
-    g.q->memcpy(p, host, n * 2).wait();
     g.uploads.back()->keep.push_back(p);
     g_alloc_bytes += n * 2;
+    g.q->memcpy(p, host, n * 2).wait();
+    (void)required;
     return p;
 }
 
@@ -87,6 +95,19 @@ const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
 extern "C" {
 
 void b70_warm(int64_t handle, int rows, int max_chunks);
+
+static void forward_impl(int64_t, const void*, const int32_t*, const void*, float*, int, int);
+
+// Wraps forward_impl: 0 = ok, nonzero = device failure (caller falls back to CPU).
+int b70_forward(int64_t handle, const void* x, const int32_t* sel, const void* w, float* out, int rows, int topk)
+{
+    try {
+        forward_impl(handle, x, sel, w, out, rows, topk);
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
 
 // Initialize (idempotent). 0 on success.
 int b70_init()
@@ -97,7 +118,7 @@ int b70_init()
 // Register one layer's expert weights. Pointers are HOST arrays (CPU arena), copied
 // to the device. gate_* may be null/absent for gateless layers. Returns handle >= 0
 // or -1.
-int64_t b70_register_layer
+static int64_t register_impl
 (
     int num_experts,
     int hidden, int interm,
@@ -126,9 +147,18 @@ int64_t b70_register_layer
         return true;
     };
     for (int e = 0; e < E; ++e) {
-        if (gated && !fill(gs[e], gate_trellis, gate_suh, gate_svh, gate_bias, e, pu_gu, H, I)) return -1;
-        if (!fill(us[e], up_trellis, up_suh, up_svh, up_bias, e, pu_gu, H, I)) return -1;
-        if (!fill(ds[e], down_trellis, down_suh, down_svh, down_bias, e, pu_d, I, H)) return -1;
+        if ((gated && !fill(gs[e], gate_trellis, gate_suh, gate_svh, gate_bias, e, pu_gu, H, I)) ||
+            !fill(us[e], up_trellis, up_suh, up_svh, up_bias, e, pu_gu, H, I) ||
+            !fill(ds[e], down_trellis, down_suh, down_svh, down_bias, e, pu_d, I, H)) {
+            // roll back this layer's device allocations and fall back to CPU for it
+            fprintf(stderr, "[b70moe] registration out of device memory; layer stays on CPU\n");
+            g.dev_full = true;
+            Upload* u = g.uploads.back();
+            for (uint16_t* p : u->keep) { sycl::free(p, *g.q); }
+            g.uploads.pop_back();
+            delete u;
+            return -1;
+        }
     }
     moe_sycl::LayerParams p;
     p.num_experts = E; p.hidden = H; p.interm = I; p.bits = bits; p.hb = hb;
@@ -140,6 +170,42 @@ int64_t b70_register_layer
     b70_warm((int64_t)(intptr_t)layer, 64, 1024);
     b70_warm((int64_t)(intptr_t)layer, 1, 16);
     return (int64_t)(intptr_t)layer;
+}
+
+// Any SYCL throw during upload/warm (device OOM surfaces late, often from memcpy().wait() or
+// the first launch) must NOT cross the C ABI: roll this layer's allocations back and leave
+// the layer on the CPU path.
+int64_t b70_register_layer
+(
+    int num_experts,
+    int hidden, int interm,
+    int bits, int hb,
+    int activation, float act_limit, int gated,
+    const uint64_t* gate_trellis, const uint64_t* gate_suh, const uint64_t* gate_svh, const uint64_t* gate_bias,
+    const uint64_t* up_trellis,   const uint64_t* up_suh,   const uint64_t* up_svh,   const uint64_t* up_bias,
+    const uint64_t* down_trellis, const uint64_t* down_suh, const uint64_t* down_svh, const uint64_t* down_bias
+)
+{
+    if (!ensure_ctx()) return -1;
+    size_t ups0 = g.uploads.size();
+    try {
+        return register_impl(num_experts, hidden, interm, bits, hb, activation, act_limit, gated,
+            gate_trellis, gate_suh, gate_svh, gate_bias,
+            up_trellis, up_suh, up_svh, up_bias,
+            down_trellis, down_suh, down_svh, down_bias);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[b70moe] registration threw: %s; layer stays on CPU\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "[b70moe] registration threw; layer stays on CPU\n");
+    }
+    g.dev_full = true;
+    while (g.uploads.size() > ups0) {
+        Upload* u = g.uploads.back();
+        for (uint16_t* p : u->keep) sycl::free(p, *g.q);
+        g.uploads.pop_back();
+        delete u;
+    }
+    return -1;
 }
 
 // Routed-expert forward for one layer, blocking.
@@ -197,7 +263,7 @@ void b70_warm(int64_t handle, int rows, int max_chunks)
     fprintf(stderr, "[b70moe] warm done rows %d chunks %d; B70 bytes %.2f GB\n", rows, max_chunks, g_alloc_bytes / 1e9);
 }
 
-void b70_forward
+static void forward_impl
 (
     int64_t handle,
     const void* x, const int32_t* sel, const void* w, float* out,
