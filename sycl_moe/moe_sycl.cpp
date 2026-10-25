@@ -555,42 +555,50 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 
     gemv(true);
 
-    // ---- K6: down out-transform + weighted gather into out (writes every element, no
-    // separate zero-init needed)
+    // ---- K6: down out-transform + weighted gather into out. One workgroup per
+    // (128-column block, routing entry) so a rows=1 decode still lights 2560*deg threads
+    // (the old per-token loop was latency-bound at 20 WGs); fp32 atomics combine experts.
     {
         const int nbk = H / 128;
-        launch([&](sycl::handler& cgh) {
-            sycl::local_accessor<float, 1> sh({128}, cgh);
-            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)rows}, {128, 1}),
-                [=](sycl::nd_item<2> it) {
-                const int blk = (int)it.get_group(0);
-                const int t = (int)it.get_group(1);
-                const int tid = (int)it.get_local_id(0);
-                const int cG = blk * 128 + tid;
-                float acc = 0.0f;
-                const int b0 = d_tokb[t], b1 = d_tokb[t + 1];
-                for (int p = b0; p < b1; ++p) {
+        const int nent = (int)tmap.entry.size();
+        if (nent) {
+            dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
+            if (prof) pev.push_back(dep);
+            launch([&](sycl::handler& cgh) {
+                sycl::local_accessor<float, 1> sh({128}, cgh);
+                cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nent}, {128, 1}),
+                    [=](sycl::nd_item<2> it) {
+                    const int blk = (int)it.get_group(0);
+                    const int p = (int)it.get_group(1);
+                    const int tid = (int)it.get_local_id(0);
+                    const int cG = blk * 128 + tid;
+                    // token t owns entries [d_tokb[t], d_tokb[t+1]): binary search
+                    int lo = 0, hi = rows;
+                    while (hi - lo > 1) { const int mid = (lo + hi) >> 1;
+                        if (d_tokb[mid] <= p) lo = mid; else hi = mid; }
+                    const int t = lo;
                     const int ent = d_toke[p];
                     const int j = ent >> 2, s = ent & 3;
                     const int e = chunks[j].expert;
                     const float wgt = chunks[j].weight[s];
                     const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
                     const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
-                    {
-                        float sv = 0.f;
-                        for (int qq = 0; qq < NSL_D; ++qq)
-                            sv += toutd[((size_t)(j * NSL_D + qq) * MAXM + s) * H + cG];
-                        sh[tid] = sv;
-                    }
+                    float sv = 0.f;
+                    for (int qq = 0; qq < NSL_D; ++qq)
+                        sv += toutd[((size_t)(j * NSL_D + qq) * MAXM + s) * H + cG];
+                    sh[tid] = sv;
                     hadamard128(it, tid, sh.get_pointer());
                     float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
                     if (be) v += f16(be[cG]);
-                    acc += wgt * v;
-                    sycl::group_barrier(it.get_group());
-                }
-                out[(size_t)t * H + cG] = acc;
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                     sycl::memory_scope::device> ao(out[(size_t)t * H + cG]);
+                    ao.fetch_add(wgt * v);
+                });
             });
-        });
+        } else {
+            dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
+            if (prof) pev.push_back(dep);
+        }
     }
     return dep;
 }
