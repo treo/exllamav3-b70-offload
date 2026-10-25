@@ -1088,50 +1088,56 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             });
         }
 
-        // K6i8: down out-transform + weighted gather from i32 accumulators + affine fold
+        // K6i8: down out-transform + weighted gather. OWNER-GATHER layout: one workgroup
+        // per (128-column block, token); the owner walks its token's tmap entries, so
+        // `out` needs NO pre-zeroing (a memset command used to lead this stage) and no
+        // fp atomics - and the ascending-entry accumulation order now MATCHES the CPU
+        // reference exactly instead of racing. Sum per entry is identical to the old
+        // scatter kernel; only the combining schedule changed.
         {
             const int nbk = H / 128;
             const int nent = (int)tmap.entry.size();
-            dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
-            if (prof) pev.push_back(dep);
             if (nent) {
                 launch([&](sycl::handler& cgh) {
                     sycl::local_accessor<float, 1> sh({128}, cgh);
-                    cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nent}, {128, 1}),
+                    cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)rows}, {128, 1}),
                         [=](sycl::nd_item<2> it) {
                         const int blk = (int)it.get_group(0);
-                        const int p = (int)it.get_group(1);
+                        const int t = (int)it.get_group(1);
                         const int tid = (int)it.get_local_id(0);
                         const int cG = blk * 128 + tid;
-                        int lo = 0, hi = rows;
-                        while (hi - lo > 1) { const int mid = (lo + hi) >> 1;
-                            if (d_tokb[mid] <= p) lo = mid; else hi = mid; }
-                        const int t = lo;
-                        const int ent = d_toke[p];
-                        const int j = ent >> 3, s = ent & 7;
-                        const int e = chunks[j].expert;
-                        const float wgt = chunks[j].weight[s];
-                        const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
-                        const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
-                        const int rs = (s >> 2) * 8 + 2 * (s & 3);   // token -> 16-row slot rows
-                        const Affine cd0 = qsxd[j * 16 + rs], cd1 = qsxd[j * 16 + rs + 1];
-                        const int nq = nsl8_d;
-                        const int32_t* ad = accd8 + (size_t)j * nq * 16 * H;
-                        int s0 = 0, s1 = 0;
-                        for (int qq = 0; qq < nq; ++qq) {
-                            s0 += ad[((size_t)qq * 16 + rs) * H + cG];
-                            s1 += ad[((size_t)qq * 16 + rs + 1) * H + cG];
+                        const int eb = d_tokb[t], ee = d_tokb[t + 1];
+                        float acc = 0.f;
+                        for (int p = eb; p < ee; ++p) {
+                            const int ent = d_toke[p];
+                            const int j = ent >> 3, s = ent & 7;
+                            const int e = chunks[j].expert;
+                            const float wgt = chunks[j].weight[s];
+                            const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
+                            const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
+                            const int rs = (s >> 2) * 8 + 2 * (s & 3);   // token -> 16-row slot rows
+                            const Affine cd0 = qsxd[j * 16 + rs], cd1 = qsxd[j * 16 + rs + 1];
+                            const int nq = nsl8_d;
+                            const int32_t* ad = accd8 + (size_t)j * nq * 16 * H;
+                            int s0 = 0, s1 = 0;
+                            for (int qq = 0; qq < nq; ++qq) {
+                                s0 += ad[((size_t)qq * 16 + rs) * H + cG];
+                                s1 += ad[((size_t)qq * 16 + rs + 1) * H + cG];
+                            }
+                            if (p > eb) sycl::group_barrier(it.get_group());   // sh WAR guard
+                            sh[tid] = cd0.A * (float)s0 + cd1.A * (float)s1;
+                            hadamard128(it, tid, sh.get_pointer());
+                            if (tid == 0) sh[0] += 128.0f * (cd0.B + cd1.B);
+                            float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
+                            if (be) v += f16(be[cG]);
+                            acc += wgt * v;
                         }
-                        sh[tid] = cd0.A * (float)s0 + cd1.A * (float)s1;
-                        hadamard128(it, tid, sh.get_pointer());
-                        if (tid == 0) sh[0] += 128.0f * (cd0.B + cd1.B);
-                        float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
-                        if (be) v += f16(be[cG]);
-                        sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                         sycl::memory_scope::device> ao(out[(size_t)t * H + cG]);
-                        ao.fetch_add(wgt * v);
+                        out[(size_t)t * H + cG] = acc;
                     });
                 });
+            } else {
+                dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
+                if (prof) pev.push_back(dep);
             }
         }
         return dep;
@@ -1255,44 +1261,41 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 
     gemv(true);
 
-    // ---- K6: down out-transform + weighted gather into out. One workgroup per
-    // (128-column block, routing entry) so a rows=1 decode still lights 2560*deg threads
-    // (the old per-token loop was latency-bound at 20 WGs); fp32 atomics combine experts.
+    // ---- K6: down out-transform + weighted gather into out. OWNER-GATHER (see the K6i8
+    // comment): one workgroup per (128-column block, token); no `out` memset, no atomics,
+    // and the accumulation order matches the CPU reference.
     {
         const int nbk = H / 128;
         const int nent = (int)tmap.entry.size();
         if (nent) {
-            dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
-            if (prof) pev.push_back(dep);
             launch([&](sycl::handler& cgh) {
                 sycl::local_accessor<float, 1> sh({128}, cgh);
-                cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nent}, {128, 1}),
+                cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)rows}, {128, 1}),
                     [=](sycl::nd_item<2> it) {
                     const int blk = (int)it.get_group(0);
-                    const int p = (int)it.get_group(1);
+                    const int t = (int)it.get_group(1);
                     const int tid = (int)it.get_local_id(0);
                     const int cG = blk * 128 + tid;
-                    // token t owns entries [d_tokb[t], d_tokb[t+1]): binary search
-                    int lo = 0, hi = rows;
-                    while (hi - lo > 1) { const int mid = (lo + hi) >> 1;
-                        if (d_tokb[mid] <= p) lo = mid; else hi = mid; }
-                    const int t = lo;
-                    const int ent = d_toke[p];
-                    const int j = ent >> 3, s = ent & 7;   // MOE_MAXM=8 encoding (host chunker)
-                    const int e = chunks[j].expert;
-                    const float wgt = chunks[j].weight[s];
-                    const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
-                    const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
-                    float sv = 0.f;
-                    for (int qq = 0; qq < NSL_D; ++qq)
-                        sv += toutd[((size_t)(j * NSL_D + qq) * MAXM + s) * H + cG];
-                    sh[tid] = sv;
-                    hadamard128(it, tid, sh.get_pointer());
-                    float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
-                    if (be) v += f16(be[cG]);
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                                     sycl::memory_scope::device> ao(out[(size_t)t * H + cG]);
-                    ao.fetch_add(wgt * v);
+                    const int eb = d_tokb[t], ee = d_tokb[t + 1];
+                    float acc = 0.f;
+                    for (int p = eb; p < ee; ++p) {
+                        const int ent = d_toke[p];
+                        const int j = ent >> 3, s = ent & 7;   // MOE_MAXM=8 encoding (host chunker)
+                        const int e = chunks[j].expert;
+                        const float wgt = chunks[j].weight[s];
+                        const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
+                        const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
+                        float sv = 0.f;
+                        for (int qq = 0; qq < NSL_D; ++qq)
+                            sv += toutd[((size_t)(j * NSL_D + qq) * MAXM + s) * H + cG];
+                        if (p > eb) sycl::group_barrier(it.get_group());   // sh WAR guard
+                        sh[tid] = sv;
+                        hadamard128(it, tid, sh.get_pointer());
+                        float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
+                        if (be) v += f16(be[cG]);
+                        acc += wgt * v;
+                    }
+                    out[(size_t)t * H + cG] = acc;
                 });
             });
         } else {

@@ -21,7 +21,7 @@ using namespace moe_sycl;
 struct Args
 {
     int E = 16, rows = 1, topk = 10, bits = 2, hb = 0, act = 0, iters = 50;
-    bool gated = true, check = true, verbose = false, i8trace = false;
+    bool gated = true, check = true, verbose = false, i8trace = false, bare = false;
     uint64_t seed = 7;
     const char* load = nullptr;
 };
@@ -501,6 +501,7 @@ int main(int argc, char** argv)
         else if (s == "--act") a.act = val();
         else if (s == "--iters") a.iters = val();
         else if (s == "--nocheck") a.check = false;
+        else if (s == "--bare") a.bare = true;
         else if (s == "--gateless") a.gated = false;
         else if (s == "--v") a.verbose = true;
         else if (s == "--i8trace") a.i8trace = true;
@@ -971,7 +972,7 @@ int main(int argc, char** argv)
     std::vector<float> times;
     for (int i = 0; i < a.iters; ++i) {
         auto e0 = q.ext_oneapi_submit_barrier();
-        layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
+        if (!a.bare) layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
         auto e1 = q.ext_oneapi_submit_barrier();
         e0.wait(); e1.wait();
         times.push_back((float)(e1.get_profiling_info<sycl::info::event_profiling::command_end>() -
