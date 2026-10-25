@@ -247,3 +247,12 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
   Inner loop per state: ~9 int ALU (mul, 2x(and+add fused), shr, funnel pair) + cvt + fma.
   We are at the instruction-issue floor for the FLOAT-tier formulation; only an int8/DPAS
   tier redesign moves it further.
+
+## Benchmarking gotcha: first run after a heavy GPU job under-registers B70 layers
+Observed 4.05bpw mcs448: run immediately after a finished 2.05 run OOM'd the plugin at
+9.5GB (27 layers -> CPU, 36 t/s); identical rerun minutes later hit the normal 23.91GB
+residency (54 fallback lines, 49-51 t/s). Driver/page-reclaim lag steals apparent VRAM.
+=> When testing memory-heavy configs, discard the first run after another big GPU job,
+   or leave ~30s. The graceful-fallback machinery did its job (no crash, correct output).
+Also note: the parent process ALSO creates a plugin context (tiny, queue-only) via the
+swizzle gate -> two `[b70moe] device:` lines per run is NORMAL, not double-upload.
