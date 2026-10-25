@@ -34,21 +34,6 @@ inline float f16(uint16_t h)
     return (float)f;
 }
 
-// weight index (r*16+c) -> state slot t in the tile ring (inverse of tc_perm)
-struct InvPerm { unsigned char inv[256]; };
-
-InvPerm make_invperm()
-{
-    InvPerm p{};
-    for (int t = 0; t < 256; ++t) {
-        const int b = t >> 3, j = t & 7;
-        const int row = ((b & 3) * 2) + (j & 1) + ((j & 2) ? 8 : 0);
-        const int col = (b >> 2) + ((j & 4) ? 8 : 0);
-        p.inv[row * 16 + col] = (unsigned char)t;
-    }
-    return p;
-}
-
 // 128-wide sequentia hadamard in shared memory, same op order as the CPU scalar butterfly
 template <typename Item>
 inline void hadamard128(Item& it, int tid, sycl::local_ptr<float> v)
@@ -427,7 +412,6 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     }
 
     // ---- K2/K5: GEMV over mul1 tiles for one matrix class
-    const InvPerm invp = make_invperm();
     GemvBase gb;
     gb.tab = d_tab; gb.chunks = w_chunk;
     gb.tin = w_tin; gb.tout = w_tout; gb.tind = w_tind; gb.toutd = w_toutd;

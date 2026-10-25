@@ -3690,7 +3690,7 @@ bool exl3_moe_cpu_has_avx512_vbmi() { return g_isa == Isa::Vbmi; }
 int exl3_moe_cpu_swizzle_group(double K)
 {
     // B70 compute reads native tiles; keep native bytes everywhere when it is active
-    if (b70().enabled) return 0;
+    if (b70().usable) return 0;
     const int bits = static_cast<int>(K);
     if (g_isa >= Isa::Bw) return bits != 8 ? 8 : 0;
     if (g_isa == Isa::Avx2) return K == bits && bits >= 1 && bits <= 8 ? 2 : 0;
