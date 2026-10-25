@@ -85,10 +85,11 @@ Measured, this machine (Arc Pro B70 + RTX 3090, one model each):
 
 | model | config | CPU worker | + B70 |
 |---|---|---|---|
-| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256` | 68–70 t/s dec, 1511 pre | 70–72 t/s, **1883 pre (+25%)** |
-| Qwen3.8-Flash-Next-2.68bpw | `-mcs 448` | 40.2 t/s dec | **54–56 t/s (+35–40%)** |
-| Qwen3.8-Flash-Next-4.05bpw | `-mcs 448` | 25.0 t/s dec | **47–50 t/s (+89%)** |
+| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256` | 68–70 t/s dec, ~1511 pre | **70–71 t/s, 1876 pre (+24%)** |
+| Qwen3.8-Flash-Next-2.68bpw | `-mcs 448` | 40.2 t/s dec | **56.2 t/s (+40%)** |
+| Qwen3.8-Flash-Next-4.05bpw | `-mcs 448` | 25.0 t/s dec | **51.0 t/s (+104%)** |
 | ppl wikitext-2 (20×2048) | 2.05 / 2.68 / 4.05 | 3.96007 / 3.82400 / 3.73050 | 3.96836 / 3.82209 / 3.73007 |
+| ppl qbench trace (8 rows, 15874 tok) | 2.05bpw `-mcs 384` | 1.479306 | 1.479269 |
 
 The win is proportional to how much of the model the 3090 can't hold: at `-mcs 256` on
 2.05bpw decode is not MoE-CPU-bound, at `-mcs 448` on 4.05bpw it completely is.

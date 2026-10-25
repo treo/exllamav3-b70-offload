@@ -198,3 +198,17 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
   (1) native-L0 single immediate command list per forward (kills all submit gaps),
   (2) XMX DPAS int8/s4 tier (moves MACs off the vector unit; needs int8 activation tier),
   (3) K6 (15us at rows=1) parallelize over (chunk,blk) with atomics.
+
+## VTune pass 2 (gpu-hotspots on bench_layer; recipe in README/cheat-sheet)
+- Pre-fix gemv_gu: ~61B lane-instructions per 3006 launches; at 4096 lanes x 2.8GHz the
+  ISSUE RATE was the wall (56us floor vs 70us measured, XVE active only 40%, 52% idle).
+  Culprit: predicated-but-issued FMA chains for chunk slots 2..4 at m=1 (~30% of body).
+  -> template GemvK<K2V, MMA>; single-slot decode jobs take MMA=false. Inst/launch -42%.
+- gemv at rows=1 is now latency/idle-bound (~65% idle): split-K beyond 8 needs the ws pool
+  resized (tout/toutd sized for nsl<=8; MOE_NSL>12 CRASHES today — guard if extending).
+  nsl 4/6/8 indistinguishable at decode shapes (165-175us band, run noise dominates).
+- K6 real cost ~7us (earlier 15us reading was profiler bubble inflation, not kernel time).
+- Final synthetic steady decode/layer ~165-172us; production per-forward via C ABI ~130us.
+- Windows safety of the hooks reviewed: dlfcn/dlopen and all plugin calls sit under
+  __linux__; struct decls use portable types only.
+- Final quality: qbench-trace ppl 1.479306 (CPU) vs 1.479269 (B70) on the 2.05 model.
