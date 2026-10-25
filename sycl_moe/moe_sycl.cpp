@@ -439,10 +439,6 @@ struct QuantIn
         const int kf = k / 8;
         int32_t* aout = a8 + (size_t)slot * kf * 128 + r * 8;
         if (tok >= m) {
-            // frag1 rows only exist (are only READ, see Gemv8 has1) when m > 4; skip the
-            // zero-fill junk for narrow slots - it costs QuantIn bandwidth and nothing
-            // consumes it. Pad rows of frag0 still zero: they ARE loaded (frag0 always runs).
-            if (frag && m <= 4) return;   // whole frag1 unread only when m<=4
             for (int i = tid; i < kf * 8; i += 256) aout[(i >> 3) * 128 + (i & 7)] = 0;
             if (tid == 0) qsb[slot * 16 + r] = Affine{ 0.f, 0.f };
             return;
@@ -534,7 +530,6 @@ struct Gemv8
         const int lmu = down ? 0 : slot % b.nm;
         const int cat = down ? CAT_DOWN : (b.nm == 2 ? lmu : CAT_UP);
         const int e = b.chunks[j].expert;
-        const bool has1 = b.chunks[j].m > 4;   // fragment 1 (tokens 4-7) exists?
         const int K = down ? b.I : b.H;
         const int N = down ? b.H : b.I;
         const int tiles_k = K / 16;
@@ -644,9 +639,12 @@ struct Gemv8
                         16 * 4);   // packed stride = N * VNNI bytes
 #pragma unroll
                     for (int f = 0; f < 2; ++f) {
-                        if (f && !has1) break;   // uniform per WG: narrow slots skip frag1
-                        // load+DPAS; jc1 stays 0 and is still STORED, so acc pad rows are
-                        // written zeros exactly as before (the trace verifies them).
+                        // UNCONDITIONAL dual-fragment mad. Do NOT add a runtime narrow-slot
+                        // skip here (neither a loop `break` nor a template<bool> peel with
+                        // runtime dispatch helped): both variants cost the FULL-slot path
+                        // ~20% (E128/rows128 w8: 3605 -> 4325 break / 4389 peel) even though
+                        // they speed the narrow-only path ~22%. Production runs width-8, so
+                        // the fat path is the one that must stay straight-line.
                         auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
                                                             sycl::access::decorated::yes>(
                             (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 128 + f * 64));
@@ -756,12 +754,21 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const int lanes_d = num_chunks * H;
         if (nsl > 0) { nsl8_gu = std::min(8, nsl); nsl8_d = nsl8_gu; }
         else {
-            while (nsl8_gu < 8 && lanes_u * nsl8_gu < 80000) ++nsl8_gu;
+            // fill target 136000 lanes (was 80000): MAXM=8 halved nc, and the post-MAXM8
+            // sustained sweep with per-kernel overrides puts gu at nsl=2 for lanes~132k
+            // where the old target picked 1 (-13% at rows=64), while 61-70k-lane shapes
+            // want 2 (nsl3 costs +0.8%). ~66 waves of 16-lane WGs = full latency hiding.
+            while (nsl8_gu < 8 && lanes_u * nsl8_gu < 136000) ++nsl8_gu;
             if (mxm > 1 && nsl8_gu > 4) nsl8_gu = 4;
             while (nsl8_d < 8 && lanes_d * nsl8_d < 80000) ++nsl8_d;
             if (nsl8_d > 4) nsl8_d = 4;               // down has more fragments: softer cap
             if (mxm > 1 && nsl8_d > 2) nsl8_d = 2;
         }
+        // lab: independent per-kernel overrides AFTER the shared MOE_NSL path
+        static const int env_gu = []{ const char* e = getenv("EXL3_MOE_I8NSLU"); return e ? atoi(e) : 0; }();
+        static const int env_d  = []{ const char* e = getenv("EXL3_MOE_I8NSLD"); return e ? atoi(e) : 0; }();
+        if (env_gu >= 1 && env_gu <= 8) nsl8_gu = env_gu;
+        if (env_d  >= 1 && env_d  <= 8) nsl8_d  = env_d;
     }
     nsl8_gu_ = nsl8_gu; nsl8_d_ = nsl8_d;
     sycl::queue& q = *Q;

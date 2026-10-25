@@ -608,3 +608,27 @@ profile") - profile churn across short runs changes the B70/CPU expert split bet
 Model end state (MAXM8 plugin, spaced + cooled runs): 2.05 -mcs256 prefill2048 1871
 (best yet; CPU 1456), decode ~69-71; 4.05 -mcs448 prefill 360, decode 49.1/46.5 ctx0/768
 (CPU 24.9); 48/48 and 19-20/48 registered respectively.
+
+## nsl8 retune + the frag1-skip REVERSAL (unconditional dual-mad wins)
+
+Post-MAXM8 nsl sweep (sustained, EXL3_MOE_I8NSLU/I8NSLD per-kernel overrides added):
+gu optimum moved with the halved nc - rows=64 (lanes ~132k) wants nsl=2 where the old
+80k-lane target picked 1 (-13%). New gu fill target 136000 separates it from the 61-70k
+shapes that want 2 (nsl=3 costs them +0.8%). Down heuristic already tracked the per-kernel
+optimum (checked with overrides; d in {1,2,4}).
+
+FRAG1 SKIP TRIED AND REVERTED: skipping frag1 load+mad for m<=4 slots (runtime break, or
+template<bool> peel with runtime dispatch) speeds the NARROW path ~22% but costs the FULL-
+slot path ~20% (E128/rows128 w8: 3605 unconditional -> 4325 break / 4389 peel; Spill=0 in
+VTune for all variants - it is scheduling quality, not spills; both the sibling-branch
+duplication and the in-loop break poison the straight-line unrolled schedule). Production
+policy is width-8 everywhere, so the fat path is the one that must stay monolithic: the
+kernel ALWAYS runs both fragments and QuantIn ALWAYS zero-fills 16 rows. The MCAP=4 lab
+override therefore runs ~50% slower than MCAP=8 at chunk-rich shapes (5432 vs 3599 at
+E128/rows128) - that gap is the wasted frag1 mads on padded slots, known and accepted.
+If narrow-slot execution ever matters again, the RIGHT shape is a compile-time SEPARATE
+kernel (own parallel_for, no shared function), not a branch inside this one.
+
+Registration trap HARDENED: 120s idle did NOT prevent it (1380 t/s, layers lost); the run
+IMMEDIATELY after always registers fully (48/48, 1861). New rule: model gates run TWICE,
+scored off the second run; time gaps are not a control.
