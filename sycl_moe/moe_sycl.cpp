@@ -642,11 +642,12 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 {
     const int H = P.hidden, I = P.interm;
     const int k2 = 2 * P.bits + P.hb;
-    static const bool g_int8_env = []{
+    // EXL3_MOE_B70_INT8: =1 force int8 on (lab), =0 force off, unset -> struct default
+    static const int g_int8_env = []{
         const char* e = std::getenv("EXL3_MOE_B70_INT8");
-        return !e || e[0] != '0';
+        return !e ? -1 : (e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1);
     }();
-    use8 = int8 && g_int8_env && (k2 == 4 || k2 == 5 || k2 == 6 || k2 == 8);
+    use8 = (g_int8_env >= 0 ? (bool)g_int8_env : int8) && (k2 == 4 || k2 == 5 || k2 == 6 || k2 == 8);
     const int E = P.num_experts;
     const int tile_u32 = 4 * k2;                    // u32 words per tile
     const bool gated = P.gated;

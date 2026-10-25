@@ -79,7 +79,10 @@ public:
 
     // profiling: keep an event per submitted kernel (memcpys stay chained but untracked)
     bool prof = false;
-    bool int8 = true;                // int8-accumulate GEMV (mirrors CPU VNNI/AVX2 tiers)
+    bool int8 = false;               // int8-accumulate GEMV (mirrors CPU VNNI/AVX2 tiers).
+                                     // OFF: pipeline is numerically wrong for real activations
+                                     // (see NOTES 'int8 status'); EXL3_MOE_B70_INT8=1 forces on
+                                     // for lab work, =0 forces off.
     const std::vector<sycl::event>& events() const { return pev; }
 
     // debug access to workspaces (device pointers)
