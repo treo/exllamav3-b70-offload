@@ -10,6 +10,8 @@
 #include <vector>
 #include <map>
 #include <fstream>
+#include <algorithm>
+#include <cmath>
 #include "exl3_ref.h"
 #include "moe_host_ref.hpp"
 #include "moe_sycl.hpp"
@@ -19,10 +21,399 @@ using namespace moe_sycl;
 struct Args
 {
     int E = 16, rows = 1, topk = 10, bits = 2, hb = 0, act = 0, iters = 50;
-    bool gated = true, check = true, verbose = false;
+    bool gated = true, check = true, verbose = false, i8trace = false;
     uint64_t seed = 7;
     const char* load = nullptr;
 };
+
+// i8_trace: external, readback-driven stage verifier for the int8/XMX pipeline.
+// Each stage is emulated on the host FROM READBACKS of its input buffers and compared
+// against the readback of its output buffer. Integer stages bit-exact; float 1e-5 rel.
+// Uses only public peek()/i8buf()/ws(); touches no kernel state.
+static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
+                     const std::vector<ChunkDev>& chunks, const TokenMap& tmap,
+                     const std::vector<float>& out_host)
+{
+    const int H = L.hidden, I = L.interm;
+    const bool gated = L.gated;
+    const int nm = gated ? 2 : 1;
+    const int nc = (int)chunks.size();
+    const int slots = nc * nm;
+    constexpr float KDQ = 0.00676727294921875f;
+    constexpr float HS = 0.088388347648f;   // HAD_SCALE
+    printf("== i8trace: nc %d nm %d ==\n", nc, nm);
+
+    std::vector<float> tin((size_t)slots * 4 * H);
+    layer.peek(tin.data(), layer.ws(0), tin.size() * 4);
+    std::vector<int32_t> a8u((size_t)slots * (H / 8) * 64);
+    layer.peek(a8u.data(), layer.i8buf(0), a8u.size() * 4);
+    std::vector<float> qsxu((size_t)slots * 8 * 2);
+    layer.peek(qsxu.data(), layer.i8buf(2), qsxu.size() * 4);
+    std::vector<int32_t> accgu((size_t)slots * 8 * I);
+    layer.peek(accgu.data(), layer.i8buf(4), accgu.size() * 4);
+    std::vector<float> tind((size_t)nc * 4 * I);
+    layer.peek(tind.data(), layer.ws(3), tind.size() * 4);
+    std::vector<int32_t> a8d((size_t)nc * (I / 8) * 64);
+    layer.peek(a8d.data(), layer.i8buf(1), a8d.size() * 4);
+    std::vector<float> qsxd((size_t)nc * 8 * 2);
+    layer.peek(qsxd.data(), layer.i8buf(3), qsxd.size() * 4);
+    std::vector<int32_t> accd((size_t)nc * 8 * H);
+    layer.peek(accd.data(), layer.i8buf(5), accd.size() * 4);
+
+    int fails = 0;
+    auto closef = [](float a, float b) {
+        const double d = std::fabs((double)a - b);
+        return d <= 1e-5 * std::fabs((double)b) + 1e-9;
+    };
+    auto x8row = [&](const std::vector<int32_t>& a8, int slot, int r, int k, int K) {
+        const int kf = K / 8;
+        return (int)(signed char)((unsigned int)
+            a8[((size_t)slot * kf + (k >> 3)) * 64 + r * 8 + (k & 7)] & 0xffu);
+    };
+
+    // ---- stage B: quantization gu (input = tin readback; output = a8u/qsxu)
+    for (int slot = 0; slot < slots && !fails; ++slot) {
+        const int j = gated ? slot / 2 : slot;
+        const int m = chunks[j].m;
+        const int ts = gated ? slot : slot * 2;             // tin slot written by K1
+        for (int t = 0; t < m && !fails; ++t) {
+            const float* xr = &tin[((size_t)ts * 4 + t) * H];
+            float am = 0.f;
+            for (int k = 0; k < H; ++k) am = std::max(am, std::fabs(xr[k]));
+            const float qw = am > 0.f ? am * (1.0f / 8192.0f) : 1.0f;
+            const float rq = am > 0.f ? 8192.0f / am : 1.0f;
+            for (int part = 0; part < 2 && !fails; ++part) {
+                const int r = 2 * t + part;
+                long sacc = 0;
+                for (int k = 0; k < H && !fails; ++k) {
+                    const float vf = xr[k] * rq;
+                    int v = (int)(vf >= 0.f ? std::floor(vf + 0.5f) : std::ceil(vf - 0.5f));
+                    v = std::max(-8128, std::min(8128, v));
+                    const int vh = (v + 64) >> 7;
+                    const int x8 = part ? (v - (vh << 7)) : vh;
+                    sacc += x8;
+                    const int32_t want = x8 * 0x01010101;
+                    const int kf = H / 8;
+                    const int32_t gotw = a8u[((size_t)slot * kf + (k >> 3)) * 64 + r * 8 + (k & 7)];
+                    if (gotw != want) {
+                        printf("B slot%d tok%d part%d k%d: got %08x want %08x\n",
+                               slot, t, part, k, (unsigned)gotw, (unsigned)want);
+                        ++fails;
+                    }
+                }
+                const float A = KDQ * (part ? qw : qw * 128.0f);
+                const float B = -510.0f * A * (float)sacc;
+                const float gA = qsxu[(size_t)slot * 16 + r * 2];
+                const float gB = qsxu[(size_t)slot * 16 + r * 2 + 1];
+                if (!fails && (!closef(gA, A) || !closef(gB, B))) {
+                    printf("B affine slot%d r%d: got {%g,%g} want {%g,%g}\n", slot, r, gA, gB, A, B);
+                    ++fails;
+                }
+            }
+        }
+    }
+    if (fails) { printf("i8trace FAIL at quant-gu\n"); return; }
+    printf("stage B quant-gu: OK\n");
+
+    // ---- stage C: gu GEMV (inputs = a8u + weights; output = accgu), sampled columns
+    {
+        std::vector<int> cols;
+        for (int n = 0; n < 48; ++n) cols.push_back(n);
+        for (int n = 64; n < I; n += 101) cols.push_back(n);
+        const int NC = (int)cols.size();
+        std::vector<float> tile(256);
+        const int pu = exl3ref::tile_u16(L.bits, L.hb);
+        for (int slot = 0; slot < slots && !fails; ++slot) {
+            const int j = gated ? slot / 2 : slot;
+            const int lmu = gated ? slot % 2 : 0;
+            const int e = chunks[j].expert;
+            const moe_ref::Matrix& M = (gated && lmu == 0) ? L.gates[e] : L.ups[e];
+            const int m = chunks[j].m;
+            bool crossed = false;
+            std::vector<int> bs((size_t)H * NC);
+            {
+                const int tiles_n = I / 16, tiles_k = H / 16;
+                for (size_t ci = 0; ci < cols.size(); ++ci) {
+                    const int n = cols[ci], tn = n >> 4, cn = n & 15;
+                    for (int tk = 0; tk < tiles_k; ++tk) {
+                        exl3ref::decode_tile(&M.trellis[((size_t)tk * tiles_n + tn) * pu],
+                                             L.bits, L.hb, tile.data());
+                        for (int rk = 0; rk < 16; ++rk)
+                            bs[(size_t)(tk * 16 + rk) * NC + ci] =
+                                (int)std::llround(tile[rk * 16 + cn] / KDQ) + 510;
+                    }
+                }
+            }
+            std::vector<long> wantv, gotv;
+            for (int r = 0; r < 8 && !fails; ++r) {
+                const int t = r >> 1;
+                if (t >= m) {
+                    for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
+                        const int32_t g = accgu[((size_t)slot * 8 + r) * I + cols[ci]];
+                        if (g != 0) { printf("C pad slot%d r%d n%d got %d\n", slot, r, cols[ci], g); ++fails; }
+                    }
+                    continue;
+                }
+                for (size_t ci = 0; ci < cols.size() && (!fails || wantv.size() < 48); ++ci) {
+                    const int n = cols[ci];
+                    long acc = 0;
+                    for (int k = 0; k < H; ++k)
+                        acc += (long)x8row(a8u, slot, r, k, H) * bs[(size_t)k * NC + ci];
+                    const int32_t g = accgu[((size_t)slot * 8 + r) * I + n];
+                    wantv.push_back(acc); gotv.push_back(g);
+                    if (g != (int32_t)acc) ++fails;
+                }
+            }
+            if (fails && !crossed) {
+                crossed = true;
+                int perm_hits = 0, novel = 0, exact = 0;
+                for (size_t i = 0; i < gotv.size(); ++i) {
+                    if (gotv[i] == wantv[i]) { ++exact; continue; }
+                    bool found = false;
+                    for (size_t k2 = 0; k2 < wantv.size(); ++k2)
+                        if (gotv[i] == wantv[k2]) { ++perm_hits; found = true; break; }
+                    if (!found) ++novel;
+                }
+                printf("C slot%d cross: exact %d/%zu perm-hits %d novel %d\n",
+                       slot, exact, gotv.size(), perm_hits, novel);
+                for (size_t i = 0; i < wantv.size(); ++i)
+                    printf("CSVA %d %ld %ld\n", cols[i], gotv[i], wantv[i]);
+            }
+        }
+    }
+    if (fails) { printf("i8trace FAIL at gemv-gu\n"); return; }
+    printf("stage C gemv-gu: OK\n");
+
+    // ---- stage D: K34i8 (accgu+qsxu -> tind), full block 0 of every 128-block, tok r<m
+    for (int j = 0; j < nc && !fails; ++j) {
+        const int e = chunks[j].expert;
+        const int m = chunks[j].m;
+        const int slotg = gated ? j * 2 : j;
+        const int slotu = gated ? j * 2 + 1 : j;
+        const uint16_t* svhu = L.ups[e].svh.data();
+        const uint16_t* svhg = gated ? L.gates[e].svh.data() : nullptr;
+        const uint16_t* suhd = L.downs[e].suh.data();
+        for (int r0 = 0; r0 < m && !fails; ++r0) {
+            for (int blk = 0; blk < I / 128 && !fails; ++blk) {
+                std::vector<float> gv(128), uv(128);
+                float gb = 0.f, ub = 0.f;
+                for (int i = 0; i < 128; ++i) {
+                    const int c = blk * 128 + i;
+                    if (gated) {
+                        const float* q0 = &qsxu[((size_t)slotg * 8 + 2 * r0) * 2];
+                        const float* q1 = &qsxu[((size_t)slotg * 8 + 2 * r0 + 1) * 2];
+                        const int32_t* a0 = &accgu[((size_t)slotg * 8 + 2 * r0) * I];
+                        const int32_t* a1 = &accgu[((size_t)slotg * 8 + 2 * r0 + 1) * I];
+                        gv[i] = q0[0] * (float)a0[c] + q1[0] * (float)a1[c];
+                        gb += q0[1] + q1[1];
+                        const float* p0 = &qsxu[((size_t)slotu * 8 + 2 * r0) * 2];
+                        const float* p1 = &qsxu[((size_t)slotu * 8 + 2 * r0 + 1) * 2];
+                        const int32_t* b0 = &accgu[((size_t)slotu * 8 + 2 * r0) * I];
+                        const int32_t* b1 = &accgu[((size_t)slotu * 8 + 2 * r0 + 1) * I];
+                        uv[i] = p0[0] * (float)b0[c] + p1[0] * (float)b1[c];
+                        ub += p0[1] + p1[1];
+                    } else {
+                        const float* q0 = &qsxu[((size_t)slotu * 8 + 2 * r0) * 2];
+                        const float* q1 = &qsxu[((size_t)slotu * 8 + 2 * r0 + 1) * 2];
+                        const int32_t* a0 = &accgu[((size_t)slotu * 8 + 2 * r0) * I];
+                        const int32_t* a1 = &accgu[((size_t)slotu * 8 + 2 * r0 + 1) * I];
+                        uv[i] = q0[0] * (float)a0[c] + q1[0] * (float)a1[c];
+                        ub += q0[1] + q1[1];
+                    }
+                }
+                // kernel order: sh = A*acc; hadamard; sh[0] += 128*B; transform; act; *sd;
+                // barrier; hadamard; tind = *HAD_SCALE
+                moe_ref::hadamard_128(gv.data());
+                moe_ref::hadamard_128(uv.data());
+                gv[0] += 128.0f * gb;
+                uv[0] += 128.0f * ub;
+                for (int i = 0; i < 128; ++i) {
+                    const int c = blk * 128 + i;
+                    if (gated) {
+                        gv[i] = gv[i] * (HS * exl3ref::f16_to_f32(svhg[c]));   // + bias empty
+                        uv[i] = uv[i] * (HS * exl3ref::f16_to_f32(svhu[c]));
+                    } else {
+                        uv[i] = uv[i] * (HS * exl3ref::f16_to_f32(svhu[c]));
+                    }
+                }
+                std::vector<float> hv(128);
+                for (int i = 0; i < 128; ++i) {
+                    if (gated) {
+                        float av;
+                        switch (L.activation) {
+                            case 0: { const float eg = std::exp(std::min(-gv[i], 80.0f));
+                                      av = gv[i] / (1.0f + eg); break; }
+                            case 1: { const float cdf = 0.5f * (1.0f + std::erff(gv[i] * 0.70710678f));
+                                      av = gv[i] * cdf; break; }
+                            case 3: av = (uv[i] + 1.0f) * gv[i] /
+                                         (1.0f + std::exp(std::min(-1.702f * gv[i], 80.0f))); break;
+                            default: av = gv[i]; break;
+                        }
+                        hv[i] = av * std::max(-1e30f, std::min(uv[i], 1e30f));
+                    } else {
+                        const float rv = uv[i] > 0.f ? uv[i] : 0.f;
+                        hv[i] = rv * rv;
+                    }
+                    hv[i] *= exl3ref::f16_to_f32(suhd[blk * 128 + i]);
+                }
+                moe_ref::hadamard_128(hv.data());
+                for (int i = 0; i < 128; ++i) {
+                    const float want = hv[i] * HS;
+                    const float g = tind[((size_t)j * 4 + r0) * I + blk * 128 + i];
+                    if (!closef(g, want)) {
+                        printf("D MISMATCH j%d r%d c%d: got %.7g want %.7g\n",
+                               j, r0, blk * 128 + i, g, want);
+                        ++fails;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (fails) { printf("i8trace FAIL at act-tind\n"); return; }
+    printf("stage D act-tind: OK\n");
+
+    // ---- stage E: quant down (tind -> a8d/qsxd)
+    for (int j = 0; j < nc && !fails; ++j) {
+        const int m = chunks[j].m;
+        for (int t = 0; t < m && !fails; ++t) {
+            const float* xr = &tind[((size_t)j * 4 + t) * I];
+            float am = 0.f;
+            for (int k = 0; k < I; ++k) am = std::max(am, std::fabs(xr[k]));
+            const float qw = am > 0.f ? am * (1.0f / 8192.0f) : 1.0f;
+            const float rq = am > 0.f ? 8192.0f / am : 1.0f;
+            for (int part = 0; part < 2 && !fails; ++part) {
+                const int r = 2 * t + part;
+                long sacc = 0;
+                for (int k = 0; k < I && !fails; ++k) {
+                    const float vf = xr[k] * rq;
+                    int v = (int)(vf >= 0.f ? std::floor(vf + 0.5f) : std::ceil(vf - 0.5f));
+                    v = std::max(-8128, std::min(8128, v));
+                    const int vh = (v + 64) >> 7;
+                    const int x8 = part ? (v - (vh << 7)) : vh;
+                    sacc += x8;
+                    const int32_t want = x8 * 0x01010101;
+                    const int kf = I / 8;
+                    const int32_t gotw = a8d[((size_t)j * kf + (k >> 3)) * 64 + r * 8 + (k & 7)];
+                    if (gotw != want) {
+                        printf("E slot%d tok%d part%d k%d: got %08x want %08x\n",
+                               j, t, part, k, (unsigned)gotw, (unsigned)want);
+                        ++fails;
+                    }
+                }
+                const float A = KDQ * (part ? qw : qw * 128.0f);
+                const float B = -510.0f * A * (float)sacc;
+                const float gA = qsxd[(size_t)j * 16 + r * 2];
+                const float gB = qsxd[(size_t)j * 16 + r * 2 + 1];
+                if (!fails && (!closef(gA, A) || !closef(gB, B))) {
+                    printf("E affine j%d r%d: got {%g,%g} want {%g,%g}\n", j, r, gA, gB, A, B);
+                    ++fails;
+                }
+            }
+        }
+    }
+    if (fails) { printf("i8trace FAIL at quant-d\n"); return; }
+    printf("stage E quant-d: OK\n");
+
+    // ---- stage F: down GEMV (a8d + weights -> accd), sampled columns
+    {
+        std::vector<int> cols;
+        for (int n = 0; n < 48; ++n) cols.push_back(n);
+        for (int n = 64; n < H; n += 101) cols.push_back(n);
+        const int NC = (int)cols.size();
+        std::vector<float> tile(256);
+        const int pu = exl3ref::tile_u16(L.bits, L.hb);
+        for (int j = 0; j < nc && !fails; ++j) {
+            const int e = chunks[j].expert;
+            const moe_ref::Matrix& M = L.downs[e];
+            const int m = chunks[j].m;
+            std::vector<int> bs((size_t)I * NC);
+            {
+                const int tiles_n = H / 16, tiles_k = I / 16;
+                for (size_t ci = 0; ci < cols.size(); ++ci) {
+                    const int n = cols[ci], tn = n >> 4, cn = n & 15;
+                    for (int tk = 0; tk < tiles_k; ++tk) {
+                        exl3ref::decode_tile(&M.trellis[((size_t)tk * tiles_n + tn) * pu],
+                                             L.bits, L.hb, tile.data());
+                        for (int rk = 0; rk < 16; ++rk)
+                            bs[(size_t)(tk * 16 + rk) * NC + ci] =
+                                (int)std::llround(tile[rk * 16 + cn] / KDQ) + 510;
+                    }
+                }
+            }
+            for (int r = 0; r < 8 && !fails; ++r) {
+                const int t = r >> 1;
+                if (t >= m) {
+                    for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
+                        const int32_t g = accd[((size_t)j * 8 + r) * H + cols[ci]];
+                        if (g != 0) { printf("F pad j%d r%d n%d got %d\n", j, r, cols[ci], g); ++fails; }
+                    }
+                    continue;
+                }
+                for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
+                    const int n = cols[ci];
+                    long acc = 0;
+                    for (int k = 0; k < I; ++k)
+                        acc += (long)x8row(a8d, j, r, k, I) * bs[(size_t)k * NC + ci];
+                    const int32_t g = accd[((size_t)j * 8 + r) * H + n];
+                    if (g != (int32_t)acc) {
+                        printf("F MISMATCH j%d r%d n%d: got %d want %ld (ratio %.4f)\n",
+                               j, r, n, g, acc, (double)g / (double)acc);
+                        ++fails;
+                    }
+                }
+            }
+        }
+    }
+    if (fails) { printf("i8trace FAIL at gemv-d\n"); return; }
+    printf("stage F gemv-d: OK\n");
+
+    // ---- stage G: gather-out (accd+qsxd+CSR -> out), all columns of block 0 per token
+    {
+        const int rows = (int)tmap.begin.size() - 1;
+        for (int tk = 0; tk < rows && !fails; ++tk) {
+            for (int blk = 0; blk < H / 128 && !fails; blk += H / 128) {  // block 0 only
+                std::vector<float> sum(128, 0.f);
+                for (int p = tmap.begin[tk]; p < tmap.begin[tk + 1]; ++p) {
+                    const int ent = tmap.entry[p];
+                    const int j = ent >> 2, s = ent & 3;
+                    const int e = chunks[j].expert;
+                    const float wgt = chunks[j].weight[s];
+                    const uint16_t* svhd = L.downs[e].svh.data();
+                    std::vector<float> v(128);
+                    float bb = 0.f;
+                    for (int i = 0; i < 128; ++i) {
+                        const int c = blk * 128 + i;
+                        const float* q0 = &qsxd[((size_t)j * 8 + 2 * s) * 2];
+                        const float* q1 = &qsxd[((size_t)j * 8 + 2 * s + 1) * 2];
+                        const int32_t* a0 = &accd[((size_t)j * 8 + 2 * s) * H];
+                        const int32_t* a1 = &accd[((size_t)j * 8 + 2 * s + 1) * H];
+                        v[i] = q0[0] * (float)a0[c] + q1[0] * (float)a1[c];
+                        bb += q0[1] + q1[1];
+                    }
+                    moe_ref::hadamard_128(v.data());
+                    v[0] += 128.0f * bb;
+                    for (int i = 0; i < 128; ++i) {
+                        const int c = blk * 128 + i;
+                        float val = v[i] * (HS * exl3ref::f16_to_f32(svhd[c]));
+                        if (!L.downs[e].bias.empty())
+                            val += exl3ref::f16_to_f32(L.downs[e].bias[c]);
+                        sum[i] += wgt * val;
+                    }
+                }
+                for (int i = 0; i < 128 && !fails; ++i) {
+                    const float g = out_host[(size_t)tk * H + blk * 128 + i];
+                    if (!closef(g, sum[i])) {
+                        printf("G MISMATCH tok%d c%d: got %.7g want %.7g\n", tk, blk * 128 + i, g, sum[i]);
+                        ++fails;
+                    }
+                }
+            }
+        }
+    }
+    if (fails) { printf("i8trace FAIL at gather-out\n"); return; }
+    printf("stage G gather-out: OK -- PIPELINE FULLY VERIFIED\n");
+}
 
 int main(int argc, char** argv)
 {
@@ -40,6 +431,7 @@ int main(int argc, char** argv)
         else if (s == "--nocheck") a.check = false;
         else if (s == "--gateless") a.gated = false;
         else if (s == "--v") a.verbose = true;
+        else if (s == "--i8trace") a.i8trace = true;
         else if (s == "--load") a.load = argv[++i];
         else { printf("unknown arg %s\n", s.c_str()); return 1; }
     }
@@ -297,6 +689,7 @@ int main(int argc, char** argv)
     sycl::event e_fw = layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
     std::vector<float> got((size_t)rows * H);
     q.memcpy(got.data(), dout, got.size() * 4, {e_fw}).wait();
+    if (a.i8trace) i8_trace(layer, L, chunks, tmap, got);
 
     if (a.verbose) {
         for (int wsb = 0; wsb < 5; ++wsb) {

@@ -88,6 +88,25 @@ public:
     // debug access to workspaces (device pointers)
     float* ws(int i) { return i == 0 ? w_tin : i == 1 ? w_tout : i == 2 ? w_h : i == 3 ? w_tind : w_toutd; }
 
+    // ---- external stage-trace support (bench --i8trace): read-only device->host copy,
+    // fully synchronized; touches nothing in the pipeline.
+    void peek(void* host, const void* dev, size_t bytes)
+    {
+        Q->wait();
+        Q->memcpy(host, dev, bytes).wait();
+    }
+    void* i8buf(int i)   // 0 a8u, 1 a8d, 2 qsxu, 3 qsxd, 4 accgu, 5 accd
+    {
+        switch (i) {
+            case 0: return w_a8u;
+            case 1: return w_a8d;
+            case 2: return w_qsxu;
+            case 3: return w_qsxd;
+            case 4: return w_accgu;
+            default: return w_accd;
+        }
+    }
+
 private:
     sycl::queue* Q = nullptr;
     LayerParams P;
