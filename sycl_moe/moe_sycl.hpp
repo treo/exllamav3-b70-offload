@@ -43,20 +43,26 @@ struct LayerParams
     bool gated = true;
 };
 
-// Chunk = up to 4 token rows routed to one expert (same grouping as the CPU path)
+// Chunk = up to 8 token rows routed to one expert (int8/DPAS tier; the fp32 tier caps at
+// 4 rows host-side because GemvK carries exactly 4 accumulator chains). MAXM is the layout
+// stride EVERYWHERE (tin/tout/tind/toutd row blocks, TokenMap entry encoding j*MOE_MAXM+r),
+// so readers must never assume a chunk actually uses all 8.
 struct ChunkDev
 {
     int expert;
     int m;
-    int token[4];
-    float weight[4];
+    int token[8];
+    float weight[8];
 };
+
+inline constexpr int MOE_MAXM   = 8;   // chunk width cap, int8/DPAS tier (= 2 m8 fragments)
+inline constexpr int MOE_MAXM_F = 4;   // chunk width cap, fp32 scalar tier
 
 // CSR of active chunk-slots per token row (for the final weighted gather)
 struct TokenMap
 {
     std::vector<int> begin;      // rows+1 (prefix counts)
-    std::vector<int> entry;      // j * 4 + slot per active (token, topk slot)
+    std::vector<int> entry;      // j * MOE_MAXM + slot per active (token, topk slot)
 };
 
 class MoeSyclLayer
@@ -107,8 +113,14 @@ public:
             default: return w_accd;
         }
     }
-    // accgu/accd are [slot][nsl][8][N] slice buffers; the trace must sum slices itself.
+    // accgu/accd are [slot][nsl][16][N] slice buffers; the trace must sum slices itself.
     int i8nsl(int which) const { return which ? nsl8_d_ : nsl8_gu_; }   // 0 gu, 1 down
+
+    // Tier choice for a forward of `rows` token rows (EXL3_MOE_B70_INT8 override, auto =
+    // rows >= 2, stream-layout only). The HOST CHUNKER must call this BEFORE grouping:
+    // it fixes the chunk width cap (MOE_MAXM vs MOE_MAXM_F). forward() re-derives use8_
+    // through the same function so the two can never disagree.
+    bool pick_int8(int rows) const;
 
 private:
     sycl::queue* Q = nullptr;
@@ -147,5 +159,15 @@ private:
 
     void ensure_ws(int nc, int rows);
 };
+
+// Shared implementation behind MoeSyclLayer::pick_int8 and the harness chunkers:
+// rate_ok = stream-layout K2 in {4,5,8}; reads EXL3_MOE_B70_INT8 once. Fixes the
+// chunk width cap (MOE_MAXM vs MOE_MAXM_F), so it MUST agree with the tier forward()
+// will take.
+bool int8_pick(bool rate_ok, int rows);
+
+// Chunk width cap for the HOST CHUNKER (see moe_sycl.cpp for the measured policy and
+// the EXL3_MOE_B70_MCAP lab override). int8_selected must come from int8_pick/pick_int8.
+int int8_mcap_pick(bool int8_selected, int rows, int assigned, int experts);
 
 } // namespace moe_sycl

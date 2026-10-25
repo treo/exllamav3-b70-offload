@@ -299,19 +299,22 @@ static void forward_impl
     std::vector<ChunkDev> chunks;
     TokenMap tmap;
     std::vector<std::vector<int>> tokentries(rows);
+    // width cap follows the tier the forward will take: the fp32 GemvK has exactly 4
+    // accumulator chains, the DPAS tier carries 8 tokens in two m8 fragments
+    const int mcap = moe_sycl::int8_mcap_pick(layer->pick_int8(rows), rows, rows * topk, E);
     for (int e = 0; e < E; ++e) {
         auto& lst = per_expert[e];
-        for (size_t i = 0; i < lst.size(); i += 4) {
+        for (size_t i = 0; i < lst.size(); i += mcap) {
             ChunkDev ch{};
             ch.expert = e;
-            ch.m = (int)std::min<size_t>(4, lst.size() - i);
+            ch.m = (int)std::min<size_t>(mcap, lst.size() - i);
             for (int r = 0; r < ch.m; ++r) {
                 ch.token[r] = lst[i + r].first;
                 const uint16_t wv = ((const uint16_t*)w)[(size_t)lst[i + r].first * topk + lst[i + r].second];
                 _Float16 h;
                 std::memcpy(&h, &wv, 2);
                 ch.weight[r] = (float)h;
-                tokentries[ch.token[r]].push_back((int)chunks.size() * 4 + r);
+                tokentries[ch.token[r]].push_back((int)chunks.size() * moe_sycl::MOE_MAXM + r);
             }
             chunks.push_back(ch);
         }

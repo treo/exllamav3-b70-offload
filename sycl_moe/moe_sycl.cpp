@@ -31,7 +31,8 @@ namespace {
 
 constexpr float KDQ = 0.00676727294921875f;   // k_inv = fp16(0x1eee)
 constexpr float HAD_SCALE = 0.088388347648f;  // 1/sqrt(128)
-constexpr int MAXM = 4;
+constexpr int MAXM = 8;    // chunk width cap for the int8 tier; fp32 tier caps host-side at 4
+constexpr int I8R  = 16;   // int8 gemv-slot rows = 2 m8 fragments = up to 8 tokens x (vh,vl)
 
 // pointer table categories (d_tab): layout [field][cat][expert]
 enum { CAT_GATE = 0, CAT_UP = 1, CAT_DOWN = 2 };
@@ -136,12 +137,12 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     // int8 slabs: grow_p no-ops when the existing cap already fits; sizing must happen on
     // EVERY nc/nsl combination the layer may see (warm batches use nsl=1, decode up to 8).
     if (use8_) {
-        grow_p(5, w_a8u,   (size_t)nc * nm_ws_ * (P.hidden / 8) * 64);
-        grow_p(6, w_a8d,   (size_t)nc * (P.interm / 8) * 64);
-        grow_p(7, w_qsxu,  (size_t)nc * nm_ws_ * 8 * 2);
-        grow_p(8, w_qsxd,  (size_t)nc * 8 * 2);
-        grow_p(9, w_accgu, (size_t)nc * nm_ws_ * 8 * P.interm * nsl8_gu_);
-        grow_p(10, w_accd, (size_t)nc * 8 * P.hidden * nsl8_d_);
+        grow_p(5, w_a8u,   (size_t)nc * nm_ws_ * (P.hidden / 8) * 128);
+        grow_p(6, w_a8d,   (size_t)nc * (P.interm / 8) * 128);
+        grow_p(7, w_qsxu,  (size_t)nc * nm_ws_ * I8R * 2);
+        grow_p(8, w_qsxd,  (size_t)nc * I8R * 2);
+        grow_p(9, w_accgu, (size_t)nc * nm_ws_ * I8R * P.interm * nsl8_gu_);
+        grow_p(10, w_accd, (size_t)nc * I8R * P.hidden * nsl8_d_);
         if (nc > cap_nc8) cap_nc8 = nc;
     }
     (void)rows;
@@ -429,16 +430,21 @@ struct QuantIn
 
     void operator()(sycl::nd_item<2> it) const
     {
-        const int slot = (int)it.get_group(1) >> 3;    // launch: group(1) = slot*8 + row
-        const int r = (int)it.get_group(1) & 7;
+        const int slot = (int)it.get_group(1) >> 4;    // launch: group(1) = slot*16 + row
+        const int r = (int)it.get_group(1) & 15;
         const int tid = (int)it.get_local_id(0);       // 256
         const int m = chunks[slot / nm].m;
-        const int tok = r >> 1, part = r & 1;          // ALWAYS-WIDE: token -> rows 2t (vh), 2t+1 (vl)
+        const int frag = r >> 3;                       // m8 fragment: tokens 0-3 / 4-7
+        const int tok = frag * 4 + ((r >> 1) & 3), part = r & 1;  // token -> rows 2t (vh), 2t+1 (vl)
         const int kf = k / 8;
-        int32_t* aout = a8 + (size_t)slot * kf * 64 + r * 8;
+        int32_t* aout = a8 + (size_t)slot * kf * 128 + r * 8;
         if (tok >= m) {
-            for (int i = tid; i < kf * 8; i += 256) aout[(i >> 3) * 64 + (i & 7)] = 0;
-            if (tid == 0) qsb[slot * 8 + r] = Affine{ 0.f, 0.f };
+            // frag1 rows only exist (are only READ, see Gemv8 has1) when m > 4; skip the
+            // zero-fill junk for narrow slots - it costs QuantIn bandwidth and nothing
+            // consumes it. Pad rows of frag0 still zero: they ARE loaded (frag0 always runs).
+            if (frag && m <= 4) return;   // whole frag1 unread only when m<=4
+            for (int i = tid; i < kf * 8; i += 256) aout[(i >> 3) * 128 + (i & 7)] = 0;
+            if (tid == 0) qsb[slot * 16 + r] = Affine{ 0.f, 0.f };
             return;
         }
         const float* xr = tin + (((size_t)slot * tsmul) * MAXM + tok) * k;
@@ -469,7 +475,7 @@ struct QuantIn
             // (x8 & 0xff) * 0x01010101 == the uchar splat of the CPU store_x8 path: plain
             // x8*0x01010101 does NOT replicate negatives (arith wrap leaks into the top
             // byte, e.g. -1 -> 0xFEFEFEFF) - that was the stage-C scale+offset fingerprint.
-            aout[(i >> 3) * 64 + (i & 7)] = (int32_t)((x8 & 0xff) * 0x01010101);
+            aout[(i >> 3) * 128 + (i & 7)] = (int32_t)((x8 & 0xff) * 0x01010101);
         }
         red[tid] = sacc;
         sycl::group_barrier(it.get_group());
@@ -480,7 +486,7 @@ struct QuantIn
         if (tid == 0) {
             const float q_eff = part ? qw : qw * 128.0f;
             const float Aq = KDQ * q_eff;
-            qsb[slot * 8 + r] = Affine{ Aq, -510.0f * Aq * red[0] };
+            qsb[slot * 16 + r] = Affine{ Aq, -510.0f * Aq * red[0] };
         }
     }
 };
@@ -528,6 +534,7 @@ struct Gemv8
         const int lmu = down ? 0 : slot % b.nm;
         const int cat = down ? CAT_DOWN : (b.nm == 2 ? lmu : CAT_UP);
         const int e = b.chunks[j].expert;
+        const bool has1 = b.chunks[j].m > 4;   // fragment 1 (tokens 4-7) exists?
         const int K = down ? b.I : b.H;
         const int N = down ? b.H : b.I;
         const int tiles_k = K / 16;
@@ -545,7 +552,7 @@ struct Gemv8
 
         unsigned char* const slb = slab.get_pointer().get();
         uint32_t* const sl32 = (uint32_t*)slb;
-        const int32_t* const pa0 = b.a8 + (size_t)slot * (K / 8) * 64;   // [kfrag][64] i32
+        const int32_t* const pa0 = b.a8 + (size_t)slot * (K / 8) * 128;   // [kfrag][128] i32 (16 rows)
         const size_t row_step = (size_t)b.nfl * W;
         // split-K: this slice covers [tk_lo, tk_hi); slice sums happen in K34i8/K6i8
         const int tk_lo = (tiles_k * sl) / b.nsl;
@@ -559,6 +566,10 @@ struct Gemv8
                           mx8::layout::ext_intel_packed> jb;
         mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc;
         mx8::joint_matrix_fill(sg, jc, 0);
+        // second m8 fragment: tokens 4..7 (rows 8..15 of the slot) ride the SAME staged
+        // B band - one weight fetch + stage serves up to 8 tokens (the MAXM=8 payoff)
+        mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc1;
+        mx8::joint_matrix_fill(sg, jc1, 0);
 
         // FOUR NAMED word sets, one group of 4 tiles per refill: loads for tiles
         // t..t+3 are all issued before tile t is consumed, the next group's loads go
@@ -627,15 +638,22 @@ struct Gemv8
                 unsigned char* const bnd = slb + (q & 1) * 1024;
 #pragma unroll
                 for (int fk = 0; fk < 2; ++fk) {
-                    auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
-                                                        sycl::access::decorated::yes>(
-                        (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 64));
-                    mx8::joint_matrix_load(sg, ja, pag, 32);
                     mx8::joint_matrix_load(sg, jb,
                         sycl::address_space_cast<sycl::access::address_space::local_space,
                                                  sycl::access::decorated::yes>(bnd + fk * 512),
                         16 * 4);   // packed stride = N * VNNI bytes
-                    mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+#pragma unroll
+                    for (int f = 0; f < 2; ++f) {
+                        if (f && !has1) break;   // uniform per WG: narrow slots skip frag1
+                        // load+DPAS; jc1 stays 0 and is still STORED, so acc pad rows are
+                        // written zeros exactly as before (the trace verifies them).
+                        auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                            sycl::access::decorated::yes>(
+                            (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 128 + f * 64));
+                        mx8::joint_matrix_load(sg, ja, pag, 32);
+                        if (f) mx8::joint_matrix_mad(sg, jc1, ja, jb, jc1);
+                        else   mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+                    }
                 }
             }
             // issue the next group's 4xNW loads now (consumed only after this group's mads)
@@ -650,12 +668,57 @@ struct Gemv8
         }
         auto pcg = sycl::address_space_cast<sycl::access::address_space::global_space,
                                             sycl::access::decorated::yes>(
-            b.acc + ((size_t)slot * b.nsl + sl) * 8 * N + nf * 16);
+            b.acc + ((size_t)slot * b.nsl + sl) * 16 * N + nf * 16);
         mx8::joint_matrix_store(sg, jc, pcg, N, mx8::layout::row_major);
+        mx8::joint_matrix_store(sg, jc1, pcg + 8 * N, N, mx8::layout::row_major);
     }
 };
 
 // ------------------------------------------------------------------ forward
+
+static int int8_env()
+{
+    static const int v = []{
+        const char* e = std::getenv("EXL3_MOE_B70_INT8");
+        return !e ? -1 : (e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1);
+    }();
+    return v;
+}
+
+bool int8_pick(bool rate_ok, int rows)   // harness view (member 'int8' eligibility assumed true)
+{
+    const int env = int8_env();
+    if (env == 0) return false;
+    if (env == 1) return rate_ok;
+    return rate_ok && (rows >= 2);
+}
+
+bool MoeSyclLayer::pick_int8(int rows) const
+{
+    const int env = int8_env();
+    if (env == 0) return false;
+    if (env == 1) return int8_ok;
+    return int8_ok && int8 && (rows >= 2);
+}
+
+// Lab knob: EXL3_MOE_B70_MCAP=4|8 overrides the chunk width cap (default: width 8 only
+// when the forward is multi-token-rich enough to pay for the lost gemv parallelism).
+// Consulted by host chunkers ONLY when a layer pick already selected int8.
+int int8_mcap_pick(bool int8_selected, int rows, int assigned, int experts)
+{
+    if (!int8_selected) return MOE_MAXM_F;
+    static const int envm = []{
+        const char* e = std::getenv("EXL3_MOE_B70_MCAP");
+        return (!e || (e[0] != '4' && e[0] != '8')) ? 0 : (e[0] - '0');
+    }();
+    if (envm) return envm;
+    // Same-binary A/B (sustained, min-of-2 interleaved, MCAP env): width 8 wins x0.63-0.81
+    // for rows>=5, neutral at rows<=4 (chunks rarely exceed 4 there anyway). The apparent
+    // small-shape 'regression' vs the OLD 4-row binary was that binary's unpadded width-4
+    // path being cheaper than the new kernel's padded frag1 - irrelevant once width 8 runs.
+    (void)rows; (void)assigned; (void)experts;
+    return MOE_MAXM;
+}
 
 sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
                            const uint16_t* x, float* out, int rows, const sycl::event* pre_dep)
@@ -671,16 +734,11 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     // the m8 fragment free. So AUTO = DPAS iff rows >= 2. EXL3_MOE_B70_INT8: =1 force
     // int8 (lab), =0 force float; unset -> auto (member int8 = true enables auto). Only
     // stream-layout rates can use the DPAS tier at all (int8_ok, from init()).
-    static const int g_int8_env = []{
-        const char* e = std::getenv("EXL3_MOE_B70_INT8");
-        return !e ? -1 : (e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1);
-    }();
+    // Lives in pick_int8() because the HOST CHUNKER needs the same answer for the width cap.
+    use8_ = pick_int8(rows);
+    int8_active = use8_;
     int maxm_scan = 1;
     for (int j = 0; j < num_chunks; ++j) maxm_scan = std::max(maxm_scan, (int)chunks_host[j].m);
-    if (g_int8_env == 0)      use8_ = false;
-    else if (g_int8_env == 1) use8_ = int8_ok;
-    else                      use8_ = int8_ok && int8 && (rows >= 2);
-    int8_active = use8_;
     const int E = P.num_experts;
     const int tile_u32 = 4 * k2;                    // u32 words per tile
     const bool gated = P.gated;
@@ -810,7 +868,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         // Q1: quantize the rotated gu inputs (one WG of 256 per (slot, DPAS row))
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
-            cgh.parallel_for(sycl::nd_range<2>({256, (size_t)8 * slots}, {256, 1}),
+            cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8R * slots}, {256, 1}),
                 QuantIn{ tin, w_a8u, qsxu, chunks, H, nm, gated ? 1 : 2, red });
         });
 
@@ -850,16 +908,16 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     const int slotg = gated ? j * 2 : j;      // int8 slots: gateless uses j
                     const int slotu = gated ? j * 2 + 1 : j;
                     const int nq = nsl8_gu;
-                    const int32_t* ag = accgu + (size_t)slotg * nq * 8 * I;
-                    const int32_t* au = accgu + (size_t)slotu * nq * 8 * I;
+                    const int32_t* ag = accgu + (size_t)slotg * nq * 16 * I;
+                    const int32_t* au = accgu + (size_t)slotu * nq * 16 * I;
                     // slice sums are exact i32 (partials bounded by the same |C| limit)
                     auto accsum = [&](const int32_t* base, size_t row) -> int {
                         int s = 0;
-                        for (int qq = 0; qq < nq; ++qq) s += base[((size_t)qq * 8 + row) * I + cG];
+                        for (int qq = 0; qq < nq; ++qq) s += base[((size_t)qq * 16 + row) * I + cG];
                         return s;
                     };
-                    const Affine* qg = qsxu + slotg * 8;
-                    const Affine* qu = qsxu + slotu * 8;
+                    const Affine* qg = qsxu + slotg * 16;
+                    const Affine* qu = qsxu + slotu * 16;
                     const float hu = HAD_SCALE * f16(svhu[cG]);
                     const float bj = bu ? f16(bu[cG]) : 0.0f;
                     float hgv = 0.f, biv = 0.f;
@@ -870,19 +928,21 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         biv = bg ? f16(bg[cG]) : 0.0f;
                     }
                     for (int r = 0; r < m; ++r) {
+                        // token r lives in fragment (r>>2) at rows rr, rr+1 of its slot
+                        const int rr = (r >> 2) * 8 + 2 * (r & 3);
                         float bfold_g = 0.f, bfold_u = 0.f;
-                        const Affine up0 = qu[2 * r], up1 = qu[2 * r + 1];     // up parts
+                        const Affine up0 = qu[rr], up1 = qu[rr + 1];              // up parts
                         if (gated) {
-                            const Affine gt0 = qg[2 * r], gt1 = qg[2 * r + 1];  // gate parts
-                            sh[tid]       = gt0.A * (float)accsum(ag, 2 * r)
-                                          + gt1.A * (float)accsum(ag, 2 * r + 1);
-                            sh[128 + tid] = up0.A * (float)accsum(au, 2 * r)
-                                          + up1.A * (float)accsum(au, 2 * r + 1);
+                            const Affine gt0 = qg[rr], gt1 = qg[rr + 1];          // gate parts
+                            sh[tid]       = gt0.A * (float)accsum(ag, rr)
+                                          + gt1.A * (float)accsum(ag, rr + 1);
+                            sh[128 + tid] = up0.A * (float)accsum(au, rr)
+                                          + up1.A * (float)accsum(au, rr + 1);
                             bfold_g = 128.0f * (gt0.B + gt1.B);
                             bfold_u = 128.0f * (up0.B + up1.B);
                         } else {
-                            sh[tid] = up0.A * (float)accsum(au, 2 * r)
-                                    + up1.A * (float)accsum(au, 2 * r + 1);
+                            sh[tid] = up0.A * (float)accsum(au, rr)
+                                    + up1.A * (float)accsum(au, rr + 1);
                             bfold_u = 128.0f * (up0.B + up1.B);
                         }
                         if (gated) {
@@ -928,7 +988,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         // Q2 + K5p: quantize the down input, DPAS gemm over the down matrices
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
-            cgh.parallel_for(sycl::nd_range<2>({256, (size_t)8 * nc}, {256, 1}),
+            cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8R * nc}, {256, 1}),
                 QuantIn{ tind, w_a8d, qsxd, chunks, I, 1, 1, red });
         });
         {
@@ -964,18 +1024,19 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                             if (d_tokb[mid] <= p) lo = mid; else hi = mid; }
                         const int t = lo;
                         const int ent = d_toke[p];
-                        const int j = ent >> 2, s = ent & 3;
+                        const int j = ent >> 3, s = ent & 7;
                         const int e = chunks[j].expert;
                         const float wgt = chunks[j].weight[s];
                         const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
                         const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
-                        const Affine cd0 = qsxd[j * 8 + 2 * s], cd1 = qsxd[j * 8 + 2 * s + 1];
+                        const int rs = (s >> 2) * 8 + 2 * (s & 3);   // token -> 16-row slot rows
+                        const Affine cd0 = qsxd[j * 16 + rs], cd1 = qsxd[j * 16 + rs + 1];
                         const int nq = nsl8_d;
-                        const int32_t* ad = accd8 + (size_t)j * nq * 8 * H;
+                        const int32_t* ad = accd8 + (size_t)j * nq * 16 * H;
                         int s0 = 0, s1 = 0;
                         for (int qq = 0; qq < nq; ++qq) {
-                            s0 += ad[((size_t)qq * 8 + 2 * s) * H + cG];
-                            s1 += ad[((size_t)qq * 8 + 2 * s + 1) * H + cG];
+                            s0 += ad[((size_t)qq * 16 + rs) * H + cG];
+                            s1 += ad[((size_t)qq * 16 + rs + 1) * H + cG];
                         }
                         sh[tid] = cd0.A * (float)s0 + cd1.A * (float)s1;
                         hadamard128(it, tid, sh.get_pointer());
@@ -1133,7 +1194,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         if (d_tokb[mid] <= p) lo = mid; else hi = mid; }
                     const int t = lo;
                     const int ent = d_toke[p];
-                    const int j = ent >> 2, s = ent & 3;
+                    const int j = ent >> 3, s = ent & 7;   // MOE_MAXM=8 encoding (host chunker)
                     const int e = chunks[j].expert;
                     const float wgt = chunks[j].weight[s];
                     const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];

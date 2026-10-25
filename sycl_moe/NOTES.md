@@ -566,3 +566,45 @@ Model-level end state (final plugin, spaced runs, 30s+ gaps to dodge the reclaim
   The 39.7-decode 4.05 run was UNDER-REGISTRATION (20 registered/28 fallback after only
   ~90s... no: that run got 20 registered and 50.0; the bad run followed a 16GB job with
   30s gap and got fewer). 90s+ spacing or discard-first is now the standing recipe.
+
+## MAXM=8 shipped (two-fragment slots) + the two measurement ghosts that haunted it
+
+What: chunks carry up to 8 tokens = 16 QuantIn rows = TWO m8 fragments; Gemv8 stages the
+B band ONCE per tile and fires it at both accumulators (one weight stream per 8 tokens).
+Frag1 load+mad skipped uniformly when m<=4 (jc1 stays 0 and is still stored -> acc pad
+rows remain verifiably zero); QuantIn skips the frag1 zero-fill iff m<=4 (never read).
+Layouts that grew: ChunkDev[8], tin/tout/tind/toutd row blocks (MAXM=8 stride), a8 slabs
+(kf block = 128 words, frag f at +(2tk+fk)*128 + f*64), qsx (32 floats/slot), acc
+([slot][nsl][16][N]), TokenMap entries (j*8+r, decoded >>3/&7 in BOTH K6s), worker +
+bench chunkers (cap = int8_mcap_pick: 8 for int8 - fp32 GemvK still has exactly 4 chains,
+capped at 4 by the same helper). Lab override EXL3_MOE_B70_MCAP=4|8.
+
+Same-binary sustained A/B (min-of-2, iters 1000/500), w8/w4: rows 5: x1.11, 6: x1.13,
+8: x1.40, 12: x1.34, 16: x1.42, 32: x1.59, 64: x1.55, E64-rows32: x1.24, E128-rows128
+x1.51; rows<=4 neutral. Policy = always 8 under int8. Final int8 tier vs float:
+rows 1 x0.80 | 2 x1.17 | 4 x1.50 | 8 x2.40 | 16 x2.70 | 32 x2.98 | 64 x2.65 | 128 x2.13.
+(rows=4 initially REGRESSED +6.5% vs the old w4 binary - the unconditional frag1 mad on
+padded slots; the has1 skip erased it: 238 -> 223.5us.)
+
+Verification: i8trace battery 24 configs x {auto, MCAP=4, MCAP=8} bit-exact (includes
+first-ever m>4 chunk coverage: rows 5,6,7,8,10,32,64 + gateless/act3/2.5bit/4bit); xval
+unchanged (int8 1.355e-3, float 6.05e-7) - per-token integer math is chunking-invariant,
+so outputs are BITWISE equal across widths (nice property, exploited as a free check).
+
+Ghost #1: the act3 stage-D 'failure' (1 column, abs 1.4e-8 at a |gv|~1e-4 cancellation)
+was the HARNESS accumulating gb += B over 128 float iterations instead of the kernel's
+one-shot 128.0f*(B0+B1); sequential-add drift ~1e-4 RELATIVE on the fold. Harness now
+folds it the kernel's way (D and G). Deterministic, seed-stable, NOT a device bug.
+
+Ghost #2: model gates went 1401 t/s (2.05, zero layers registered) and 29 t/s decode
+(4.05, same 19 registrations as the 50 t/s run!). Causes respectively: VRAM-reclaim lag
+(90s+ spacing / discard first - standing rule) and POWER/THERMAL throttling of the B70
+after ~40 min of sustained benching (3-minute idle restored 29.25 -> 49.13 with identical
+registration counts and placement profiles). DIAGNOSTIC: if decode is ~0.6x of record but
+'registered layer' count matches, cool down and re-run before believing any regression.
+Placement also persists in ~/.cache/exllamav3/expert_stats/*.json ("placement from saved
+profile") - profile churn across short runs changes the B70/CPU expert split between runs.
+
+Model end state (MAXM8 plugin, spaced + cooled runs): 2.05 -mcs256 prefill2048 1871
+(best yet; CPU 1456), decode ~69-71; 4.05 -mcs448 prefill 360, decode 49.1/46.5 ctx0/768
+(CPU 24.9); 48/48 and 19-20/48 registered respectively.

@@ -18,12 +18,13 @@ VNNI-packed u8 B operands and always-wide vh/vl int8 activation rows — the sam
 identity the CPU VNNI tier computes. It is stage-bit-exact against the external
 `bench_layer --i8trace` model, ~1.4e-3 rms vs the CPU scalar extension, and ≤0.25% wikitext
 ppl on all three Qwen3.8-Flash-Next models (≈10× closer than the CPU AVX2 tier). Sustained
-worker-layer A/B (bench_layer, min-of-3): speedup x1.17 at 2 rows, x1.6 at 4, x2.3 at 8,
-**x2.6 at 32**, x2.2 at 64 — the DPAS fragment rows are free, while the fp32 tier pays per
-(chunk × row). Single-row decode is ~20% slower on int8 (m8 fragments run 25% full), so
+worker-layer A/B (bench_layer, min-of-3): speedup x1.17 at 2 rows, x1.5 at 4, x2.4 at 8,
+**x3.0 at 32**, x2.65 at 64 — up to 8 tokens ride one weight stream per chunk (two m8
+fragments share every staged B band), while the fp32 tier pays per (chunk × row) and caps
+at 4 rows. Single-row decode is ~20% slower on int8 (m8 fragments run 25% full), so
 auto mode keeps rows=1 forwards on the fp32 scalar-semantics pipeline; `EXL3_MOE_B70_INT8=1/0`
 forces either tier. End-to-end (2.05bpw -mcs256): prefill 2048 1456 (CPU worker) → 1711
-(B70 fp32) → **1852-1880 tok/s** (B70 auto/int8), decode unchanged ~70-72. See NOTES
+(B70 fp32) → **1871-1880 tok/s** (B70 auto/int8), decode unchanged ~70-72. See NOTES
 'int8 re-port' and 'SUSTAINED-CLOCK TIER A/B' for the packed-VNNI dataflow, the
 negative-splat trap, and why short benchmark windows lie about this GPU.
 
@@ -66,6 +67,7 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `EXL3_MOE_B70_LIB` | Path to `libb70moe.so` (default `libb70moe.so` on the loader path). Set by `env.sh`. |
 | `EXL3_MOE_B70_BUDGET` | Fraction of GPU VRAM the plugin may hold weights in (default `0.70`). Layers past the budget register-fail and stay on CPU — this is safe and automatic. |
 | `MOE_NSL=0..8` | Override the split-K degree of the GEMV kernels (default: auto per matrix class). Tuning knob for experiments. |
+| `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
 | `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows and the layer is stream-layout). |
 
 Works with `--moe_cpu_split` (dynamic, placement-profile driven) and `--moe_cpu_offload`.
