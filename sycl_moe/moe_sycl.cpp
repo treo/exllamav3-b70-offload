@@ -15,6 +15,8 @@
 
 namespace moe_sycl {
 
+size_t g_alloc_bytes = 0;
+
 namespace {
 
 constexpr float KDQ = 0.00676727294921875f;   // k_inv = fp16(0x1eee)
@@ -94,25 +96,38 @@ MoeSyclLayer::~MoeSyclLayer()
 {
     auto freep = [&](auto*& p) { if (p) { sycl::free(p, *Q); p = nullptr; } };
     freep(d_tab);
-    freep(w_chunk); freep(w_tin); freep(w_tout); freep(w_h); freep(w_tind); freep(w_toutd);
+    freep(w_chunk);   // scratch buffers belong to the process-wide pool
+}
+
+// Process-wide workspace pool: the worker forwards one layer at a time, so all layers share
+// one set of scratch buffers (per-layer ws blew the B70 budget: 31 layers x ~600 MB).
+namespace {
+struct WsPool { void* buf[5] = {}; size_t cap[5] = {}; };
+WsPool g_ws;
 }
 
 void MoeSyclLayer::ensure_ws(int nc, int rows)
 {
-    auto realloc_p = [&](auto*& p, size_t count) {
-        if (p) sycl::free(p, *Q);
+    auto grow_p = [&](int slot, auto*& p, size_t count) {
         using T = std::remove_pointer_t<std::remove_reference_t<decltype(p)>>;
-        p = sycl::malloc_device<T>(count, *Q);
+        if (g_ws.buf[slot] && count <= g_ws.cap[slot]) { p = (T*)g_ws.buf[slot]; return; }
+        if (g_ws.buf[slot]) { sycl::free(g_ws.buf[slot], *Q); g_alloc_bytes -= g_ws.cap[slot] * sizeof(T); }
+        T* np = sycl::malloc_device<T>(count, *Q);
+        if (!np) fprintf(stderr, "[b70moe] OOM workspace alloc %zu x %zu\n", count, sizeof(T));
+        g_ws.buf[slot] = np;
+        g_ws.cap[slot] = np ? count : 0;
+        g_alloc_bytes += np ? count * sizeof(T) : 0;
+        p = np;
         // prefault so device page tables are populated before the kernel pipeline runs
         Q->memset(p, 0, count * sizeof(T));
         Q->wait();
     };
     if (nc > cap_nc) {
-        realloc_p(w_tin,   (size_t)nc * 2 * MAXM * P.hidden);
-        realloc_p(w_tout,  (size_t)nc * 2 * 8 * MAXM * P.interm);
-        realloc_p(w_h,     (size_t)nc * MAXM * P.interm);
-        realloc_p(w_tind,  (size_t)nc * MAXM * P.interm);
-        realloc_p(w_toutd, (size_t)nc * 8 * MAXM * P.hidden);
+        grow_p(0, w_tin,   (size_t)nc * 2 * MAXM * P.hidden);
+        grow_p(1, w_tout,  (size_t)nc * 2 * 8 * MAXM * P.interm);
+        grow_p(2, w_h,     (size_t)nc * MAXM * P.interm);
+        grow_p(3, w_tind,  (size_t)nc * MAXM * P.interm);
+        grow_p(4, w_toutd, (size_t)nc * 8 * MAXM * P.hidden);
         cap_nc = nc;
     }
     (void)rows;

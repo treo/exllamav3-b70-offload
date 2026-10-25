@@ -8,6 +8,8 @@
 
 namespace moe_sycl {
 
+extern size_t g_alloc_bytes;
+
 // Host helper: convert a native mul1 trellis (u16 array, tiles of 8*K2 u16 = 4*K2 u32 words)
 // into the GPU "stream" layout: state t's 16-bit window lives at bit
 // P0 - ((K2*t + (K2&1)) >> 1) of a plain ascending bitstream whose k-th word is the native

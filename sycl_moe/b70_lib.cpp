@@ -15,6 +15,7 @@
 #include <mutex>
 #include <vector>
 #include "moe_sycl.hpp"
+using moe_sycl::g_alloc_bytes;
 
 namespace {
 
@@ -62,8 +63,10 @@ const uint16_t* upload_trellis(const uint16_t* host, size_t n_u16, int K2)
     std::vector<uint32_t> tmp(n_u16 / 2);
     moe_sycl::repack_native_to_stream_words(tmp.data(), (const uint32_t*)host, n_u16 / (2 * 4 * (size_t)K2), K2);
     uint32_t* p = sycl::malloc_device<uint32_t>(tmp.size(), *g.q);
+    if (!p) { fprintf(stderr, "[b70moe] OOM trellis upload %zu words\n", tmp.size()); return nullptr; }
     g.q->memcpy(p, tmp.data(), tmp.size() * 4).wait();
     g.uploads.back()->keep.push_back((uint16_t*)p);
+    g_alloc_bytes += tmp.size() * 4;
     return (const uint16_t*)p;
 }
 
@@ -75,6 +78,7 @@ const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
     if (!host) { fprintf(stderr, "[b70moe] null host source!\n"); sycl::free(p, *g.q); return nullptr; }
     g.q->memcpy(p, host, n * 2).wait();
     g.uploads.back()->keep.push_back(p);
+    g_alloc_bytes += n * 2;
     return p;
 }
 
@@ -131,6 +135,7 @@ int64_t b70_register_layer
     p.activation = activation; p.act_limit = act_limit; p.gated = gated != 0;
     auto* layer = new moe_sycl::MoeSyclLayer();
     layer->init(g.q, p, gs, us, ds);
+    fprintf(stderr, "[b70moe] registered layer: E %d, B70 bytes so far %.2f GB\n", E, g_alloc_bytes / 1e9);
     // pre-size for typical handoff geometries (slot cap rows x topk)
     b70_warm((int64_t)(intptr_t)layer, 64, 1024);
     b70_warm((int64_t)(intptr_t)layer, 1, 16);
@@ -167,6 +172,7 @@ void b70_warm(int64_t handle, int rows, int max_chunks)
         if (dout) sycl::free(dout, *g.q);
         dx = sycl::malloc_device<uint16_t>((size_t)rows * H, *g.q);
         dout = sycl::malloc_device<float>((size_t)rows * H, *g.q);
+        if (!dx || !dout) fprintf(stderr, "[b70moe] OOM warm bounce\n");
         g.q->memset(dx, 0, (size_t)rows * H * 2);
         g.q->memset(dout, 0, (size_t)rows * H * 4);
         g.q->wait();
@@ -179,6 +185,7 @@ void b70_warm(int64_t handle, int rows, int max_chunks)
         g_stage.stage_cap = (size_t)rows * H * 4;
         g_stage.stage = (float*)sycl::malloc_host(g_stage.stage_cap, *g.q);
         g_stage.stage_u16 = (uint16_t*)sycl::malloc_host(g_stage.stage_cap / 2, *g.q);
+        if (!g_stage.stage || !g_stage.stage_u16) fprintf(stderr, "[b70moe] OOM pinned stage\n");
         memset(g_stage.stage, 0, g_stage.stage_cap);
         memset(g_stage.stage_u16, 0, g_stage.stage_cap / 2);
     }
@@ -187,6 +194,7 @@ void b70_warm(int64_t handle, int rows, int max_chunks)
     sycl::event e2 = g.q->memcpy(g_stage.stage, dout, g_stage.stage_cap, {e1});
     e2.wait();
     g_last_ev = e2;
+    fprintf(stderr, "[b70moe] warm done rows %d chunks %d; B70 bytes %.2f GB\n", rows, max_chunks, g_alloc_bytes / 1e9);
 }
 
 void b70_forward
