@@ -176,3 +176,25 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 - 4.05bpw -mcs 448 budget sweep (EXL3_MOE_B70_BUDGET fraction of VRAM resident):
   0.60 (17 layers) 46.9 tps | 0.75 (21-22 layers) 50.4 tps. Stable at 0.75; default set 0.70.
 - Combined: offload-share-driven win; budget knob trades B70 VRAM for decode speed.
+
+## Microbenchmarking + tuning lessons (b70-bench manual pass)
+- enable_profiling events INFLATE the 6-kernel pipeline by ~40us (NEO timestamp patches).
+  A/B decisions must be made UNPROFILED, interleaved, 3+ reps, min/median; per-kernel spans
+  only for diagnosis. "span" = command_start->end of the submit event; inter-kernel 'gap'
+  shows host submit latency (K1->K2 gap ~17us under profiler; near 0 in production where
+  submits are pipelined ahead of the GPU).
+- DPC++ handler::parallel_for returns VOID (not event) -> cannot build a multi-kernel DAG
+  inside one submit; a single command group per layer-forward would require native L0
+  zeCommandListAppendLaunchKernel with manual param buffers. (Future work.)
+- Large-GRF (-ze-intel-enable-auto-large-GRF-mode): -25% on the gemvs. Don't.
+- annotated_ptr read_hint streaming L1/L2 on weight loads: no measurable effect on this
+  stack (kept behind MOE_GEMV_CACHEHINT=define). Correct spelling (hard-won):
+  `expe::annotated_ptr<const uint32_t, decltype(expe::properties{inte::read_hint<inte::cache_control<inte::cache_mode::streaming, cache_level::L1, cache_level::L2>}>)>`.
+- Split-K auto cap 4 beats 8 by ~10us at decode shapes (partial-sum traffic vs latency).
+  Steady decode/layer now ~172-186us synthetic (E=12 topk=10 2bit) vs 295 CPU native.
+- K3+K4 fusion: activation tile never leaves SLM; saves a submit, a barrier round and ~256KB
+  global roundtrip per chunk; fused span 3.6us, results identical to 1.8e-6.
+- Remaining big-ticket items (from the manuals' roofline, decode is nowhere near 608 GB/s):
+  (1) native-L0 single immediate command list per forward (kills all submit gaps),
+  (2) XMX DPAS int8/s4 tier (moves MACs off the vector unit; needs int8 activation tier),
+  (3) K6 (15us at rows=1) parallelize over (chunk,blk) with atomics.
