@@ -3,6 +3,8 @@
 //   0 full two-tile    1 no bottom sg.barrier    2 no second-tile mad block
 //   3 stage only (no jm/mads)                    4 gb aliases ga (one word stream)
 //   5 two INDEPENDENT single-tile passes (pair loop, 2 barriers/pair, no dual stage)
+// QANT env (any variant): run a QuantIn-lookalike writer over the a8 slab immediately
+//   before the gemv (production Q1->G2 ordering) to probe L1/L2 interposition.
 #include <sycl/sycl.hpp>
 #include <cstdio>
 #include <vector>
@@ -41,13 +43,6 @@ struct P
 
     static constexpr int K2V = 4;
     static constexpr int AD27 = (27 * K2V) >> 1;
-#if VARIANT == 15
-    int W;                      // RUNTIME W (as in production Gemv8 this is constexpr 16)
-#define CONSTW_ 0
-#else
-    static constexpr int W = 16;
-#define CONSTW_ 1
-#endif
     static constexpr int NW = (AD27 + 16 + 31 + 31) / 32 + 1;
 
     void operator()(sycl::nd_item<2> it) const
@@ -227,6 +222,35 @@ struct P
     }
 };
 
+// QuantIn-lookalike: 256-thread WGs over (slot,row), rewrites every a8 word from a tin
+// array. Same footprint/ordering as production Q1 running just before the gemv.
+struct QuantWriter
+{
+    float* tin;                 // [slots][4][K]
+    int32_t* a8;                // [slots][K/8][64]
+    int K;
+    void operator()(sycl::nd_item<2> it) const
+    {
+        const int slot = (int)it.get_group(1) >> 3;
+        const int r = (int)it.get_group(1) & 7;
+        const int tid = (int)it.get_local_id(0);
+        const int kf = K / 8;
+        int32_t* aout = a8 + (size_t)slot * kf * 64 + r * 8;
+        const float* xr = tin + ((size_t)slot * 4 + (r >> 1)) * K;
+        float am = 0.f;
+        for (int i = tid; i < K; i += 256) am = sycl::max(am, sycl::fabs(xr[i]));
+        const float rq = 8192.0f / (am > 0.f ? am : 1.0f);
+        for (int i = tid; i < K; i += 256) {
+            const float vf = xr[i] * rq;
+            int v = (int)(vf >= 0.f ? sycl::floor(vf + 0.5f) : sycl::ceil(vf - 0.5f));
+            v = sycl::clamp(v, -8128, 8128);
+            const int vh = (v + 64) >> 7;
+            const int x8 = (r & 1) ? (v - (vh << 7)) : vh;
+            aout[(i >> 3) * 64 + (i & 7)] = (int32_t)((x8 & 0xff) * 0x01010101);
+        }
+    }
+};
+
 int main(int argc, char** argv)
 {
     const int NSL = argc > 1 ? atoi(argv[1]) : 4;
@@ -297,6 +321,12 @@ int main(int argc, char** argv)
         return P{dw, da8, dacc, TN, TK, W, KF, N, NSL, slm};
 #endif
     };
+    float* dtin = nullptr;
+    if (getenv("QANT")) {
+        std::vector<float> htin((size_t)SLOTS * 4 * K, 0.01f);
+        dtin = sycl::malloc_device<float>(htin.size(), q);
+        q.memcpy(dtin, htin.data(), htin.size() * 4).wait();
+    }
     {
         first = q.submit([&](sycl::handler& cgh) {
             sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
@@ -307,16 +337,23 @@ int main(int argc, char** argv)
         printf("first launch OK\n");
         if (getenv("ONESHOT")) return 0;
         auto t0 = std::chrono::steady_clock::now();
-        while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 1.5)
+        while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 1.5) {
+            if (dtin)
+                q.parallel_for(sycl::nd_range<2>({256, (size_t)8 * SLOTS}, {256, 1}),
+                               QuantWriter{dtin, da8, K});
             first = q.submit([&](sycl::handler& cgh) {
                 sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
                 cgh.parallel_for(sycl::nd_range<2>({(size_t)TN * 16 * NSL, (size_t)SLOTS}, {16, 1}),
                                  mkp(cgh, slm));
             });
+        }
         q.wait();
         double best = 1e30;
         for (int it = 0; it < 8; ++it) {
             auto s = std::chrono::steady_clock::now();
+            if (dtin)
+                q.parallel_for(sycl::nd_range<2>({256, (size_t)8 * SLOTS}, {256, 1}),
+                               QuantWriter{dtin, da8, K});
             q.submit([&](sycl::handler& cgh) {
                 sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
                 cgh.parallel_for(sycl::nd_range<2>({(size_t)TN * 16 * NSL, (size_t)SLOTS}, {16, 1}),
@@ -326,7 +363,7 @@ int main(int argc, char** argv)
             double us = std::chrono::duration<double, std::micro>(e1 - s).count();
             if (us < best) best = us;
         }
-        printf("VARIANT %d: best %.1f us\n", VARIANT, best);
+        printf("VARIANT %d%s: best %.1f us\n", VARIANT, getenv("QANT") ? "+QANT" : "", best);
     }
     return 0;
 }

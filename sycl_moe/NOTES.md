@@ -462,3 +462,43 @@ Production C-ABI per-forward (bench_b70_py.py on xval_s, rows=1, this build):
   fp32 tier 110.7 us (rms 6.05e-7 vs ext) | int8-forced 124.0 us (rms 1.36e-3).
 The synthetic bench_layer rows=1 penalty (-20~35%) largely vanishes through the real
 handoff path (fixed ~40us of submit/handoff amortized); auto still keeps m=1 on fp32.
+
+## Placement/streaming constants under B70 (user hint: exl3 assumes offload << main device)
+
+Swept 2.05bpw B70-auto (perf.py -max_length 2048 -cs 8192 -dr 2, resident=48/48 fallback=0):
+  mcs  st   prefill1024 prefill2048 decode0
+  256  def     1365        1853       71.1
+  256  32      1328        1539       69.8
+  256  64      1323        1493       69.7
+  320  def     1385        1655       70.8
+  320  2        894        1216       70.2
+  320  32      1242        1559       71.2
+  320  64      1202        1344       (33 = under-registration artifact, see below)
+  384  def     1120        1352       72.4   (B70 23.6GB, still 0 fallbacks at budget 0.70)
+  512  *** NOT SUPPORTED *** (all experts offloaded = zero GPU-resident experts; runs but
+  falls apart: B70 53 / CPU 39 dec, 1036/822 prefill — and >VRAM. Boss: don't offload all.)
+Conclusions:
+  * EXL3_MOE_STREAM_T default (~8, bandwidth-scaled) is STILL the optimum with B70+int8: both
+    tightening (t=2, +PCIe thrash) and loosening (t=32/64) lose prefill. No rebalance needed —
+    the streaming decision is about PCIe vs main-GPU, and B70-side speed mostly cancels.
+  * Raising -mcs buys nothing on 2.05 (decode flat ~70-72, prefill drops monotonically): at
+    256 offloaded experts the per-token routed work already covers topk=10; extra CPU->B70
+    headroom does not convert. mcs384 decode +1.7% (72.4) at -27% prefill: not a trade to
+    bake in. KEEP -mcs defaults; the win scales with offload-share only on heavy models
+    (4.05@mcs448 unchanged story).
+  * RECONFIRMED TRAP: back-to-back big-GPU runs under-register B70 (the mcs320/st64 run
+    showed decode 33 = layers on CPU: 20GB freed one second earlier). Always leave ~30s
+    between model-sized runs or discard the first (sweep logs: resident=48 fallback=0 for
+    every other config, so only that point is invalid).
+  * int8-vs-float layers at rows>=2 (bench, same-block min-of-3): both tiers are WEIGHT-TRAFFIC
+    bound at 2bit mul1 (weights identical bytes for both tiers!), so DPAS only wins where the
+    vector-ALU term matters: m=1 rows float -20%, rows>=4 int8 ~flat-vs-float-grows, real-model
+    prefill +8-10% (1711->1853..1880). The auto policy (float iff maxm==1) is exactly right.
+
+## Next structural lever (identified, not yet built): coalesced weight-word loads
+t31 ablation buckets (gu lab shape, nsl4, full work): skeleton 18us, +5-lane-word loads ~15,
++STS ~11, +ja/jb operand moves ~23, +mads ~10. Every lane loads 5 of the 16 tile-row words
+and 16 lanes overlap ~5x on the same 64B row (L1 traffic, not DRAM: unique 8.2MB = 13.5us).
+PoC idea: lane l loads word l (64B coalesced), rebuild windows with select_from_group (5
+SG-shuffles replace 4 LDGs, register-side). Applies to BOTH tiers (GemvK too). Must be a lab
+A/B first (t31 VARIANT 20), adoption bar >=15% on the isolated gemv.
