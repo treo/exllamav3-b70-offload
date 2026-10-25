@@ -116,6 +116,20 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
    .toolfix; without it a full 190-file CUDA rebuild explodes in ninja).
 10. Current integrated numbers (E=12/topk=10/2bit/rows=1): b70 205us/layer vs CPU native 295
     (swizzled) / 452 (native layout). xval rms vs CPU scalar 1.05e-6.
+11. STREAM LAYOUT (validated in t29.cpp for ALL K2 2..17 against decode_state_scalar):
+    repacked tile = per-tile u32 WORD REVERSAL (R[k] = native[(W-k)%W]); then
+    state(t) = 16 ascending bits at P(t) = P0 - ((K2*t + (K2&1)) >> 1), P0 = 32 - K2/2,
+    plain LSB-first word bit order. GemvK<K2V> uses this for K2 in {4,5,8} (the three
+    Qwen3.8-Flash-Next models); other rates ride GemvFallback (word-translated apack).
+    ALWAYS verify such layouts on RANDOM data from the FIXED splitmix RNG (exl3ref::Rng);
+    xorshift's slow start filled early ring words with zeros and silently vacuited tests.
+    Also '0 bad' results deserve suspicion: check the reference itself is non-trivial.
+12. VRAM budget: per-layer workspace allocation is a trap; the ws pool is now process-wide
+    (layers run one at a time). 2.05bpw @256 experts x 31 split layers ~= 8GB B70.
+13. End-to-end 2.05bpw -mcs 256 (max_len 2048 eval): decode 69.6-71.8 t/s vs CPU 67.5-70.3,
+    prefill @2048 1883 vs 1511 t/s (+25%). Decode gains need faster gemv (DPAS int8 path is
+    the next big lever: weight bytesum stays per-weight on vector unit, but MACs move to XMX)
+    AND/OR slimmer handoff. TODO.)
 7. State of play: GPU decode 260us vs CPU-native-ISA 295us (both 10 experts/layer);
    GPU prefill-ish rows=8 690us vs CPU 4600us. Integration is the next milestone;
    revisit gemv instruction diet afterwards (target K2+K5 <= 90us).
