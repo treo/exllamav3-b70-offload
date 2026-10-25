@@ -499,13 +499,17 @@ int main(int argc, char** argv)
                                 e0.get_profiling_info<sycl::info::event_profiling::command_end>()) * 1e-3f);
     }
     if (a.verbose) {
-        const char* names[6] = {"K1 prep_gu", "K2 gemv_gu", "K3 act", "K4 prep_d", "K5 gemv_d", "K6 gather"};
-        printf("per-kernel us (last iter):\n");
+        const char* names[6] = {"K1 prep_gu", "K2 gemv_gu", "K34 act+prep_d", "K5 gemv_d", "K6 gather", "-"};
+        printf("per-kernel us (last iter; span = kernel start->end, gap = prev end->start):\n");
         auto& evs = layer.events();
-        for (size_t kk = 0; kk + 1 < evs.size() && kk < 6; ++kk)
-            printf("  %-12s %8.1f\n", names[kk],
-                (double)(evs[kk + 1].get_profiling_info<sycl::info::event_profiling::command_end>() -
-                         evs[kk].get_profiling_info<sycl::info::event_profiling::command_end>()) * 1e-3);
+        uint64_t prev_end = 0;
+        for (size_t kk = 1; kk < evs.size() && kk <= 6; ++kk) {
+            uint64_t st = evs[kk].get_profiling_info<sycl::info::event_profiling::command_start>();
+            uint64_t en = evs[kk].get_profiling_info<sycl::info::event_profiling::command_end>();
+            printf("  %-12s span %8.1f  gap %8.1f\n", names[kk - 1],
+                (double)(en - st) * 1e-3, prev_end ? (double)(st - prev_end) * 1e-3 : 0.0);
+            prev_end = en;
+        }
     }
     std::sort(times.begin(), times.end());
     const float med = times[times.size() / 2];

@@ -9,6 +9,16 @@
 // 16x16 tile column strip; packed tile words are staged through shared memory, double
 // buffered over k.
 #include "moe_sycl.hpp"
+#ifdef MOE_GEMV_CACHEHINT
+#include <sycl/ext/intel/experimental/cache_control_properties.hpp>
+#include <sycl/ext/oneapi/experimental/annotated_ptr/annotated_ptr.hpp>
+namespace expe = sycl::ext::oneapi::experimental;
+namespace inte = sycl::ext::intel::experimental;
+// weights are read exactly once per gemv: stream through L1/L2
+inline constexpr auto g_read_hint = inte::read_hint<inte::cache_control<
+    inte::cache_mode::streaming, expe::cache_level::L1, expe::cache_level::L2>>;
+using AP_W = expe::annotated_ptr<const uint32_t, decltype(expe::properties{g_read_hint})>;
+#endif
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -188,10 +198,27 @@ struct GemvK
         const int tk_hi = (b.tiles_k * (sl + 1)) / b.nsl;
         const uint32_t* wp = w32 + (size_t)tile_n * W + (size_t)tk_lo * row_step;
         const float* tp = src_tin + tk_lo * 16;
-        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step, tp += 16) {
-            uint32_t g[NW];
+        // depth-2 software pipeline: the next tile's NW row words are loaded before the
+        // current tile's 16 state decodes run, doubling outstanding memory requests/thread
+        uint32_t g[NW], gn[NW];
+#ifdef MOE_GEMV_CACHEHINT
+        { AP_W ap(wp);
 #pragma unroll
-            for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+          for (int i = 0; i < NW; ++i) g[i] = *(ap + widx[i]); }
+#else
+#pragma unroll
+        for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+#endif
+        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step, tp += 16) {
+#ifdef MOE_GEMV_CACHEHINT
+            if (tk + 1 < tk_hi) { AP_W ap(wp + row_step);
+#pragma unroll
+              for (int i = 0; i < NW; ++i) gn[i] = *(ap + widx[i]); }
+#else
+            if (tk + 1 < tk_hi) { const uint32_t* wpn = wp + row_step;
+#pragma unroll
+              for (int i = 0; i < NW; ++i) gn[i] = wpn[widx[i]]; }
+#endif
             uint32_t h[NW];
             if (pre == 0) {
 #pragma unroll
@@ -224,6 +251,8 @@ struct GemvK
                     if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
                 }
             }
+#pragma unroll
+            for (int i = 0; i < NW; ++i) g[i] = gn[i];
         }
         acc0 += accB0; acc1 += accB1; acc2 += accB2; acc3 += accB3;
         float* dst = down ? b.toutd + ((size_t)j * b.nsl + sl) * MAXM * N
@@ -366,7 +395,9 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 
     const int NSL_GU = [&]{
         int base = nc * nm * (I / 128), w = nsl;
-        if (w == 0) { w = 1; while (w < 8 && base * w * 128 < 80000) ++w; }
+        // cap 4: beyond that the extra partial-reduction traffic outweighs the latency win
+        // (measured on B70, decode shapes; 2026-10 A/B)
+        if (w == 0) { w = 1; while (w < 4 && base * w * 128 < 80000) ++w; }
         return w;
     }();
     const int NSL_D = [&]{
@@ -438,7 +469,9 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 
     gemv(false);
 
-    // ---- K3: out transform (hadamard + svh + bias) + activation -> h
+    // ---- K3+K4 fused: out transform (hadamard + svh + bias) + activation + down-prep
+    // (activation h never leaves the workgroup: down-side suh/Hadamard run on the same
+    // 128-column tile while it is in SLM; saves a global roundtrip and a submit)
     {
         const int nbk = I / 128;
         launch([&](sycl::handler& cgh) {
@@ -451,6 +484,8 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 const int e = chunks[j].expert;
                 const int m = chunks[j].m;
                 const int cG = blk * 128 + tid;
+                const uint16_t* suhd = (const uint16_t*)tab[(F_SUH * 3 + CAT_DOWN) * E + e];
+                const float sd = f16(suhd[blk * 128 + tid]);
                 const uint16_t* svhu = (const uint16_t*)tab[(F_SVH * 3 + CAT_UP) * E + e];
                 const uint16_t* bu   = (const uint16_t*)tab[(F_BIAS * 3 + CAT_UP) * E + e];
                 const int mu_up = gated ? 1 : 0;   // gateless gemv stored up at slot j*2+0
@@ -496,7 +531,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                                 break; }
                             default: av = gv; break;
                         }
-                        hbuf[(size_t)j * MAXM * I + (size_t)r * I + cG] = av;
+                        sh[tid] = av * sd;   // fused down-prep: scale then SLM Hadamard
                     } else {
                         {
                             float su = 0.f;
@@ -507,31 +542,11 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         hadamard128(it, tid, sh.get_pointer());
                         const float uv = sh[tid] * hu + bj;
                         const float rv = uv > 0.0f ? uv : 0.0f;
-                        hbuf[(size_t)j * MAXM * I + (size_t)r * I + cG] = rv * rv;
+                        sh[tid] = rv * rv * sd;
                     }
                     sycl::group_barrier(it.get_group());
-                }
-            });
-        });
-    }
-
-    // ---- K4: prep down inputs (from fp32 h)
-    {
-        const int nbk = I / 128;
-        launch([&](sycl::handler& cgh) {
-            sycl::local_accessor<float, 1> sh({128}, cgh);
-            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
-                [=](sycl::nd_item<2> it) {
-                const int blk = (int)it.get_group(0);
-                const int j = (int)it.get_group(1);
-                const int tid = (int)it.get_local_id(0);
-                const int e = chunks[j].expert;
-                const int m = chunks[j].m;
-                const uint16_t* suh = (const uint16_t*)tab[(F_SUH * 3 + CAT_DOWN) * E + e];
-                for (int r = 0; r < m; ++r) {
-                    sh[tid] = hbuf[(size_t)j * MAXM * I + (size_t)r * I + blk * 128 + tid] * f16(suh[blk * 128 + tid]);
                     hadamard128(it, tid, sh.get_pointer());
-                    tind[(size_t)j * MAXM * I + (size_t)r * I + blk * 128 + tid] = sh[tid] * HAD_SCALE;
+                    tind[(size_t)j * MAXM * I + (size_t)r * I + cG] = sh[tid] * HAD_SCALE;
                     sycl::group_barrier(it.get_group());
                 }
             });
