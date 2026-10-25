@@ -125,7 +125,6 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
         grow_p(2, w_h,     (size_t)nc * MAXM * P.interm);
         grow_p(3, w_tind,  (size_t)nc * MAXM * P.interm);
         grow_p(4, w_toutd, (size_t)nc * 8 * MAXM * P.hidden);
-        grow_p(11, w_dbg, 4096);
         if (use8) {
             // int8 pipeline slabs (sizes independent of the fp32 slice buffers)
             grow_p(5, w_a8u,   (size_t)nc * 2 * (P.hidden / 8) * 64);
@@ -155,9 +154,6 @@ struct GemvBase
     float *tout, *toutd;
     int E, nc, nm, H, I, nbk, tiles_n, tiles_k, gated, down;
     int nsl;                 // k-slices per unit
-#ifdef MOE_I8_DEBUG
-    float* dbg = nullptr;    // state fingerprint hook (parity check vs int8 path)
-#endif
 };
 
 template <int K2V, bool MMA>
@@ -263,10 +259,6 @@ struct GemvK
                 // (10-pair A/B); UB-free by construction (no shift ever reaches 32).
                 const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
                 const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
-#ifdef MOE_I8_DEBUG
-                if (b.dbg && !down && unit == 0 && tid == 0 && tk == 0)
-                    b.dbg[70 + rk] = (float)st16;
-#endif
                 const uint32_t xm = st16 * 0x83DCD12Du;
                 const uint32_t t1 = (xm & 0x00ff00ffu) + ((xm >> 8) & 0x00ff00ffu);
                 const uint32_t bs = (t1 & 0xffffu) + (t1 >> 16);
@@ -406,7 +398,6 @@ struct QuantIn
     Affine* __restrict__ qsb;          // [slots][8]
     const ChunkDev* chunks;
     int slots, k, nm, tsmul;           // tin slot = slot * tsmul (gateless gu rows live at j*2)
-    float* dbg;
     sycl::local_accessor<float, 1> red;
     void operator()(sycl::nd_item<2> it) const
     {
@@ -414,18 +405,15 @@ struct QuantIn
         const int r = (int)it.get_group(1) & 7;
         const int tid = (int)it.get_local_id(0);     // 256
         const int m = chunks[slot / nm].m;
+        const int tok = r >> 1, part = r & 1;        // ALWAYS-WIDE: token -> rows 2t (vh), 2t+1 (vl)
         const int kf = k / 8;
         int32_t* aout = a8 + (size_t)slot * kf * 64 + r * 8;
-        if (r >= m) {
+        if (tok >= m) {
             for (int i = tid; i < kf * 8; i += 256) aout[(i >> 3) * 64 + (i & 7)] = 0;
             if (tid == 0) qsb[slot * 8 + r] = Affine{ 0.f, 0.f };
             return;
         }
-        const float* xr = tin + (((size_t)slot * tsmul) * MAXM + r) * k;
-#ifdef MOE_I8_DEBUG
-        // probe knobs: [30] 1=>x8=+1, 2=>x8=-1 ; [31] B bytes := 1 ; [33] B := 1 only q==0
-        const float ones_mode = dbg ? dbg[90] : 0.f;
-#endif
+        const float* xr = tin + (((size_t)slot * tsmul) * MAXM + tok) * k;
         float am = 0.f;
         for (int i = tid; i < k; i += 256) am = sycl::max(am, sycl::fabs(xr[i]));
         red[tid] = am;
@@ -436,27 +424,26 @@ struct QuantIn
         }
         const float am0 = red[0];
         sycl::group_barrier(it.get_group());   // before overwriting red[] with the sx partials
-        const float qv = am0 > 0.f ? am0 * (1.0f / 127.0f) : 1.0f;
-        const float rq = 1.0f / qv;
+        // CPU quantize_row_wide semantics, HALVED range: q = amax / 8192; v = clamp(round(x/q),
+        // +-8128); vh = (v+64)>>7 (|vh| <= 64), vl = v - (vh<<7) (|vl| <= 127); row scales
+        // {q*128, q}. Range bound is NOT cosmetic: Xe DPAS sums byte pairs as SATURATED i16
+        // (unlike AVX-512 vpdpbusd's i32 lanes), and the mul1 product bytes span the full
+        // u8 range, so |x8| > ~64 clamps pair partials (bc: 127*255*2 > 32767, 64*255*2 =
+        // 32640 < 32768). This was the int8-tier blowup; probes with small A never hit it.
+        // Every row goes wide, so the 8 dpas rows carry exactly MAX_M tokens x {vh, vl}.
+        const float qw = am0 > 0.f ? am0 * (1.0f / 8192.0f) : 1.0f;
+        const float rq = am0 > 0.f ? 8192.0f / am0 : 1.0f;
         float sacc = 0.f;
         for (int i = tid; i < k; i += 256) {
-#ifdef MOE_I8_DEBUG
-            if (ones_mode > 0.5f) {
-                int xv3 = (int)(i & 7) + 1;                       // mode 3: x8 = q+1
-                aout[(i >> 3) * 64 + (i & 7)] =
-                    (ones_mode > 2.5f) ? xv3 * 0x01010101
-                    : (ones_mode > 1.5f) ? (int32_t)0xFFFFFFFF : 0x01010101;
-                sacc += (ones_mode > 2.5f) ? (float)xv3 : (ones_mode > 1.5f) ? -1.f : 1.f;
-                continue;
-            }
-#endif
-            const float v = xr[i] * rq;
-            int x8 = (int)(v >= 0.f ? sycl::floor(v + 0.5f) : sycl::ceil(v - 0.5f));
-            x8 = sycl::clamp(x8, -127, 127);
-            sacc += (float)x8;
-            // word (i>>3 frag base) + row r (stride 8, folded into aout) + quad (i&7):
+            const float vf = xr[i] * rq;
+            int v = (int)(vf >= 0.f ? sycl::floor(vf + 0.5f) : sycl::ceil(vf - 0.5f));
+            v = sycl::clamp(v, -8128, 8128);
+            const int vh = (v + 64) >> 7;
+            const int x8w = part ? (v - (vh << 7)) : vh;
+            sacc += (float)x8w;
+            // word (i>>3 frag base) + row r (stride 8, folded into aout) + slot (i&7):
             // the 4 bytes of that word ARE hwk 4q..4q+3, all carrying the same x8
-            aout[(i >> 3) * 64 + (i & 7)] = x8 * 0x01010101;
+            aout[(i >> 3) * 64 + (i & 7)] = x8w * 0x01010101;
         }
         red[tid] = sacc;
         sycl::group_barrier(it.get_group());
@@ -465,25 +452,13 @@ struct QuantIn
             sycl::group_barrier(it.get_group());
         }
         if (tid == 0) {
-            const float Aq = KDQ * qv;
+            const float q_eff = part ? qw : qw * 128.0f;
+            const float Aq = KDQ * q_eff;
             qsb[slot * 8 + r] = Affine{ Aq, -510.0f * Aq * red[0] };
-#ifdef MOE_I8_DEBUG
-            // dump region: [0..4] {amax,q,sx,A,B}  [8..15] x8 bytes k=0..7  [16..23] xr k=0..7
-            if (slot == 0 && r == 0 && dbg) {
-                dbg[0] = am0; dbg[1] = qv; dbg[2] = red[0]; dbg[3] = Aq;
-                dbg[4] = -510.0f * Aq * red[0];
-                for (int i = 0; i < 16 && i < k; ++i) {
-                    const int32_t aw = (i < 8) ? aout[i] : aout[64 + (i - 8)];   // frag0 | frag1
-                    const float v8 = (float)(int)((signed char)((unsigned int)aw & 0xffu));
-                    if (i < 8) dbg[8 + i] = v8;
-                    else dbg[24 + (i - 8)] = v8;
-                    if (i < 8) dbg[16 + i] = xr[i];
-                }
-            }
-#endif
         }
     }
 };
+
 
 // DPAS GEMV over the stream-repacked mul1 tiles. Work group = one (slot, 16-column
 // fragment); 16 lanes = 16 columns of that tile, each keeping its own column window
@@ -499,7 +474,6 @@ struct Gemv8Base
     const int32_t* a8;       // operand slabs from QuantIn
     int32_t* acc;            // [slot][8][N] i32 (raw accumulator, KDQ/q folded later)
     int E, nc, nm, H, I, nfl, down;
-    float* dbg;
 };
 
 template <int K2V>
@@ -532,12 +506,7 @@ struct Gemv8
         const int K = down ? b.I : b.H;
         const int N = down ? b.H : b.I;
         const int tiles_k = K / 16;
-#ifdef MOE_I8_DEBUG
-        // dbg[93] > .5: run only ONE tile row (single-fragment ground truth)
-        const int tk_hi = (b.dbg && b.dbg[93] > 0.5f && !b.down) ? 1 : tiles_k;
-#else
         const int tk_hi = tiles_k;
-#endif
         const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[(F_TRI * 3 + cat) * b.E + e];
 
         const int cG = nf * 16 + tid;              // global output col of this lane
@@ -551,7 +520,11 @@ struct Gemv8
 #pragma unroll
         for (int i = 0; i < NW; ++i) widx[i] = ((wb + i) % W + W) % W;
 
-        uint32_t* slp = (uint32_t*)slab.get_pointer().get();
+        // lab_jm7-validated ping-pong: ONE 512B SLM slab per packed fragment object.
+        // Staging 1024B through a 512B accessor made the second fragment of every tile
+        // read zeros - the KS1 'missing fragment' symptom.
+        unsigned char* const slp0 = slab.get_pointer().get();
+        unsigned char* const slp1 = slab.get_pointer().get() + 512;
         const size_t row_step = (size_t)(N / 16) * W;
         const uint32_t* wp = w32 + (size_t)tile_n * W + 0;
         const int32_t* pa0 = b.a8 + ((size_t)slot * (K / 8)) * 64;   // [kfrag][64]
@@ -585,28 +558,15 @@ struct Gemv8
                 const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
                 const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
                 const uint32_t prod0 = st16 * 0x83DCD12Du;
-#ifdef MOE_I8_DEBUG
-                // probe beta:  [31]>0.5 forces B bytes = 1; [33]>0.5 B=1 only for quad rk&7==0
-                uint32_t prod = prod0;
-                if (b.dbg && b.dbg[91] > 0.5f) prod = 0x01010101u;
-                if (b.dbg && b.dbg[92] > 0.5f)
-                    prod = ((rk & 7) == 0) ? 0x01010101u : 0u;      // gamma: only quad0
-                if (slot == 0 && nf == 0 && tk == 0 && tid == 0 && !b.down && b.dbg) {
-                    b.dbg[40 + rk] = (float)st16;
-                    b.dbg[60 + rk] = (float)(int)prod;
-                }
-#else
                 const uint32_t prod = prod0;
-#endif
-                // packed-VNNI dword: fragment fk = rk>>3, k-quad = rk&7, this column
-                slp[((rk >> 3) * 8 + (rk & 7)) * 16 + cin] = prod;
+                // packed-VNNI staging (lab_jm7 addressing): quad row -> band (rk&7) of
+                // this fragment's 512B slab, dword (rk&7)*16 + col
+                uint32_t* slpw = (rk < 8) ? (uint32_t*)slp0 : (uint32_t*)slp1;
+                slpw[(rk & 7) * 16 + cin] = prod;
             }
             sg.barrier();
             {
                 // one tile row feeds TWO k32 fragments (rows 0-7, rows 8-15): 2x512B slab
-                auto pbg0 = sycl::address_space_cast<sycl::access::address_space::local_space,
-                                                     sycl::access::decorated::yes>(
-                    (const unsigned char*)slp);
 #pragma unroll
                 for (int fk = 0; fk < 2; ++fk) {
                     auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
@@ -616,9 +576,8 @@ struct Gemv8
                     mx8::joint_matrix_load(sg, jb,
                         sycl::address_space_cast<sycl::access::address_space::local_space,
                                                  sycl::access::decorated::yes>(
-                            (const unsigned char*)slp + fk * 512),
+                            fk ? slp1 : slp0),
                         16 * 4);   // packed stride = N*VNNI
-                    (void)pbg0;
                     mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
                 }
             }
@@ -628,12 +587,6 @@ struct Gemv8
                                             sycl::access::decorated::yes>(
             b.acc + (size_t)slot * 8 * N + nf * 16);
         mx8::joint_matrix_store(sg, jc, pcg, N, mx8::layout::row_major);
-#ifdef MOE_I8_DEBUG
-        if (tid == 0 && slot == 0 && nf == 0 && b.down == 0 && b.dbg) {
-            for (int i = 0; i < 4; ++i) b.dbg[48 + i] = (float)b.acc[i];
-            b.dbg[52] = (float)tiles_k;
-        }
-#endif
     }
 };
 
@@ -751,30 +704,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         int32_t* const accd8 = w_accd;
         Affine* const qsxu = (Affine*)w_qsxu;
         Affine* const qsxd = (Affine*)w_qsxd;
-#ifdef MOE_I8_DEBUG
-        static const float g_one = 1.f;
-        static const float g_minus1 = 2.f;
-        static const float g_three = 3.f;
-        if (w_dbg && std::getenv("MOE_I8_ONES"))
-            dep = q.memcpy(w_dbg + 90, std::getenv("MOE_I8_MONES") ? &g_minus1 : &g_one, 4, { dep });
-        if (w_dbg && std::getenv("MOE_I8_BONES"))
-            dep = q.memcpy(w_dbg + 91, &g_one, 4, { dep });
-        if (w_dbg && std::getenv("MOE_I8_Q0"))
-            dep = q.memcpy(w_dbg + 92, &g_one, 4, { dep });
-        if (w_dbg && std::getenv("MOE_I8_KS1"))
-            dep = q.memcpy(w_dbg + 93, &g_one, 4, { dep });
-        if (w_dbg && std::getenv("MOE_I8_AQ"))
-            dep = q.memcpy(w_dbg + 90, &g_three, 4, { dep });
-#endif
         {
             launch([&](sycl::handler& cgh) {
                 sycl::local_accessor<float, 1> red({ 256 }, cgh);
                 cgh.parallel_for(sycl::nd_range<2>({ 256, (size_t)8 * nc * nm }, { 256, 1 }),
                     QuantIn{ w_tin, w_a8u, (Affine*)w_qsxu, chunks, nc * nm, H, nm,
-                             nm == 2 ? 1 : 2, w_dbg, red });
+                             nm == 2 ? 1 : 2, red });
             });
         }
-        Gemv8Base g8{ d_tab, w_chunk, nullptr, nullptr, E, nc, nm, H, I, 0, 0, w_dbg };
+        Gemv8Base g8{ d_tab, w_chunk, nullptr, nullptr, E, nc, nm, H, I, 0, 0 };
         {
             g8.a8 = w_a8u; g8.acc = w_accgu; g8.nfl = I / 16; g8.down = 0;
             launch([&](sycl::handler& cgh) {
@@ -827,12 +765,18 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     const float bj = bu ? f16(bu[cG]) : 0.f;
                     for (int r = 0; r < m; ++r) {
                         if (gated) {
-                            const Affine cg = qg[r], cu = qu[r];
-                            sh[tid]       = cg.A * (float)ags[(size_t)r * I + cG];
-                            sh[128 + tid] = cu.A * (float)au[(size_t)r * I + cG];
+                            const Affine cg0 = qg[2 * r], cg1 = qg[2 * r + 1];
+                            const Affine cu0 = qu[2 * r], cu1 = qu[2 * r + 1];
+                            sh[tid]       = cg0.A * (float)ags[(size_t)(2 * r) * I + cG]
+                                          + cg1.A * (float)ags[(size_t)(2 * r + 1) * I + cG];
+                            sh[128 + tid] = cu0.A * (float)au[(size_t)(2 * r) * I + cG]
+                                          + cu1.A * (float)au[(size_t)(2 * r + 1) * I + cG];
                             hadamard128(it, tid, sh.get_pointer());
                             hadamard128(it, tid, sh.get_pointer() + 128);
-                            if (tid == 0) { sh[0] += 128.0f * cg.B; sh[128] += 128.0f * cu.B; }
+                            if (tid == 0) {
+                                sh[0] += 128.0f * (cg0.B + cg1.B);
+                                sh[128] += 128.0f * (cu0.B + cu1.B);
+                            }
                             const float gv = sh[tid] * hgv + biv;
                             const float uv = sh[128 + tid] * hu + bj;
                             float av;
@@ -854,10 +798,11 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                             }
                             sh[tid] = av * sd;
                         } else {
-                            const Affine cu = qu[r];
-                            sh[tid] = cu.A * (float)au[(size_t)r * I + cG];
+                            const Affine cu0 = qu[2 * r], cu1 = qu[2 * r + 1];
+                            sh[tid] = cu0.A * (float)au[(size_t)(2 * r) * I + cG]
+                                    + cu1.A * (float)au[(size_t)(2 * r + 1) * I + cG];
                             hadamard128(it, tid, sh.get_pointer());
-                            if (tid == 0) sh[0] += 128.0f * cu.B;
+                            if (tid == 0) sh[0] += 128.0f * (cu0.B + cu1.B);
                             const float uv = sh[tid] * hu + bj;
                             const float rv = uv > 0.0f ? uv : 0.0f;
                             sh[tid] = rv * rv * sd;
@@ -874,7 +819,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             launch([&](sycl::handler& cgh) {
                 sycl::local_accessor<float, 1> red({ 256 }, cgh);
                 cgh.parallel_for(sycl::nd_range<2>({ 256, (size_t)8 * nc }, { 256, 1 }),
-                    QuantIn{ w_tind, w_a8d, (Affine*)w_qsxd, chunks, nc, I, 1, 1, nullptr, red });
+                    QuantIn{ w_tind, w_a8d, (Affine*)w_qsxd, chunks, nc, I, 1, 1, red });
             });
         }
         {
@@ -914,10 +859,11 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         const float wgt = chunks[j].weight[s];
                         const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
                         const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
-                        const Affine cd = qsxd[j * 8 + s];
-                        sh[tid] = cd.A * (float)accd8[((size_t)j * 8 + s) * H + cG];
+                        const Affine cd0 = qsxd[j * 8 + 2 * s], cd1 = qsxd[j * 8 + 2 * s + 1];
+                        sh[tid] = cd0.A * (float)accd8[((size_t)j * 8 + 2 * s) * H + cG]
+                                + cd1.A * (float)accd8[((size_t)j * 8 + 2 * s + 1) * H + cG];
                         hadamard128(it, tid, sh.get_pointer());
-                        if (tid == 0) sh[0] += 128.0f * cd.B;
+                        if (tid == 0) sh[0] += 128.0f * (cd0.B + cd1.B);
                         float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
                         if (be) v += f16(be[cG]);
                         sycl::atomic_ref<float, sycl::memory_order::relaxed,
@@ -930,48 +876,6 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 if (prof) pev.push_back(dep);
             }
         }
-#ifdef MOE_I8_DEBUG
-        if (w_dbg && std::getenv("MOE_I8_SYNC")) {
-            q.wait();
-            float hd[96];
-            q.copy(w_dbg, hd, 96); q.wait();
-            printf("DBG QIn: amax %g q %g sx %g A %g B %g\n", hd[0], hd[1], hd[2], hd[3], hd[4]);
-            printf("DBG QIn x8[0..7]  %g %g %g %g %g %g %g %g\n",
-                   hd[8], hd[9], hd[10], hd[11], hd[12], hd[13], hd[14], hd[15]);
-            printf("DBG QIn x8[8..15] %g %g %g %g %g %g %g %g\n",
-                   hd[24], hd[25], hd[26], hd[27], hd[28], hd[29], hd[30], hd[31]);
-            printf("DBG QIn xr[0..7]  %g %g %g %g %g %g %g %g\n",
-                   hd[16], hd[17], hd[18], hd[19], hd[20], hd[21], hd[22], hd[23]);
-            {
-                long man = 0;
-                for (int rk = 0; rk < 16; ++rk) {
-                    int pr = (int)hd[60 + rk];
-                    long bs = (int)((unsigned)pr & 0xffu) + ((unsigned)pr >> 8 & 0xffu)
-                            + ((unsigned)pr >> 16 & 0xffu) + ((unsigned)pr >> 24 & 0xffu);
-                    const long x8v = (rk < 8) ? (long)hd[8 + rk] : (long)hd[24 + rk - 8];
-                    man += x8v * bs;
-                }
-                printf("DBG C[0][0] got %g  manual(sum16) %ld   tk %g flags %g %g %g %g\n",
-                       hd[48], man, hd[52], hd[90], hd[91], hd[92], hd[93]);
-                // verify each st16 against the window bits: st(rk) = 16b at bitpos(rk) within
-                // (lo4(rk),hi4(rk)) rebuilt per rk from the two dumped source words is not
-                // possible (per-rk words differ), so just replay st vs prod sign:
-                for (int rk = 0; rk < 16; ++rk) {
-                    const unsigned st = (unsigned)(int)hd[40 + rk];
-                    const unsigned pr = (unsigned)(int)hd[60 + rk];
-                    if ((st * 0x83DCD12Du) != pr) printf("  st/prod MISMATCH rk%d st %x\n", rk, st);
-                }
-                printf("DBG int8  st[0..7]: %04x %04x %04x %04x %04x %04x %04x %04x\n",
-                       (unsigned)(int)hd[40], (unsigned)(int)hd[41], (unsigned)(int)hd[42],
-                       (unsigned)(int)hd[43], (unsigned)(int)hd[44], (unsigned)(int)hd[45],
-                       (unsigned)(int)hd[46], (unsigned)(int)hd[47]);
-                printf("DBG float st[0..7]: %04x %04x %04x %04x %04x %04x %04x %04x\n",
-                       (unsigned)(int)hd[70], (unsigned)(int)hd[71], (unsigned)(int)hd[72],
-                       (unsigned)(int)hd[73], (unsigned)(int)hd[74], (unsigned)(int)hd[75],
-                       (unsigned)(int)hd[76], (unsigned)(int)hd[77]);
-            }
-        }
-#endif
         return dep;
     }
 
@@ -979,9 +883,6 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     GemvBase gb;
     gb.tab = d_tab; gb.chunks = w_chunk;
     gb.tin = w_tin; gb.tout = w_tout; gb.tind = w_tind; gb.toutd = w_toutd;
-#ifdef MOE_I8_DEBUG
-    gb.dbg = w_dbg;
-#endif
     gb.E = E; gb.nc = nc; gb.nm = nm; gb.H = H; gb.I = I; gb.gated = gated ? 1 : 0;
     gb.nsl = nsl;
     auto gemv = [&](bool down) {
@@ -1141,17 +1042,6 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             if (prof) pev.push_back(dep);
         }
     }
-#ifdef MOE_I8_DEBUG
-    if (w_dbg && std::getenv("MOE_I8_SYNC")) {
-        q.wait();
-        float hf[96];
-        q.copy(w_dbg, hf, 96); q.wait();
-        printf("DBG float st[0..7]: %04x %04x %04x %04x %04x %04x %04x %04x\n",
-               (unsigned)(int)hf[70], (unsigned)(int)hf[71], (unsigned)(int)hf[72],
-               (unsigned)(int)hf[73], (unsigned)(int)hf[74], (unsigned)(int)hf[75],
-               (unsigned)(int)hf[76], (unsigned)(int)hf[77]);
-    }
-#endif
     return dep;
 }
 

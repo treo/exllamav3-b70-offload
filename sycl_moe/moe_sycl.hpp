@@ -117,7 +117,6 @@ private:
     float *w_qsxd = nullptr;         // nc x 8 x 2
     int32_t *w_accgu = nullptr;      // (nc*2) x 8 x I   (nsl = 1: no slice buffers)
     int32_t *w_accd = nullptr;       // nc x 8 x H
-    float *w_dbg = nullptr;          // debug scratch (MOE_I8 bring-up)
     bool use8 = false;               // int8 pipeline active for this layer
     int *w_tokb = nullptr;           // rows+1
     int *w_toke = nullptr;           // rows * topk (cap by alloc size)
