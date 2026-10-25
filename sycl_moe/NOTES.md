@@ -288,6 +288,19 @@ Production design (in progress):
   ref in bench, then ppl on all three models, EXL3_MOE_B70_INT8 env (default ON after).
   New pooled ws: a8u/a8d operand slabs + i32 acc buffers; no weight expansion, weights
   stay the packed native stream (0.5 B/weight).
+Follow-ups flagged by boss (post-integration experiments):
+  - exllamav3 sizes CPU offload assuming CPU is slow; B70 is not. Re-sweep -mcs upward
+    (2.05: 256 -> 384/512) once int8 path lands; expect free perf.
+  - MAXM=4 (chunk rows) is a CPU-kernel register budget (MAX_SLOTS). DPAS m8 fragments
+    process 8 rows for the price of ~4: raising MAXM to 8 (b70-side chunker variant +
+    ChunkDev.token[8]) would nearly halve prefill jobs and fill the idle fragment rows.
+    Chunking is host-side protocol -> do as its own change after v1 lands.
+  - quantize semantics to mirror (moe_mul1.cpp quantize_row): q = amax>0? amax/127 : 1;
+    x8 = clamp(lround(x/q), +-127); sum_x8 exact int; splat32[i] = x8*0x01010101 == the
+    DPAS A row bytes for that real-k slot (4 hw-k bytes = same x8: replication free).
+    Wide rows (amax/128 hi + lo residual pair, outputs summed) = v2: v1 runs plain-int8
+    (CPU's EXL3_MOE_CPU_WIDE=0 mode), gated by ppl. NSL for int8 path = 1 (job counts are
+    already >=3840; slice-sum buffers and K3 slice loops disappear).
 Trap reminders learned this session:
   - Xe2 clock ramp INVERTS microbench rankings: 1.5s burn-in before timing, always.
   - local_accessor is per-work-group: fine for the 512B slab, but barriers = sync.nop x3-4
@@ -304,3 +317,19 @@ residency (54 fallback lines, 49-51 t/s). Driver/page-reclaim lag steals apparen
    or leave ~30s. The graceful-fallback machinery did its job (no crash, correct output).
 Also note: the parent process ALSO creates a plugin context (tiny, queue-only) via the
 swizzle gate -> two `[b70moe] device:` lines per run is NORMAL, not double-upload.
+
+## int8 v1 debug post-mortem (the bug that wasn't)
+- The 12x rms_rel on e1/e12 came from the DEBUG SCAFFOLDING, not the pipeline: the float
+  fingerprint dumper matched every unit with jmu==0 && blk==0 (all NSL slices), and slices
+  end at DIFFERENT tile rows (tk_hi-1), so dbg[70..77] held slice-7's tail row. Judging
+  "float vs int8 states differ" from that was an artifact; with tk==0 && unit==0 gating the
+  rows are IDENTICAL (7169 c5a4 30f3 ... both). KS1 C matched manual sum to 7 counts.
+- Companion probe design that DID work and is worth keeping in the toolbox:
+  uniform-A (x8=+1) => C = sum(bs); uniform-B=1 => C = 4*sum(x8); A=q+1 with
+  B=1-only-quad0 => C must be exactly n_frags*4 (permutation-sensitive!).
+- Lesson on manual references: do NOT recompute the reference from the kernel's OWN dumped
+  states and call it ground truth - circular. Compare states across pipelines or against
+  the CPU extension instead (which is what xval is for).
+- int8 v1 remaining real gap vs CPU tier: wide-row 2-slot quantization not implemented
+  (rows needing it fall back to plain int8 -> local degradation; e1 h-stage off). v2:
+  quantize_row_wide mirror + row pairing (m4->8 rows exactly fits when <=2 tokens wide).

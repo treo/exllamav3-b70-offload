@@ -107,6 +107,15 @@ private:
     float *w_h = nullptr;            // nc x 4 x I
     float *w_tind = nullptr;         // nc x 4 x I
     float *w_toutd = nullptr;        // nc x 4 x H
+    // int8 / XMX DPAS path (mirrors CPU VNNI tier): operand slabs + i32 accumulators
+    int32_t *w_a8u = nullptr;        // (nc*2) x (H/8) x 8 rows x 8 i32  (A rows = splat32)
+    int32_t *w_a8d = nullptr;        // nc x (I/8) x 8 x 8 i32
+    float *w_qsxu = nullptr;         // (nc*2) x 8 x 2 {q, sum_x8 as float}
+    float *w_qsxd = nullptr;         // nc x 8 x 2
+    int32_t *w_accgu = nullptr;      // (nc*2) x 8 x I   (nsl = 1: no slice buffers)
+    int32_t *w_accd = nullptr;       // nc x 8 x H
+    float *w_dbg = nullptr;          // debug scratch (MOE_I8 bring-up)
+    bool use8 = false;               // int8 pipeline active for this layer
     int *w_tokb = nullptr;           // rows+1
     int *w_toke = nullptr;           // rows * topk (cap by alloc size)
 
