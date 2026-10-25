@@ -333,3 +333,45 @@ swizzle gate -> two `[b70moe] device:` lines per run is NORMAL, not double-uploa
 - int8 v1 remaining real gap vs CPU tier: wide-row 2-slot quantization not implemented
   (rows needing it fall back to plain int8 -> local degradation; e1 h-stage off). v2:
   quantize_row_wide mirror + row pairing (m4->8 rows exactly fits when <=2 tokens wide).
+
+## Reset baseline: int8 re-port starts from float-only (this commit)
+moe_sycl.{cpp,hpp} restored to aa5cf203 (float-only, production-verified: xval 6.06e-7,
+full synthetic battery <=2.9e-6, plugin builds). All int8 kernel code REMOVED from the
+shipping path; the last (unverified) int8 implementation lives in git at 88c3e781 for
+reference. The external `--i8trace` harness (bench_layer) stays, null-guarded.
+
+Why: today's session showed in-kernel probe scaffolding repeatedly polluted what it
+measured (flag-slot clobbering by dump regions; probes that bypass the very datapath
+under test). Also several "fixes" (wide-pair rows, +-64 clamp, ping-pong slabs) were
+adopted without proof and muddied the baseline. Rule going forward: kernels contain ZERO
+debug hooks; all verification is external readback + host emulation per stage, each stage
+fed from device readbacks of its OWN inputs.
+
+Established knowledge to carry into the re-port (all externally or doubly verified):
+1. joint_matrix int8 m8n16k32, B `ext_intel_packed`, stride arg = N*VNNI bytes, packed
+   byte addr(k,c) = (k>>2)*(N*4) + c*4 + (k&3): bit-exact vs scalar (lab_jm7, lab_jm8,
+   LLVM e2e joint_matrix_su_int8 PASSES on B70).
+2. lab_jm8: twin-fragment-per-tile SLM staging (16 bands x 16 dwords, fk bases at +0/+512,
+   stride 64, 2 loads + 2 mads) is bit-exact with scalar reference. Production staging
+   MUST mirror lab_jm8's addressing verbatim: sl32[quad*16 + col] per fragment slab.
+3. Mul1 identity (exl3_ref decode_mul1): for product word p = st16*0x83DCD12D,
+   w = k_inv * (bytesum(p) - 510). So bs(k,n) = 510 + w(k,n)/k_inv EXACTLY, and a raw
+   int8 dot with A bytes = x8(k) replicated x4 gives C = sum_k x8(k)*bs = w-dot + 510*sum_x8.
+   The SAME -510*sum_x8 must be folded in the epilogue affine ({A,B} = {KDQ*q, -510*KDQ*q*sx}).
+4. CPU quant semantics (moe_mul1.cpp): single-slot q = amax/127 (mirror exactly:
+   round-half-away, clamp +-127, splat x8*0x01010101); wide rows split v = 128*vh + vl
+   with q_wide = amax/(127*128), s_out per half, scales {q*128, q}.
+5. Final gemv-gu localization from the external trace (e1, always-wide variant, commit
+   c7267868): stage B quant bit-exact OK; C: got = 1.014*want - 475925, corr 0.9996,
+   max resid ~9k -> accumulator is near-right but has a column-independent offset and a
+   small scale distortion. That offset/scale pattern points at the bs/-510 bookkeeping
+   (byte-sum vs per-byte pairing of mul1 words), NOT at addressing. Re-verify first with
+   SIMPLE quant (127, no wide pairing) and lab_jm8-exact staging.
+6. fp32 path and int8 path share K1 prep + tin/tind layouts; do not touch tin layout.
+
+Re-port increments (each ends green under --i8trace before the next starts):
+  I1  QuantIn (plain 127-quant, splat32, one row per token, Affine {A,B}) + buffers.
+  I2  Gemv8 GU staging == lab_jm8 byte-for-byte, single fragment per load pair, real
+      window decode + prod words; trace stage C bit-exact (integers!).
+  I3  K34i8 act-fused + QuantIn down + Gemv8 down: stages E/F.
+  I4  K6i8 gather: stage G. Then quality (add wide-pair rows IF trace-clean), speed, ppl.

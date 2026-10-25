@@ -35,6 +35,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                      const std::vector<float>& out_host)
 {
     const int H = L.hidden, I = L.interm;
+    if (!layer.i8buf(0)) { printf("i8trace: int8 pipeline not present in this build (reset baseline)\n"); return; }
     const bool gated = L.gated;
     const int nm = gated ? 2 : 1;
     const int nc = (int)chunks.size();

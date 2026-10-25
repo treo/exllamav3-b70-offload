@@ -79,33 +79,21 @@ public:
 
     // profiling: keep an event per submitted kernel (memcpys stay chained but untracked)
     bool prof = false;
-    bool int8 = false;               // int8-accumulate GEMV (mirrors CPU VNNI/AVX2 tiers).
-                                     // OFF: pipeline is numerically wrong for real activations
-                                     // (see NOTES 'int8 status'); EXL3_MOE_B70_INT8=1 forces on
-                                     // for lab work, =0 forces off.
+    bool int8 = true;                // int8-accumulate GEMV (mirrors CPU VNNI/AVX2 tiers)
     const std::vector<sycl::event>& events() const { return pev; }
 
     // debug access to workspaces (device pointers)
     float* ws(int i) { return i == 0 ? w_tin : i == 1 ? w_tout : i == 2 ? w_h : i == 3 ? w_tind : w_toutd; }
 
-    // ---- external stage-trace support (bench --i8trace): read-only device->host copy,
-    // fully synchronized; touches nothing in the pipeline.
+    // ---- external stage-trace support (bench --i8trace). The int8 pipeline is being
+    // re-ported from scratch on top of this float baseline (see NOTES 'Reset baseline');
+    // getters stay null-safe so the harness compiles/runs at every step.
     void peek(void* host, const void* dev, size_t bytes)
     {
         Q->wait();
         Q->memcpy(host, dev, bytes).wait();
     }
-    void* i8buf(int i)   // 0 a8u, 1 a8d, 2 qsxu, 3 qsxd, 4 accgu, 5 accd
-    {
-        switch (i) {
-            case 0: return w_a8u;
-            case 1: return w_a8d;
-            case 2: return w_qsxu;
-            case 3: return w_qsxd;
-            case 4: return w_accgu;
-            default: return w_accd;
-        }
-    }
+    void* i8buf(int /*i*/) { return nullptr; }   // a8u a8d qsxu qsxd accgu accd (TODO as ported)
 
 private:
     sycl::queue* Q = nullptr;
@@ -129,14 +117,6 @@ private:
     float *w_h = nullptr;            // nc x 4 x I
     float *w_tind = nullptr;         // nc x 4 x I
     float *w_toutd = nullptr;        // nc x 4 x H
-    // int8 / XMX DPAS path (mirrors CPU VNNI tier): operand slabs + i32 accumulators
-    int32_t *w_a8u = nullptr;        // (nc*2) x (H/8) x 8 rows x 8 i32  (A rows = splat32)
-    int32_t *w_a8d = nullptr;        // nc x (I/8) x 8 x 8 i32
-    float *w_qsxu = nullptr;         // (nc*2) x 8 x 2 {q, sum_x8 as float}
-    float *w_qsxd = nullptr;         // nc x 8 x 2
-    int32_t *w_accgu = nullptr;      // (nc*2) x 8 x I   (nsl = 1: no slice buffers)
-    int32_t *w_accd = nullptr;       // nc x 8 x H
-    bool use8 = false;               // int8 pipeline active for this layer
     int *w_tokb = nullptr;           // rows+1
     int *w_toke = nullptr;           // rows * topk (cap by alloc size)
 
