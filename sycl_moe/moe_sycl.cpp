@@ -560,78 +560,93 @@ struct Gemv8
         mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc;
         mx8::joint_matrix_fill(sg, jc, 0);
 
-        // depth-2 word pipeline: tile tk+1's column words load while tk stages/barriers/
-        // mads. Ping-pong bands keep ONE barrier per tile (the WAR on a reused band is
-        // covered by the previous iteration's barrier). Depth-4 buffer rotation was tried
-        // and is WORSE (G2 105 -> 149us): the (tk&3)-indexed register state defeats the
-        // unroller. Two-tiles-per-iteration: no win either (t31 with both tiles actually
-        // processed; an earlier apparent win was an ablation artifact). Do not re-litigate.
-        uint32_t g[NW], gn[NW];
+        // FOUR NAMED word sets, one group of 4 tiles per refill: loads for tiles
+        // t..t+3 are all issued before tile t is consumed, the next group's loads go
+        // out right after the group stages. VTune (attached, sustained): G2 ran 1.9
+        // threads/XVE with 88% of active time in Send waits - per-thread MLP is the
+        // lever. A (tk&3)-INDEXED 4-buffer array was the real earlier disaster (spills,
+        // 149us); named sets + unrolled group cost ~nothing (lab t31 V22 vs V0: -2..6%
+        // at the gu shape, bit-exact). Depth-2 kept for reference below the loop.
+        const int cnt = tk_hi - tk_lo;
+        uint32_t gA[NW], gB[NW], gC[NW], gD[NW];
 #pragma unroll
-        for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
-        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step) {
-            if (tk + 1 < tk_hi) {
-                const uint32_t* wpn = wp + row_step;
+        for (int i = 0; i < NW; ++i) {
+            gA[i] = wp[widx[i]];
+            gB[i] = (cnt > 1) ? wp[row_step + widx[i]] : 0u;
+            gC[i] = (cnt > 2) ? wp[2 * row_step + widx[i]] : 0u;
+            gD[i] = (cnt > 3) ? wp[3 * row_step + widx[i]] : 0u;
+        }
+        for (int t = 0; t < cnt; t += 4) {
 #pragma unroll
-                for (int i = 0; i < NW; ++i) gn[i] = wpn[widx[i]];
-            }
-            uint32_t h[NW];
-            if (pre == 0) {
+            for (int q = 0; q < 4; ++q) {
+                if (t + q >= cnt) break;
+                const int tk = tk_lo + t + q;   // fragment index (pa0) only; band parity is q&1
+                const uint32_t* gsrc = (q == 0) ? gA : (q == 1) ? gB : (q == 2) ? gC : gD;
+                uint32_t h[NW];
+                if (pre == 0) {
 #pragma unroll
-                for (int i = 0; i < NW; ++i) h[i] = g[i];
-            } else {
+                    for (int i = 0; i < NW; ++i) h[i] = gsrc[i];
+                } else {
 #pragma unroll
-                for (int i = 0; i + 1 < NW; ++i)
-                    h[i] = (g[i] >> pre) | (g[i + 1] << (32 - pre));
-                h[NW - 1] = g[NW - 1] >> pre;
-            }
-            uint32_t* const band = sl32 + (tk & 1) * 256;
-            // Window extraction. For K2=4 the state windows PAIR: rows (rk, rk+2) for
-            // rk in {0,1,4,5,8,9,12,13} sit exactly 16 bits apart, so one 32-bit funnel
-            // per pair yields both states (hi16=row A, lo16=row B): ~4.5 ops/state vs ~7.
-            // t31 full-work A/B (V12 vs V0, both tiles processed): -19% tile-loop time.
-            // Other rates (K2=5 half-bit stagger, K2=8 32-bit steps) keep the generic
-            // extractor; a K2=8 variant was not tried (rel steps are multiples of 4).
-            if constexpr (K2V == 4) {
-                static constexpr int PKA[8] = {0, 1, 4, 5, 8, 9, 12, 13};
-#pragma unroll
-                for (int p = 0; p < 8; ++p) {
-                    const int rk = PKA[p], rkB = rk + 2;
-                    const int dA = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
-                    const int relA = AD27 - ((K2V * dA + KE) >> 1);
-                    const int relB = relA - 16;
-                    const int a = relB >> 5, s = relB & 31;
-                    const uint32_t w = s ? ((h[a] >> s) | (h[a + 1] << (32 - s))) : h[a];
-                    band[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = (w >> 16) * 0x83DCD12Du;
-                    band[(rkB >> 3) * 128 + (rkB & 7) * 16 + cin] = (w & 0xffffu) * 0x83DCD12Du;
+                    for (int i = 0; i + 1 < NW; ++i)
+                        h[i] = (gsrc[i] >> pre) | (gsrc[i + 1] << (32 - pre));
+                    h[NW - 1] = gsrc[NW - 1] >> pre;
                 }
-            } else {
+                uint32_t* const band = sl32 + (q & 1) * 256;
+                // Window extraction. For K2=4 the state windows PAIR: rows (rk, rk+2) for
+                // rk in {0,1,4,5,8,9,12,13} sit exactly 16 bits apart, so one 32-bit funnel
+                // per pair yields both states (hi16=row A, lo16=row B): ~4.5 ops/state vs ~7.
+                // t31 full-work A/B (V12 vs V0, both tiles processed): -19% tile-loop time.
+                // Other rates (K2=5 half-bit stagger, K2=8 32-bit steps) keep the generic
+                // extractor; a K2=8 variant was not tried (rel steps are multiples of 4).
+                if constexpr (K2V == 4) {
+                    static constexpr int PKA[8] = {0, 1, 4, 5, 8, 9, 12, 13};
 #pragma unroll
-                for (int rk = 0; rk < 16; ++rk) {
-                    const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
-                    const int rel = AD27 - ((K2V * d + KE) >> 1);
-                    const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
-                    const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
-                    // packed-VNNI dword store, lab_jm8 addressing: band (rk>>3), quad (rk&7), col cin
-                    band[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = st16 * 0x83DCD12Du;
+                    for (int p = 0; p < 8; ++p) {
+                        const int rk = PKA[p], rkB = rk + 2;
+                        const int dA = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                        const int relA = AD27 - ((K2V * dA + KE) >> 1);
+                        const int relB = relA - 16;
+                        const int a = relB >> 5, s = relB & 31;
+                        const uint32_t w = s ? ((h[a] >> s) | (h[a + 1] << (32 - s))) : h[a];
+                        band[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = (w >> 16) * 0x83DCD12Du;
+                        band[(rkB >> 3) * 128 + (rkB & 7) * 16 + cin] = (w & 0xffffu) * 0x83DCD12Du;
+                    }
+                } else {
+#pragma unroll
+                    for (int rk = 0; rk < 16; ++rk) {
+                        const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                        const int rel = AD27 - ((K2V * d + KE) >> 1);
+                        const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
+                        const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
+                        // packed-VNNI dword store, lab_jm8 addressing: band (rk>>3), quad (rk&7), col cin
+                        band[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = st16 * 0x83DCD12Du;
+                    }
+                }
+                sg.barrier();
+                unsigned char* const bnd = slb + (q & 1) * 1024;
+#pragma unroll
+                for (int fk = 0; fk < 2; ++fk) {
+                    auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                        sycl::access::decorated::yes>(
+                        (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 64));
+                    mx8::joint_matrix_load(sg, ja, pag, 32);
+                    mx8::joint_matrix_load(sg, jb,
+                        sycl::address_space_cast<sycl::access::address_space::local_space,
+                                                 sycl::access::decorated::yes>(bnd + fk * 512),
+                        16 * 4);   // packed stride = N * VNNI bytes
+                    mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
                 }
             }
-            sg.barrier();
-            unsigned char* const bnd = slb + (tk & 1) * 1024;
+            // issue the next group's 4xNW loads now (consumed only after this group's mads)
+            const uint32_t* p4 = wp + (size_t)(t + 4) * row_step;
 #pragma unroll
-            for (int fk = 0; fk < 2; ++fk) {
-                auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
-                                                    sycl::access::decorated::yes>(
-                    (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 64));
-                mx8::joint_matrix_load(sg, ja, pag, 32);
-                mx8::joint_matrix_load(sg, jb,
-                    sycl::address_space_cast<sycl::access::address_space::local_space,
-                                             sycl::access::decorated::yes>(bnd + fk * 512),
-                    16 * 4);   // packed stride = N * VNNI bytes
-                mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+            for (int i = 0; i < NW; ++i) {
+                gA[i] = (t + 4 < cnt) ? p4[widx[i]] : 0u;
+                gB[i] = (t + 5 < cnt) ? p4[row_step + widx[i]] : 0u;
+                gC[i] = (t + 6 < cnt) ? p4[2 * row_step + widx[i]] : 0u;
+                gD[i] = (t + 7 < cnt) ? p4[3 * row_step + widx[i]] : 0u;
             }
-#pragma unroll
-            for (int i = 0; i < NW; ++i) g[i] = gn[i];
         }
         auto pcg = sycl::address_space_cast<sycl::access::address_space::global_space,
                                             sycl::access::decorated::yes>(
@@ -647,12 +662,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 {
     const int H = P.hidden, I = P.interm;
     const int k2 = 2 * P.bits + P.hb;
-    // Tier policy. Measured on B70 (bench_layer, E12/topk10): rows=1 decode float 185us vs
-    // int8 239us (m8 fragments are 25% full, QuantIn+wide-pairs cost is not amortized);
-    // rows=4: 361 vs 253; rows=8: 1056 vs 404; rows=32: 2853 vs 1182. So AUTO = DPAS only
-    // when some chunk carries >= 2 token rows. EXL3_MOE_B70_INT8: =1 force int8 (lab),
-    // =0 force float; unset -> auto (respects member int8 = true). Only stream-layout
-    // rates can use the DPAS tier at all (int8_ok, from init()).
+    // Tier policy. Sustained-clock A/B (bench_layer, min-of-3 interleaved, iters 1200 —
+    // earlier short-run tables were cold-clock garbage and one had the tiers swapped by
+    // the auto rule itself, see NOTES): rows=1 float 179 vs int8 222 (float wins: m8
+    // fragments run 25% full and QuantIn/slice costs are not amortized); rows=2 262->224
+    // (x1.17); 3->x1.41; 4->x1.59; 8->x2.26; 32->x2.58; 64->x2.20. The predictor is TOTAL
+    // rows, not max chunk width: float pays per (chunk x row), DPAS pays per chunk with
+    // the m8 fragment free. So AUTO = DPAS iff rows >= 2. EXL3_MOE_B70_INT8: =1 force
+    // int8 (lab), =0 force float; unset -> auto (member int8 = true enables auto). Only
+    // stream-layout rates can use the DPAS tier at all (int8_ok, from init()).
     static const int g_int8_env = []{
         const char* e = std::getenv("EXL3_MOE_B70_INT8");
         return !e ? -1 : (e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1);
@@ -661,7 +679,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     for (int j = 0; j < num_chunks; ++j) maxm_scan = std::max(maxm_scan, (int)chunks_host[j].m);
     if (g_int8_env == 0)      use8_ = false;
     else if (g_int8_env == 1) use8_ = int8_ok;
-    else                      use8_ = int8_ok && int8 && (maxm_scan >= 2);
+    else                      use8_ = int8_ok && int8 && (rows >= 2);
     int8_active = use8_;
     const int E = P.num_experts;
     const int tile_u32 = 4 * k2;                    // u32 words per tile

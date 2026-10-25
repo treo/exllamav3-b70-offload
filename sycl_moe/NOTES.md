@@ -524,3 +524,45 @@ moe_sycl MAXM and every [.. MAXM ..] stride, GemvK/GemvFallback accumulator chai
 row loops, b70_warm geometry. Value: mcs256/384 prefill chunks average 2.5-3 tokens ->
 8-slot chunks ~halve weight passes in the traffic-bound gemvs (both tiers benefit, int8
 most). Decode (m=1) unaffected; do NOT bother before it shows in a profiled prefill trace.
+
+## SUSTAINED-CLOCK TIER A/B — the real numbers (and why every earlier table was wrong)
+
+VTune gpu-hotspots under a 30k-iteration sustained run (spawned, not attached; hot clocks):
+  int8 layer: G2 gemv8 = 48us, G5 = 30us, Spill = 0, XMX ~2-3% busy, XVE idle ~77%
+  float layer: GemvK gu = 52us, down = 29us.
+So at rows=1 both tiers cost the SAME in-kernel (weight-traffic bound, exactly as the
+roofline predicts) — the "int8 -20% decode" from short bench runs was mostly cold-clock
+inflation plus 3 extra launches in the sync-gap duty cycle. VTune attach (-target-pid)
+captures NO compute-task data for Intel GPU (must spawn); a background heater process
+starves the PMU (single client) — neither workaround works; just run >=1000 iterations
+inside the measured process and trust min-of-3 interleaved.
+
+Tier A/B, sustained, min-of-3 interleaved, iters=1200, EXL3_MOE_B70_INT8=0/1 (the ONLY
+honest table — note the auto rule itself corrupted earlier ones: with auto default ON,
+'control' runs at rows>=2 silently ran the int8 tier and showed ratio 1.000):
+  rows  float   int8   speedup
+  1     179.5   222.0   0.81   (float: m8 fragments 25% full + quant/slice overhead)
+  2     262.8   224.5   1.17
+  3     315.6   223.5   1.41
+  4     354.6   223.1   1.59
+  5     558.0   272.6   2.05
+  8     777.5   344.0   2.26
+  32    2233.5  865.2   2.58
+  64    4278.1  1941.8  2.20
+AUTO RULE CHANGED accordingly: int8 iff rows >= 2 (TOTAL rows), not 'some chunk m>=2':
+float pays per (chunk x row) while DPAS pays per chunk with the 8 fragment rows free, so
+even 2 tokens spread over single-row chunks already favors int8 (x1.17).
+
+Depth-4 prefetch, done RIGHT (four NAMED word sets + 4x-unrolled group loop, t31 P22/V22,
+bit-exact vs ring-normalized checker): G2 lab 55-62 -> 54-56 (nsl2 -7%), shipped in
+Gemv8 for all K2. The earlier depth-4 DISASTER (149us) was the (tk&3)-indexed array
+spilling, not the idea. The '4 outstanding load sets' theory explains the Send-wait
+dominance from the cold run; the sustained profile then showed both tiers traffic-bound
+at rows=1 — MLP mainly bought multi-row stability.
+
+Model-level end state (final plugin, spaced runs, 30s+ gaps to dodge the reclaim trap):
+  2.05 -mcs256: prefill2048 1852, dec 70.7-71.1 (CPU 1456/67.9; B70-float 1711/72.2)
+  4.05 -mcs448: dec 50.0/47.7 ctx0/768, 20-21 layers resident at budget 0.70 (23.1GB)
+  The 39.7-decode 4.05 run was UNDER-REGISTRATION (20 registered/28 fallback after only
+  ~90s... no: that run got 20 registered and 50.0; the bad run followed a 16GB job with
+  30s gap and got fewer). 90s+ spacing or discard-first is now the standing recipe.
