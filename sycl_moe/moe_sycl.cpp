@@ -33,6 +33,7 @@ constexpr float KDQ = 0.00676727294921875f;   // k_inv = fp16(0x1eee)
 constexpr float HAD_SCALE = 0.088388347648f;  // 1/sqrt(128)
 constexpr int MAXM = 8;    // chunk width cap for the int8 tier; fp32 tier caps host-side at 4
 constexpr int I8R  = 16;   // int8 gemv-slot rows = 2 m8 fragments = up to 8 tokens x (vh,vl)
+constexpr int I8H  = 8;    // fused-quant WGs per slot: one row-pair WG serves vh+vl
 
 // pointer table categories (d_tab): layout [field][cat][expert]
 enum { CAT_GATE = 0, CAT_UP = 1, CAT_DOWN = 2 };
@@ -491,6 +492,127 @@ struct QuantIn
     }
 };
 
+// Fused K1+Q1 for the int8 tier (one queue command less; at rows=1 the pipeline is
+// command-latency bound, so this is worth ~10us of the ~200us decode floor, and it
+// removes the tin round-trip entirely). One WG of 256 threads per (slot, DPAS row):
+// two 128-thread teams each run 10 of the 20 Hadamard blocks of the row, holding the
+// transformed values in registers (10 per thread) through the amax reduction and the
+// x8 quantization - the position of every value is fixed by (block, lane).
+// Bit-identical to K1-then-Q1: same f32 spellings (x*suh -> hadamard -> *HAD_SCALE),
+// same quantization math, row order irrelevant to a max/sum reduction.
+template <int = 0>
+struct PrepQuantI8
+{
+    const uint16_t* __restrict__ x;    // fp16 activations [token][H]
+    const uintptr_t* tab;
+    const ChunkDev* chunks;
+    int32_t* __restrict__ a8;
+    Affine* __restrict__ qsb;
+    int k, nm, E, gated, f1;
+    sycl::local_accessor<float, 1> red;
+    sycl::local_accessor<float, 1> sh;
+
+    void operator()(sycl::nd_item<2> it) const
+    {
+        // One WG of 256 per (slot, token-pair-row rp): rp = r>>1, so BOTH the vh (2rp)
+        // and vl (2rp+1) DPAS rows are produced from ONE rotated+Hadamarded row - the
+        // exact work K1 used to do once per (slot, token), now shared by both parts.
+        const int g1 = (int)it.get_group(1);
+        const int slot = g1 >> 3, rp = g1 & 7;
+        const int tid = (int)it.get_local_id(0);          // 256
+        const int j = slot / nm, lmu = slot % nm;
+        const int m = chunks[j].m;
+        const int frag = rp >> 2;
+        const int tok = frag * 4 + (rp & 3);   // r=2rp: (r>>1)&3 == rp&3
+        const int kf = k / 8;
+        int32_t* aout = a8 + (size_t)slot * kf * 128 + (rp * 2) * 8;   // rows 2rp, 2rp+1
+        if (tok >= m) {
+            if (!f1 && frag) return;                       // slim pass (see QuantIn)
+            for (int i = tid; i < kf * 8; i += 256) {
+                const size_t w = (size_t)(i >> 3) * 128 + (i & 7);
+                aout[w] = 0; aout[w + 8] = 0;
+            }
+            if (tid == 0) {
+                qsb[slot * 16 + rp * 2] = Affine{ 0.f, 0.f };
+                qsb[slot * 16 + rp * 2 + 1] = Affine{ 0.f, 0.f };
+            }
+            return;
+        }
+        const int team = tid >> 7, sub = tid & 127;
+        const int e = chunks[j].expert;
+        const int cat = gated ? lmu : CAT_UP;
+        const uint16_t* suh = (const uint16_t*)tab[(F_SUH * 3 + cat) * E + e];
+        const int gtok = chunks[j].token[tok];             // DPAS row pair -> token tok
+        const uint16_t* xr = x + (size_t)gtok * k;
+        float* mine = sh.get_pointer().get() + team * 128;
+        float vals[10];
+#pragma unroll
+        for (int kk = 0; kk < 10; ++kk) {
+            const int blk = kk * 2 + team;
+            mine[sub] = f16(xr[blk * 128 + sub]) * f16(suh[blk * 128 + sub]);
+#pragma unroll
+            for (int width = 1; width < 128; width *= 2) {
+                sycl::group_barrier(it.get_group());
+                if (sub < 64) {
+                    const int base = (sub / width) * 2 * width + (sub % width);
+                    const float a = mine[base], b2 = mine[base + width];
+                    mine[base] = a + b2;
+                    mine[base + width] = a - b2;
+                }
+            }
+            sycl::group_barrier(it.get_group());
+            vals[kk] = mine[sub] * HAD_SCALE;
+        }
+        float am = 0.f;
+#pragma unroll
+        for (int kk = 0; kk < 10; ++kk) am = sycl::max(am, sycl::fabs(vals[kk]));
+        red[tid] = am;
+        sycl::group_barrier(it.get_group());
+        for (int s = 128; s; s >>= 1) {
+            if (tid < s) red[tid] = sycl::max(red[tid], red[tid + s]);
+            sycl::group_barrier(it.get_group());
+        }
+        const float am0 = red[0];
+        sycl::group_barrier(it.get_group());               // before reusing red[] for sums
+        const float qw = am0 > 0.f ? am0 * (1.0f / 8192.0f) : 1.0f;
+        const float rq = am0 > 0.f ? 8192.0f / am0 : 1.0f;
+        float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+        for (int kk = 0; kk < 10; ++kk) {
+            const float vf = vals[kk] * rq;
+            int v = (int)(vf >= 0.f ? sycl::floor(vf + 0.5f) : sycl::ceil(vf - 0.5f));
+            v = sycl::clamp(v, -8128, 8128);
+            const int vh = (v + 64) >> 7;
+            const int vl = v - (vh << 7);
+            s0 += (float)vh; s1 += (float)vl;
+            const size_t w = (size_t)((((kk * 2 + team) * 128 + sub) >> 3) * 128)
+                             + (((kk * 2 + team) * 128 + sub) & 7);
+            aout[w] = (int32_t)((vh & 0xff) * 0x01010101);
+            aout[w + 8] = (int32_t)((vl & 0xff) * 0x01010101);
+        }
+        // x8 row sums (the -510 offset fold), one reduction per part
+        red[tid] = s0;
+        sycl::group_barrier(it.get_group());
+        for (int s = 128; s; s >>= 1) {
+            if (tid < s) red[tid] += red[tid + s];
+            sycl::group_barrier(it.get_group());
+        }
+        const float sum0 = red[0];
+        sycl::group_barrier(it.get_group());
+        red[tid] = s1;
+        sycl::group_barrier(it.get_group());
+        for (int s = 128; s; s >>= 1) {
+            if (tid < s) red[tid] += red[tid + s];
+            sycl::group_barrier(it.get_group());
+        }
+        if (tid == 0) {
+            const float A0 = KDQ * (qw * 128.0f), A1 = KDQ * qw;
+            qsb[slot * 16 + rp * 2] = Affine{ A0, -510.0f * A0 * sum0 };
+            qsb[slot * 16 + rp * 2 + 1] = Affine{ A1, -510.0f * A1 * red[0] };
+        }
+    }
+};
+
 // DPAS GEMV over the stream-repacked mul1 tiles. One sub-group per (16-column fragment,
 // gemv slot): 16 lanes = the 16 columns of one trellis tile column, each keeping its own
 // compile-time window exactly like GemvK. Per k-tile a lane decodes its 16 states, forms
@@ -857,8 +979,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     float* tind = w_tind;
     float* toutd = w_toutd;
 
-    // ---- K1: prep gate/up inputs (suh scale + 128-block hadamard), from fp16 x
-    {
+    // ---- K1: prep gate/up inputs (suh scale + 128-block hadamard), from fp16 x.
+    // The int8 tier normally skips this: PrepQuantI8 (below) folds it into Q1.
+    static const int nofuse_env = []{
+        const char* e = std::getenv("EXL3_MOE_I8FUSE");
+        return e && e[0] == '0';
+    }();
+    const bool fuse_k1 = use8_ && !nofuse_env;
+    i8_fuse_ = fuse_k1 ? 1 : 0;
+    if (!fuse_k1) {
         const int nbk = H / 128;
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({128}, cgh);
@@ -905,9 +1034,16 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const bool slim = (maxm_rows <= 4) && !noslim_env;
         i8_slim_ = slim ? 1 : 0;
 
-        // Q1: quantize the rotated gu inputs (one WG of 256 per (slot, DPAS row))
+        // Q1 (+K1 fused): rotate, Hadamard, amax-quantize straight from x into the A slab
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
+            if (fuse_k1) {
+                sycl::local_accessor<float, 1> sh({256}, cgh);
+                cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8H * slots}, {256, 1}),
+                    PrepQuantI8<> { x, tab, chunks, w_a8u, qsxu, H, nm, E, gated ? 1 : 0,
+                                 slim ? 0 : 1, red, sh });
+                return;
+            }
             cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8R * slots}, {256, 1}),
                 QuantIn{ tin, w_a8u, qsxu, chunks, H, nm, gated ? 1 : 2, slim ? 0 : 1, red });
         });

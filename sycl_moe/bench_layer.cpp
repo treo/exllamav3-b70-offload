@@ -32,7 +32,8 @@ struct Args
 // Uses only public peek()/i8buf()/ws(); touches no kernel state.
 static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                      const std::vector<ChunkDev>& chunks, const TokenMap& tmap,
-                     const std::vector<float>& out_host)
+                     const std::vector<float>& out_host,
+                     const std::vector<uint16_t>& hx)
 {
     const int H = L.hidden, I = L.interm;
     if (!layer.i8buf(0)) { printf("i8trace: int8 pipeline not present in this build (reset baseline)\n"); return; }
@@ -92,13 +93,26 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
             a8[((size_t)slot * kf + (k >> 3)) * 128 + r * 8 + (k & 7)] & 0xffu);
     };
 
-    // ---- stage B: quantization gu (input = tin readback; output = a8u/qsxu)
+    // ---- stage B: quantization gu (input = tin readback, or host-prepped from x when
+    // the fused K1+Q1 kernel ran and tin was never written; output = a8u/qsxu)
+    std::vector<float> tin_f((size_t)H), xf((size_t)H);
     for (int slot = 0; slot < slots && !fails; ++slot) {
         const int j = gated ? slot / 2 : slot;
         const int m = chunks[j].m;
         const int ts = gated ? slot : slot * 2;             // tin slot written by K1
+        const int e = chunks[j].expert;
         for (int t = 0; t < m && !fails; ++t) {
-            const float* xr = &tin[((size_t)ts * 8 + t) * H];
+            const float* xr;
+            if (layer.i8fuse()) {
+                const int mu = gated ? slot % 2 : 0;
+                const moe_ref::Matrix& Mx = gated ? (mu ? L.ups[e] : L.gates[e]) : L.ups[e];
+                const int tok = chunks[j].token[t];
+                for (int k = 0; k < H; ++k) xf[k] = exl3ref::f16_to_f32(hx[(size_t)tok * H + k]);
+                moe_ref::prep_row(xf.data(), Mx.suh.data(), H, tin_f.data());
+                xr = tin_f.data();
+            } else {
+                xr = &tin[((size_t)ts * 8 + t) * H];
+            }
             float am = 0.f;
             for (int k = 0; k < H; ++k) am = std::max(am, std::fabs(xr[k]));
             const float qw = am > 0.f ? am * (1.0f / 8192.0f) : 1.0f;
@@ -770,7 +784,7 @@ int main(int argc, char** argv)
     sycl::event e_fw = layer.forward(chunks.data(), (int)chunks.size(), tmap, dx, dout, rows);
     std::vector<float> got((size_t)rows * H);
     q.memcpy(got.data(), dout, got.size() * 4, {e_fw}).wait();
-    if (a.i8trace) i8_trace(layer, L, chunks, tmap, got);
+    if (a.i8trace) i8_trace(layer, L, chunks, tmap, got, hx);
 
     if (a.verbose) {
         for (int wsb = 0; wsb < 5; ++wsb) {
@@ -980,16 +994,19 @@ int main(int argc, char** argv)
     }
     if (a.verbose) {
         const char* names[6] = {"K1 prep_gu", "K2 gemv_gu", "K34 act+prep_d", "K5 gemv_d", "K6 gather", "-"};
-        const char* n8[8] = {"K1 prep_gu", "Q1 quant_u", "G2 gemv8_gu", "K34i8 act", "Q2 quant_d",
-                             "G5 gemv8_d", "memset out", "K6i8 gather"};
+        const char* n8u[8] = {"K1 prep_gu", "Q1 quant_u", "G2 gemv8_gu", "K34i8 act", "Q2 quant_d",
+                              "G5 gemv8_d", "memset out", "K6i8 gather"};
+        const char* n8f[7] = {"Q1f p+quant", "G2 gemv8_gu", "K34i8 act", "Q2 quant_d",
+                              "G5 gemv8_d", "K6i8 gather", "-"};   // K1 fused into Q1
         printf("per-kernel us (last iter; span = kernel start->end, gap = prev end->start):\n");
         auto& evs = layer.events();
         uint64_t prev_end = 0;
-        const size_t kev = layer.int8_active ? 8 : 6;
+        const bool f8 = layer.int8_active, fused = layer.i8fuse() != 0;
+        const size_t kev = f8 ? (fused ? 7u : 8u) : 6u;
         for (size_t kk = 1; kk < evs.size() && kk <= kev; ++kk) {
             uint64_t st = evs[kk].get_profiling_info<sycl::info::event_profiling::command_start>();
             uint64_t en = evs[kk].get_profiling_info<sycl::info::event_profiling::command_end>();
-            printf("  %-12s span %8.1f  gap %8.1f\n", layer.int8_active ? n8[kk - 1] : names[kk - 1],
+            printf("  %-12s span %8.1f  gap %8.1f\n", f8 ? (fused ? n8f[kk - 1] : n8u[kk - 1]) : names[kk - 1],
                 (double)(en - st) * 1e-3, prev_end ? (double)(st - prev_end) * 1e-3 : 0.0);
             prev_end = en;
         }
