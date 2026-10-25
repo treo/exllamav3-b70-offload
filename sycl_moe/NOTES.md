@@ -163,3 +163,10 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 - GOTCHA: python .replace() patch scripts silently no-op when the anchor text is hallucinated.
   Always assert anchor presence (this burned a whole debugging cycle: "the guard exists but
   didn't fire" - it never got inserted).
+
+## Performance: Qwen3.8-Flash-Next-4.05bpw -mcs 448 (heavy offload, decode CPU-bound)
+  decode  S=0-768: CPU 24.9-25.7  ->  B70 44.7-48.7 tok/s   (+89%)
+  (17 of 48 layers weight-resident on B70 at 0.60 x VRAM budget; rest CPU fallback)
+  2.05bpw -mcs 256 remains roughly at parity-to-+3% decode, +25% prefill: that config is
+  NOT MoE-CPU-bound at decode, so the ceiling there is small. The bigger the CPU-offload
+  share, the bigger the B70 win.
