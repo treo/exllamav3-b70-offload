@@ -170,3 +170,9 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
   2.05bpw -mcs 256 remains roughly at parity-to-+3% decode, +25% prefill: that config is
   NOT MoE-CPU-bound at decode, so the ceiling there is small. The bigger the CPU-offload
   share, the bigger the B70 win.
+
+## More perf (decode, -max_length 1024 -cs 8192 -dr 2)
+- 2.68bpw -mcs 448: CPU 40.2 -> B70 54.1 tok/s (+35%)
+- 4.05bpw -mcs 448 budget sweep (EXL3_MOE_B70_BUDGET fraction of VRAM resident):
+  0.60 (17 layers) 46.9 tps | 0.75 (21-22 layers) 50.4 tps. Stable at 0.75; default set 0.70.
+- Combined: offload-share-driven win; budget knob trades B70 VRAM for decode speed.

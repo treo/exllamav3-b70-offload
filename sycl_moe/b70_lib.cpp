@@ -54,7 +54,9 @@ bool ensure_ctx()
         // Leave a fat margin for scratch pools, queue/page-table allocations and driver
         // bookkeeping; running right up to physical VRAM makes LAUNCHES fault asynchronously
         // with UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY instead of failing an allocation cleanly.
-        g.budget = (size_t)(g.q->get_device().get_info<sycl::info::device::global_mem_size>() * 0.60);
+        double frac = 0.70;
+        if (const char* fb = getenv("EXL3_MOE_B70_BUDGET")) { double v = atof(fb); if (v > 0.05 && v < 0.98) frac = v; }
+        g.budget = (size_t)(g.q->get_device().get_info<sycl::info::device::global_mem_size>() * frac);
         g.ok = true;
     } catch (const std::exception& e) {
         fprintf(stderr, "[b70moe] no SYCL GPU: %s\n", e.what());
