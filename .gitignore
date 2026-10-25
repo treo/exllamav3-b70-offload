@@ -18,3 +18,16 @@ exllamav3/exllamav3_ext/**/hip_*
 
 # per-machine test model registry overrides (tests/testlib/models.py)
 tests/models.local.yaml
+
+# sycl_moe build artifacts and experiment binaries (sources + README/NOTES/env.sh are tracked;
+# rebuild per README)
+sycl_moe/*
+!sycl_moe/*.cpp
+!sycl_moe/*.hpp
+!sycl_moe/*.h
+!sycl_moe/*.py
+!sycl_moe/*.md
+!sycl_moe/*.sh
+!sycl_moe/.gitignore
+sycl_moe/*.bak*
+sycl_moe/bundle.bin
