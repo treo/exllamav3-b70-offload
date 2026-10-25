@@ -15,8 +15,10 @@ the fp32 reference than that tier.
 ## Requirements
 
 - Intel Arc Pro B70 (or Xe2) GPU, `xe` kernel driver, compute-runtime ≥ 26.x
-- oneAPI Base Toolkit with `icpx` (developed on 2026.2). Note: use `-O2`; `-O3`
-  crashes `icpx` on this TU.
+- oneAPI Base Toolkit with `icpx` (developed on 2026.2). Builds use `-O3` (verified:
+  bit-identical results, ~2.6% faster synthetic decode; an earlier '-O3 crashes icpx'
+  note turned out unreproducible — see NOTES if the compiler ever dies on these TUs,
+  fall back to `-O2` and re-file).
 - Linux (the plugin hooks are `__linux__`-only; nothing changes on other platforms)
 
 ## Build
