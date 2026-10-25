@@ -393,11 +393,14 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         if (prof) pev.push_back(dep);
     };
 
+    int maxm_rows = 1;
+    for (int j = 0; j < nc; ++j) maxm_rows = std::max(maxm_rows, (int)chunks_host[j].m);
     const int NSL_GU = [&]{
         int base = nc * nm * (I / 128), w = nsl;
-        // cap 4: beyond that the extra partial-reduction traffic outweighs the latency win
-        // (measured on B70, decode shapes; 2026-10 A/B)
-        if (w == 0) { w = 1; while (w < 4 && base * w * 128 < 80000) ++w; }
+        // auto up to 8: real-model decode (few rows, latency-bound) wants the extra
+        // parallelism; synthetic E=12 benches disagreed, the model won the argument.
+        if (w == 0) { w = 1; while (w < 8 && base * w * 128 < 80000) ++w;
+                      if (maxm_rows > 1 && w > 4) w = 4; }   // multi-row: slice-sum traffic dominates
         return w;
     }();
     const int NSL_D = [&]{
