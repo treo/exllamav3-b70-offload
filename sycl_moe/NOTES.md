@@ -248,7 +248,55 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
   We are at the instruction-issue floor for the FLOAT-tier formulation; only an int8/DPAS
   tier redesign moves it further.
 
+## int8 / XMX DPAS quest (multi-session arc) - SOLVED via joint_matrix packed layout
+Timeline of what didn't work (each a real trap, keep this as reference):
+1. esimd dp4a<...> in generic kernels: scalar simd<,1> ops cost ~2.5x the mask chain AND
+   dp4a<i32> on (u32,u32) silently lowers to SIGNED-src sudp4a -> wrong bytesums. Dead end.
+2. xmx::dpas<C,B,A> in generic parallel_for kernels: operand simds must be FULL-matrix
+   sized (static_asserts); uniform fills materialize 512B/lane (lab3: 770 scalar loads);
+   slice-writes `b[lane*32+i]=..` are undefined-ish (partial zeros, DCE, wrong slots).
+   Also q.copy(host.data(), dev_ptr, n) COPIES HOST->DEVICE (arg order Source,Dest) -
+   burned an hour chasing "GPU faults" that were my own result-clobbering readbacks.
+3. single_task launch made generic-kernel dpas numerically correct (VC replicated model)
+   but operand refills per step stayed expensive.
+4. joint_matrix (ext::oneapi::experimental::matrix) with row/col-major B from SLM: PASS
+   but ~150 mov/join fixup ops per fragment - the layout transform eats XMX's whole budget.
+   bench.cpp reaches 367 TOPS only because it reuses fragments over 8192 mads; we regen B
+   every step, so the fixup is per-mad. col-major == VC ordinal order (that's why it was
+   numerically right) but STILL slow.
+THE KEY (from vendor/llvm/sycl/doc + test-e2e/Matrix/joint_matrix_su_int8.cpp):
+  B operand declared `layout::ext_intel_packed` = VNNI 4-row-block packing:
+    addr(k,c) = (k>>2)*(N*4) + c*4 + (k&3) bytes; stride arg = N*4 (u8).
+  In u32 units it's `sl32[(k>>2)*N + c] = product_word` - EXACTLY our per-(wq,col) dword
+  stores, one per product, zero scatter. mul1's product word IS a VNNI quad: 4 bytes of
+  state*M = 4 hw-k slots; A side = x8 activation replicated x4 per real k (row-major,
+  stride K=32, loads lower to a single `load_block2d.ugm.d16`!).
+  BMG-G31 supports s8xu8->i32 M<=8 N16 K32 (spec table). Stride*sizeof(T) %8 == 0 required.
+  joint_matrix collectives need CONVERGENT control flow (no divergent barriers!).
+lab_jm7 = production-shaped probe: NJ x KS fragments, per SG: unpack 2 u32 word-pairs ->
+  8 muls -> 2 vector dword STS -> barrier -> jm_load a(global block2d)+b(SLM packed) ->
+  dpas -> barrier. RESULTS: PASS exact vs scalar model; 1.4 ns/fragment(128 wt) while the
+  lab hammers DRAM with non-reused A bytes; ISA per fragment: 8 LDG + 8 mul + 8 shr +
+  2 vec-STL + 1 block2d + 1 dpas.8x8 + syncs ~= 0.27 lane-instructions/weight vs float
+  tier ~0.6-1.0 -> predicted K2/K5 ~2x faster on real shapes once A staging reuses L2/SLM.
+Production design (in progress):
+  pipeline becomes K1 rot -> K1q quantize (amax per row -> x8, q, sum_x8; replicate x4;
+  rows 4..7 zero) -> K2p GU int8 gemm (same stream windows as GemvK, lane owns 8 cols x
+  2 wq per tile row -> 16 products = 2 frags) -> i32 accs -> K3 act (apply kinv*q, -510sx)
+  -> K4q quantize down input -> K5p DOWN int8 gemm -> K6 gather (apply q2/sx2 scalars).
+  Tier becomes CPU-VNNI-equivalent int8 (documented ~0.9% rms) -> gate: rms<=3% vs float
+  ref in bench, then ppl on all three models, EXL3_MOE_B70_INT8 env (default ON after).
+  New pooled ws: a8u/a8d operand slabs + i32 acc buffers; no weight expansion, weights
+  stay the packed native stream (0.5 B/weight).
+Trap reminders learned this session:
+  - Xe2 clock ramp INVERTS microbench rankings: 1.5s burn-in before timing, always.
+  - local_accessor is per-work-group: fine for the 512B slab, but barriers = sync.nop x3-4
+    per frag; ping-pong two slabs later to halve barrier count.
+  - IGC_JointMatrixLoadStoreOpt=1 env EXISTS (docs): forces the SLOWER path; do not set.
+  - e2e tests live at vendor/llvm/sycl/test-e2e/Matrix - goldmine for exact API usage.
+
 ## Benchmarking gotcha: first run after a heavy GPU job under-registers B70 layers
+
 Observed 4.05bpw mcs448: run immediately after a finished 2.05 run OOM'd the plugin at
 9.5GB (27 layers -> CPU, 36 t/s); identical rerun minutes later hit the normal 23.91GB
 residency (54 fallback lines, 49-51 t/s). Driver/page-reclaim lag steals apparent VRAM.
