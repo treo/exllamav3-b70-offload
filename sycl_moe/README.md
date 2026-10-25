@@ -123,6 +123,12 @@ cd sycl_moe
 .venv/bin/python bench_b70_py.py xval_s   # times the plugin C ABI on the saved layer
 ```
 
+Notes:
+- Run-to-run bitwise determinism does NOT hold on the GPU path: the expert combine in K6
+  uses relaxed fp32 atomics, so summation order varies per launch. Effect measured over
+  repeated 25-row wikitext passes: ppl spread < 1e-4 relative. Sampling-level comparisons
+  (logit argmax drift) can occasionally flip a token, like any CUDA LLM backend.
+
 ## Design map (for hacking on it)
 
 - `moe_sycl.{hpp,cpp}` — the six kernels (prep_gu, gemv_gu, act+prep_d fused, gemv_d,

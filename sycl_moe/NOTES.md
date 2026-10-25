@@ -212,3 +212,12 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 - Windows safety of the hooks reviewed: dlfcn/dlopen and all plugin calls sit under
   __linux__; struct decls use portable types only.
 - Final quality: qbench-trace ppl 1.479306 (CPU) vs 1.479269 (B70) on the 2.05 model.
+
+## Robustness audit (session end)
+- Invalid ONEAPI_DEVICE_SELECTOR values (e.g. `opencl:none`) abort (terminate) inside the
+  oneAPI adapter's dlopen-time static init - uncatchable from a plugin. Valid no-GPU
+  selectors (level_zero:cpu / opencl:cpu / host:0) fall back cleanly ('no SYCL GPU', rc=1).
+- Queue must be built with an explicit async_handler (default = std::terminate).
+- Soak: 2x heavy ppl passes on 4.05bpw @mcs448 (partially resident B70): rc=0, no
+  registration/forward failures, ppl spread 3.39274/3.39073 = 6e-4 rel from K6 relaxed
+  fp32 atomics (nondeterministic order - acceptable, matches CUDA-backend norms).
