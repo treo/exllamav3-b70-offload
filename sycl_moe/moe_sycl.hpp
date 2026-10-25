@@ -79,26 +79,40 @@ public:
 
     // profiling: keep an event per submitted kernel (memcpys stay chained but untracked)
     bool prof = false;
-    bool int8 = true;                // int8-accumulate GEMV (mirrors CPU VNNI/AVX2 tiers)
+    bool int8 = false;               // int8/XMX DPAS tier (mirrors CPU VNNI semantics); runtime
+                                     // override: EXL3_MOE_B70_INT8=1/0 (tri-state, see .cpp).
+                                     // Active only for the stream-layout rates K2 in {4,5,8}.
+    bool int8_active = false;        // set by forward(): the tier actually used for the last call
     const std::vector<sycl::event>& events() const { return pev; }
 
     // debug access to workspaces (device pointers)
     float* ws(int i) { return i == 0 ? w_tin : i == 1 ? w_tout : i == 2 ? w_h : i == 3 ? w_tind : w_toutd; }
 
-    // ---- external stage-trace support (bench --i8trace). The int8 pipeline is being
-    // re-ported from scratch on top of this float baseline (see NOTES 'Reset baseline');
-    // getters stay null-safe so the harness compiles/runs at every step.
+    // ---- external stage-trace support (bench --i8trace): read-only device->host copy,
+    // fully synchronized; touches nothing in the pipeline. i8buf() stays null-safe so the
+    // harness compiles/runs even when the int8 buffers were never allocated.
     void peek(void* host, const void* dev, size_t bytes)
     {
         Q->wait();
         Q->memcpy(host, dev, bytes).wait();
     }
-    void* i8buf(int /*i*/) { return nullptr; }   // a8u a8d qsxu qsxd accgu accd (TODO as ported)
+    void* i8buf(int i)   // 0 a8u, 1 a8d, 2 qsxu, 3 qsxd, 4 accgu, 5 accd
+    {
+        switch (i) {
+            case 0: return w_a8u;
+            case 1: return w_a8d;
+            case 2: return w_qsxu;
+            case 3: return w_qsxd;
+            case 4: return w_accgu;
+            default: return w_accd;
+        }
+    }
 
 private:
     sycl::queue* Q = nullptr;
     LayerParams P;
     int cap_nc = 0, cap_rows = 0;
+    int cap_nc8 = 0;             // separate growth mark for the int8 slabs
     int nsl = 4;               // split-K slices in the GEMV kernels
     std::vector<sycl::event> pev;
 
@@ -109,14 +123,22 @@ private:
     char* h_blob2 = nullptr;
     bool h_flip = false;
     float *w_tin = nullptr;          // nc x 2 x 4 x H
-    int32_t* w_tinq = nullptr;       // nc x 2 x 4 x H, int8 in low byte of each i32
-    int32_t* w_rowc = nullptr;       // nc x 2 x 4 x 2: {q, sum_x8} per gemv row
-    int32_t* w_tindq = nullptr;      // nc x 4 x I quantized
-    int32_t* w_rowcd = nullptr;      // nc x 4 x 2
-    float *w_tout = nullptr;         // nc x 2 x 4 x I
+    float *w_tout = nullptr;         // nc x 2 x 8(nsl) x 4 x I
     float *w_h = nullptr;            // nc x 4 x I
     float *w_tind = nullptr;         // nc x 4 x I
-    float *w_toutd = nullptr;        // nc x 4 x H
+    float *w_toutd = nullptr;        // nc x 8(nsl) x 4 x H
+    // int8 / XMX DPAS tier (mirrors CPU VNNI semantics): operand slabs + i32 accumulators.
+    // a8 layout [slot][k/8][8 rows][8 i32]; row r = 2*token + part (always-wide vh/vl pair),
+    // word = x8 * 0x01010101 (one DPAS A fragment = 8 rows x 8 splat dwords, row stride 32B).
+    int32_t *w_a8u = nullptr;        // (nc*nm) x (H/8) x 64
+    int32_t *w_a8d = nullptr;        // nc x (I/8) x 64
+    float *w_qsxu = nullptr;         // (nc*nm) x 8 x {A,B} epilogue affine
+    float *w_qsxd = nullptr;         // nc x 8 x {A,B}
+    int32_t *w_accgu = nullptr;      // (nc*nm) x 8 x I   raw i32 (nsl = 1)
+    int32_t *w_accd = nullptr;       // nc x 8 x H
+    bool int8_ok = false;            // rate/geometry supports the DPAS tier
+    bool use8_ = false;              // tier resolved for the last forward (read by ensure_ws)
+    int nm_ws_ = 1;                  // gated ? 2 : 1, cached for ensure_ws sizing
     int *w_tokb = nullptr;           // rows+1
     int *w_toke = nullptr;           // rows * topk (cap by alloc size)
 

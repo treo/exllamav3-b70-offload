@@ -83,6 +83,12 @@ void MoeSyclLayer::init(sycl::queue* q, const LayerParams& p,
             tab[((F_BIAS * 3 + c) * E) + e] = (uintptr_t)m.bias;
         }
     nsl = getenv("MOE_NSL") ? atoi(getenv("MOE_NSL")) : 0;  // 0 = auto per matrix class
+    const int k2 = 2 * p.bits + p.hb;
+    // DPAS tier: stream-layout window decode is instantiated for these rates; N/K divisibility
+    // (tiles of 16, k-frags of 8) holds for the Qwen3.8-Flash-Next shapes (H 2560, I 640).
+    int8_ok = (k2 == 4 || k2 == 5 || k2 == 8) && (p.hidden % 16 == 0) && (p.interm % 16 == 0)
+              && (p.hidden % 8 == 0) && (p.interm % 8 == 0);
+    nm_ws_ = p.gated ? 2 : 1;
     d_tab = sycl::malloc_device<uintptr_t>(tab.size(), *q);
     q->memcpy(d_tab, tab.data(), tab.size() * sizeof(uintptr_t)).wait();
 }
@@ -96,8 +102,9 @@ MoeSyclLayer::~MoeSyclLayer()
 
 // Process-wide workspace pool: the worker forwards one layer at a time, so all layers share
 // one set of scratch buffers (per-layer ws blew the B70 budget: 31 layers x ~600 MB).
+// Slots 0..4 float tier, 5..10 int8 tier (a8u a8d qsxu qsxd accgu accd).
 namespace {
-struct WsPool { void* buf[5] = {}; size_t cap[5] = {}; };
+struct WsPool { void* buf[11] = {}; size_t cap[11] = {}; };
 WsPool g_ws;
 }
 
@@ -125,6 +132,16 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
         grow_p(3, w_tind,  (size_t)nc * MAXM * P.interm);
         grow_p(4, w_toutd, (size_t)nc * 8 * MAXM * P.hidden);
         cap_nc = nc;
+    }
+    // int8 slabs grow on their own schedule: a float layer may have preset cap_nc larger
+    if (use8_ && nc > cap_nc8) {
+        grow_p(5, w_a8u,   (size_t)nc * nm_ws_ * (P.hidden / 8) * 64);
+        grow_p(6, w_a8d,   (size_t)nc * (P.interm / 8) * 64);
+        grow_p(7, w_qsxu,  (size_t)nc * nm_ws_ * 8 * 2);
+        grow_p(8, w_qsxd,  (size_t)nc * 8 * 2);
+        grow_p(9, w_accgu, (size_t)nc * nm_ws_ * 8 * P.interm);
+        grow_p(10, w_accd, (size_t)nc * 8 * P.hidden);
+        cap_nc8 = nc;
     }
     (void)rows;
 }
@@ -370,6 +387,218 @@ struct GemvFallback
     }
 };
 
+// ------------------------------------------------------------------ int8 / XMX DPAS tier
+//
+// Mirrors the CPU VNNI tier (moe_mul1.cpp): quantize each transformed row into ONE int8
+// GEMV row pair (always-wide: value v in steps of amax/8192 splits into vh = (v+64)>>7 and
+// the remainder vl = v - 128*vh; the two rows' outputs simply add), stream the packed mul1
+// words exactly like GemvK, and turn each 16-bit state into the product word
+// p = st16 * 0x83DCD12D whose four bytes ARE four VNNI hw-k slots of the DPAS B operand:
+//   C[r][c] = sum_k A_s8[r][k] * B_u8[k][c]  =  sum_tileRow x8(r,k) * bytesum(p(k,c))
+// exactly the integer identity the CPU computes with vpdpbusd. The epilogue affine
+//   out = A * acc + B,  A = KDQ * q_eff, B = -510 * A * sum_x8
+// folds k_inv, the row scale and the -510 centre; K34i8/K6i8 apply it AFTER the 128-block
+// Hadamard by adding 128*B to element 0 (H*ones = 128*e0), so consumers pay one FADD.
+//
+// Fragment geometry (verified bit-exact on B70 by lab_jm7/lab_jm8):
+//   A: joint_matrix<signed char, use::a, 8, 32, row_major>,  loaded from GLOBAL with the
+//      fragment-slab base pointer and stride 32 (bytes); one slab = 8 rows x 8 splat dwords.
+//   B: joint_matrix<unsigned char, use::b, 32, 16, ext_intel_packed>, staged in SLM: the
+//      product dword for tile row rk, column c goes to sl32[(rk>>3)*128 + (rk&7)*16 + c]
+//      (packed byte addr(k,c) = (k>>2)*(N*4) + c*4 + (k&3), N=16 -> 64B bands), stride arg 64.
+//   C: joint_matrix<int, use::accumulator, 8, 16>, stored row-major to acc[slot][8][N].
+// NSL is 1 for this tier: job counts are already >= nfl*slots*16 lanes at decode shapes.
+
+namespace mx8 = sycl::ext::oneapi::experimental::matrix;
+
+struct Affine { float A, B; };
+
+// amax + always-wide 127*64 quantization of one gemv input row, CPU quantize_row_wide
+// semantics at HALF range (|vh|,|vl| <= 64: Xe DPAS forms i16 pair sums of u8 products,
+// 2*255*64 = 32640 < 32767 stays unsaturated; full +-127 does not). Row r = 2*tok + part.
+// Writes splat32 words into the lab_jm8-layout A slab and the affine pair {A,B}.
+struct QuantIn
+{
+    const float* __restrict__ tin;     // [tslot][MAXM][k] float (K1 output layout)
+    int32_t* __restrict__ a8;          // [slot][k/8][8 rows][8 i32]
+    Affine* __restrict__ qsb;          // [slot][8]
+    const ChunkDev* chunks;
+    int k, nm, tsmul;                  // tin tslot = slot * tsmul (gateless gu rows live at j*2)
+    sycl::local_accessor<float, 1> red;
+
+    void operator()(sycl::nd_item<2> it) const
+    {
+        const int slot = (int)it.get_group(1) >> 3;    // launch: group(1) = slot*8 + row
+        const int r = (int)it.get_group(1) & 7;
+        const int tid = (int)it.get_local_id(0);       // 256
+        const int m = chunks[slot / nm].m;
+        const int tok = r >> 1, part = r & 1;          // ALWAYS-WIDE: token -> rows 2t (vh), 2t+1 (vl)
+        const int kf = k / 8;
+        int32_t* aout = a8 + (size_t)slot * kf * 64 + r * 8;
+        if (tok >= m) {
+            for (int i = tid; i < kf * 8; i += 256) aout[(i >> 3) * 64 + (i & 7)] = 0;
+            if (tid == 0) qsb[slot * 8 + r] = Affine{ 0.f, 0.f };
+            return;
+        }
+        const float* xr = tin + (((size_t)slot * tsmul) * MAXM + tok) * k;
+        float am = 0.f;
+        for (int i = tid; i < k; i += 256) am = sycl::max(am, sycl::fabs(xr[i]));
+        red[tid] = am;
+        sycl::group_barrier(it.get_group());
+        for (int s = 128; s; s >>= 1) {
+            if (tid < s) red[tid] = sycl::max(red[tid], red[tid + s]);
+            sycl::group_barrier(it.get_group());
+        }
+        const float am0 = red[0];
+        sycl::group_barrier(it.get_group());           // before overwriting red[] with sx partials
+        // exact float spellings of the host reference (and of moe_mul1's quantize_row_wide,
+        // at 8192 levels instead of 127*128 - see the DPAS range note above):
+        const float qw = am0 > 0.f ? am0 * (1.0f / 8192.0f) : 1.0f;
+        const float rq = am0 > 0.f ? 8192.0f / am0 : 1.0f;
+        float sacc = 0.f;                              // exact: |partial| < 127*2560 < 2^24
+        for (int i = tid; i < k; i += 256) {
+            const float vf = xr[i] * rq;
+            int v = (int)(vf >= 0.f ? sycl::floor(vf + 0.5f) : sycl::ceil(vf - 0.5f));
+            v = sycl::clamp(v, -8128, 8128);
+            const int vh = (v + 64) >> 7;
+            const int x8 = part ? (v - (vh << 7)) : vh;
+            sacc += (float)x8;
+            // word (i>>3 selects the fragment slab, i&7 the A-row dword): its 4 bytes ARE
+            // hw-k 4q..4q+3, all carrying the same x8 (replication is what buys bytesum).
+            // (x8 & 0xff) * 0x01010101 == the uchar splat of the CPU store_x8 path: plain
+            // x8*0x01010101 does NOT replicate negatives (arith wrap leaks into the top
+            // byte, e.g. -1 -> 0xFEFEFEFF) - that was the stage-C scale+offset fingerprint.
+            aout[(i >> 3) * 64 + (i & 7)] = (int32_t)((x8 & 0xff) * 0x01010101);
+        }
+        red[tid] = sacc;
+        sycl::group_barrier(it.get_group());
+        for (int s = 128; s; s >>= 1) {
+            if (tid < s) red[tid] += red[tid + s];
+            sycl::group_barrier(it.get_group());
+        }
+        if (tid == 0) {
+            const float q_eff = part ? qw : qw * 128.0f;
+            const float Aq = KDQ * q_eff;
+            qsb[slot * 8 + r] = Affine{ Aq, -510.0f * Aq * red[0] };
+        }
+    }
+};
+
+// DPAS GEMV over the stream-repacked mul1 tiles. One sub-group per (16-column fragment,
+// gemv slot): 16 lanes = the 16 columns of one trellis tile column, each keeping its own
+// compile-time window exactly like GemvK. Per k-tile a lane decodes its 16 states, forms
+// the product words and drops them into two 512B packed-B bands (SLM); two m8n16k32 mads
+// consume them against the two A fragments (8 tile rows each). Full k range, nsl = 1.
+struct Gemv8Base
+{
+    const uintptr_t* tab;
+    const ChunkDev* chunks;
+    const int32_t* a8;       // operand slabs from QuantIn
+    int32_t* acc;            // [slot][8][N] raw i32 (KDQ/q/-510 folded later via Affine)
+    int E, nc, nm, H, I, nfl, down;
+};
+
+template <int K2V>
+struct Gemv8
+{
+    Gemv8Base b;
+    sycl::local_accessor<unsigned char, 1> slab;   // 1024B: two 512B packed-B bands
+
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+        return sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::sub_group_size<16> };
+    }
+
+    static constexpr int W = 4 * K2V;
+    static constexpr int KE = K2V & 1;
+    static constexpr int AD27 = (27 * K2V + KE) >> 1;
+    static constexpr int NW = (AD27 + 16 + 31 + 31) / 32 + 1;   // same window as GemvK
+
+    void operator()(sycl::nd_item<2> it) const
+    {
+        const int nf = (int)it.get_group(0);       // 16-col fragment == tile_n index
+        const int slot = (int)it.get_group(1);     // gu: j*nm + lmu; down: j
+        const int tid = (int)it.get_local_id(0);   // == lane, 16 per WG
+        const bool down = b.down != 0;
+        const int j = down ? slot : slot / b.nm;
+        const int lmu = down ? 0 : slot % b.nm;
+        const int cat = down ? CAT_DOWN : (b.nm == 2 ? lmu : CAT_UP);
+        const int e = b.chunks[j].expert;
+        const int K = down ? b.I : b.H;
+        const int N = down ? b.H : b.I;
+        const int tiles_k = K / 16;
+        const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[(F_TRI * 3 + cat) * b.E + e];
+
+        // column window setup, identical math to GemvK<K2V> (cin = lane, tile_n = nf)
+        const int cin = tid & 15;
+        const int A2 = (K2V * (32 * (cin & 7) + 4 * ((cin >> 3) & 1))) >> 1;
+        const int G = (32 - (K2V >> 1)) - A2 - AD27;
+        const int wb = G >> 5;
+        const int pre = G - (wb << 5);
+        int widx[NW];
+#pragma unroll
+        for (int i = 0; i < NW; ++i) widx[i] = ((wb + i) % W + W) % W;
+
+        unsigned char* const slb = slab.get_pointer().get();
+        uint32_t* const sl32 = (uint32_t*)slb;
+        const int32_t* const pa0 = b.a8 + (size_t)slot * (K / 8) * 64;   // [kfrag][64] i32
+        const size_t row_step = (size_t)b.nfl * W;
+        const uint32_t* wp = w32 + (size_t)nf * W;
+
+        sycl::sub_group sg = it.get_sub_group();
+        mx8::joint_matrix<sycl::sub_group, signed char, mx8::use::a, 8, 32,
+                          mx8::layout::row_major> ja;
+        mx8::joint_matrix<sycl::sub_group, unsigned char, mx8::use::b, 32, 16,
+                          mx8::layout::ext_intel_packed> jb;
+        mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc;
+        mx8::joint_matrix_fill(sg, jc, 0);
+
+        for (int tk = 0; tk < tiles_k; ++tk, wp += row_step) {
+            uint32_t g[NW];
+#pragma unroll
+            for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+            uint32_t h[NW];
+            if (pre == 0) {
+#pragma unroll
+                for (int i = 0; i < NW; ++i) h[i] = g[i];
+            } else {
+#pragma unroll
+                for (int i = 0; i + 1 < NW; ++i)
+                    h[i] = (g[i] >> pre) | (g[i + 1] << (32 - pre));
+                h[NW - 1] = g[NW - 1] >> pre;
+            }
+#pragma unroll
+            for (int rk = 0; rk < 16; ++rk) {
+                const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                const int rel = AD27 - ((K2V * d + KE) >> 1);
+                const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
+                const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
+                // packed-VNNI dword store, lab_jm8 addressing: band (rk>>3), quad row (rk&7), col cin
+                sl32[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = st16 * 0x83DCD12Du;
+            }
+            sg.barrier();
+#pragma unroll
+            for (int fk = 0; fk < 2; ++fk) {
+                auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                    sycl::access::decorated::yes>(
+                    (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 64));
+                mx8::joint_matrix_load(sg, ja, pag, 32);
+                mx8::joint_matrix_load(sg, jb,
+                    sycl::address_space_cast<sycl::access::address_space::local_space,
+                                             sycl::access::decorated::yes>(slb + fk * 512),
+                    16 * 4);   // packed stride = N * VNNI bytes
+                mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+            }
+            sg.barrier();      // band reuse safety before the next tile's stores
+        }
+        auto pcg = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                            sycl::access::decorated::yes>(
+            b.acc + (size_t)slot * 8 * N + nf * 16);
+        mx8::joint_matrix_store(sg, jc, pcg, N, mx8::layout::row_major);
+    }
+};
+
 // ------------------------------------------------------------------ forward
 
 sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
@@ -377,6 +606,14 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 {
     const int H = P.hidden, I = P.interm;
     const int k2 = 2 * P.bits + P.hb;
+    // EXL3_MOE_B70_INT8 tri-state: =1 force on (lab), =0 force off, unset -> member default.
+    // The DPAS tier only exists for the stream-layout rates (int8_ok, computed in init()).
+    static const int g_int8_env = []{
+        const char* e = std::getenv("EXL3_MOE_B70_INT8");
+        return !e ? -1 : (e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1);
+    }();
+    use8_ = int8_ok && (g_int8_env >= 0 ? (bool)g_int8_env : int8);
+    int8_active = use8_;
     const int E = P.num_experts;
     const int tile_u32 = 4 * k2;                    // u32 words per tile
     const bool gated = P.gated;
@@ -471,6 +708,187 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 }
             });
         });
+    }
+
+    // ---- int8 / XMX DPAS pipeline (K2, K5 replace the fp gemvs; K1 above is shared).
+    // Exact-i32 accumulators, nsl = 1; {KDQ*q, -510*KDQ*q*sx} folds into the act/gather
+    // epilogues as the affine {A,B} per DPAS row (see QuantIn/Gemv8 above).
+    if (use8_) {
+        int32_t* const accgu = w_accgu;
+        int32_t* const accd8 = w_accd;
+        Affine* const qsxu = (Affine*)w_qsxu;
+        Affine* const qsxd = (Affine*)w_qsxd;
+        const int slots = nc * nm;
+        Gemv8Base g8{ d_tab, w_chunk, nullptr, nullptr, E, nc, nm, H, I, 0, 0 };
+
+        // Q1: quantize the rotated gu inputs (one WG of 256 per (slot, DPAS row))
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> red({256}, cgh);
+            cgh.parallel_for(sycl::nd_range<2>({256, (size_t)8 * slots}, {256, 1}),
+                QuantIn{ tin, w_a8u, qsxu, chunks, H, nm, gated ? 1 : 2, red });
+        });
+
+        // K2p: gate/up DPAS gemm, one sub-group per (16-col fragment, slot)
+        {
+            g8.a8 = w_a8u; g8.acc = accgu; g8.nfl = I / 16; g8.down = 0;
+            launch([&](sycl::handler& cgh) {
+                sycl::local_accessor<unsigned char, 1> slm({1024}, cgh);
+                switch (k2) {
+                    case 4: cgh.parallel_for(sycl::nd_range<2>({(size_t)(I / 16) * 16, (size_t)slots}, {16, 1}), Gemv8<4>{g8, slm}); break;
+                    case 5: cgh.parallel_for(sycl::nd_range<2>({(size_t)(I / 16) * 16, (size_t)slots}, {16, 1}), Gemv8<5>{g8, slm}); break;
+                    default: cgh.parallel_for(sycl::nd_range<2>({(size_t)(I / 16) * 16, (size_t)slots}, {16, 1}), Gemv8<8>{g8, slm}); break;
+                }
+            });
+        }
+
+        // K34i8: affine-folded out transform + activation + fused down-prep (the int8 twin
+        // of the fp32 K34; B enters as +128*B at element 0 after the Hadamard, which is
+        // exactly H*(B*ones)).
+        {
+            const int nbk = I / 128;
+            launch([&](sycl::handler& cgh) {
+                sycl::local_accessor<float, 1> sh({256}, cgh);
+                cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
+                    [=](sycl::nd_item<2> it) {
+                    const int blk = (int)it.get_group(0);
+                    const int j = (int)it.get_group(1);
+                    const int tid = (int)it.get_local_id(0);
+                    const int e = chunks[j].expert;
+                    const int m = chunks[j].m;
+                    const int cG = blk * 128 + tid;
+                    const uint16_t* suhd = (const uint16_t*)tab[(F_SUH * 3 + CAT_DOWN) * E + e];
+                    const float sd = f16(suhd[blk * 128 + tid]);
+                    const uint16_t* svhu = (const uint16_t*)tab[(F_SVH * 3 + CAT_UP) * E + e];
+                    const uint16_t* bu   = (const uint16_t*)tab[(F_BIAS * 3 + CAT_UP) * E + e];
+                    const int slotg = gated ? j * 2 : j;      // int8 slots: gateless uses j
+                    const int slotu = gated ? j * 2 + 1 : j;
+                    const int32_t* ag = accgu + (size_t)slotg * 8 * I;
+                    const int32_t* au = accgu + (size_t)slotu * 8 * I;
+                    const Affine* qg = qsxu + slotg * 8;
+                    const Affine* qu = qsxu + slotu * 8;
+                    const float hu = HAD_SCALE * f16(svhu[cG]);
+                    const float bj = bu ? f16(bu[cG]) : 0.0f;
+                    float hgv = 0.f, biv = 0.f;
+                    if (gated) {
+                        const uint16_t* svhg = (const uint16_t*)tab[(F_SVH * 3 + CAT_GATE) * E + e];
+                        const uint16_t* bg = (const uint16_t*)tab[(F_BIAS * 3 + CAT_GATE) * E + e];
+                        hgv = HAD_SCALE * f16(svhg[cG]);
+                        biv = bg ? f16(bg[cG]) : 0.0f;
+                    }
+                    for (int r = 0; r < m; ++r) {
+                        float bfold_g = 0.f, bfold_u = 0.f;
+                        const Affine up0 = qu[2 * r], up1 = qu[2 * r + 1];     // up parts
+                        if (gated) {
+                            const Affine gt0 = qg[2 * r], gt1 = qg[2 * r + 1];  // gate parts
+                            sh[tid]       = gt0.A * (float)ag[(size_t)(2 * r) * I + cG]
+                                          + gt1.A * (float)ag[(size_t)(2 * r + 1) * I + cG];
+                            sh[128 + tid] = up0.A * (float)au[(size_t)(2 * r) * I + cG]
+                                          + up1.A * (float)au[(size_t)(2 * r + 1) * I + cG];
+                            bfold_g = 128.0f * (gt0.B + gt1.B);
+                            bfold_u = 128.0f * (up0.B + up1.B);
+                        } else {
+                            sh[tid] = up0.A * (float)au[(size_t)(2 * r) * I + cG]
+                                    + up1.A * (float)au[(size_t)(2 * r + 1) * I + cG];
+                            bfold_u = 128.0f * (up0.B + up1.B);
+                        }
+                        if (gated) {
+                            hadamard128(it, tid, sh.get_pointer());
+                            hadamard128(it, tid, sh.get_pointer() + 128);
+                            if (tid == 0) { sh[0] += bfold_g; sh[128] += bfold_u; }
+                            const float gv = sh[tid] * hgv + biv;
+                            const float uv = sh[128 + tid] * hu + bj;
+                            float av;
+                            switch (act) {
+                                case 0: {
+                                    const float eg = std::exp(std::min(-gv, 80.0f));
+                                    av = std::min(gv / (1.0f + eg), lim) * sycl::clamp(uv, -lim, lim);
+                                    break; }
+                                case 1: {
+                                    const float cdf = 0.5f * (1.0f + erff(gv * 0.70710678f));
+                                    av = std::min(gv * cdf, lim) * sycl::clamp(uv, -lim, lim);
+                                    break; }
+                                case 3: {
+                                    const float gvc = std::min(gv, lim);
+                                    const float uvc = sycl::clamp(uv, -lim, lim);
+                                    av = (uvc + 1.0f) * gvc / (1.0f + std::exp(std::min(-1.702f * gvc, 80.0f)));
+                                    break; }
+                                default: av = gv; break;
+                            }
+                            sh[tid] = av * sd;   // fused down-prep: scale then SLM Hadamard
+                        } else {
+                            hadamard128(it, tid, sh.get_pointer());
+                            if (tid == 0) sh[0] += bfold_u;
+                            const float uv = sh[tid] * hu + bj;
+                            const float rv = uv > 0.0f ? uv : 0.0f;
+                            sh[tid] = rv * rv * sd;
+                        }
+                        sycl::group_barrier(it.get_group());
+                        hadamard128(it, tid, sh.get_pointer());
+                        tind[(size_t)j * MAXM * I + (size_t)r * I + cG] = sh[tid] * HAD_SCALE;
+                        sycl::group_barrier(it.get_group());
+                    }
+                });
+            });
+        }
+
+        // Q2 + K5p: quantize the down input, DPAS gemm over the down matrices
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> red({256}, cgh);
+            cgh.parallel_for(sycl::nd_range<2>({256, (size_t)8 * nc}, {256, 1}),
+                QuantIn{ tind, w_a8d, qsxd, chunks, I, 1, 1, red });
+        });
+        {
+            g8.a8 = w_a8d; g8.acc = accd8; g8.nfl = H / 16; g8.down = 1;
+            launch([&](sycl::handler& cgh) {
+                sycl::local_accessor<unsigned char, 1> slm({1024}, cgh);
+                switch (k2) {
+                    case 4: cgh.parallel_for(sycl::nd_range<2>({(size_t)(H / 16) * 16, (size_t)nc}, {16, 1}), Gemv8<4>{g8, slm}); break;
+                    case 5: cgh.parallel_for(sycl::nd_range<2>({(size_t)(H / 16) * 16, (size_t)nc}, {16, 1}), Gemv8<5>{g8, slm}); break;
+                    default: cgh.parallel_for(sycl::nd_range<2>({(size_t)(H / 16) * 16, (size_t)nc}, {16, 1}), Gemv8<8>{g8, slm}); break;
+                }
+            });
+        }
+
+        // K6i8: down out-transform + weighted gather from i32 accumulators + affine fold
+        {
+            const int nbk = H / 128;
+            const int nent = (int)tmap.entry.size();
+            dep = q.memset(out, 0, (size_t)rows * H * sizeof(float), {dep});
+            if (prof) pev.push_back(dep);
+            if (nent) {
+                launch([&](sycl::handler& cgh) {
+                    sycl::local_accessor<float, 1> sh({128}, cgh);
+                    cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nent}, {128, 1}),
+                        [=](sycl::nd_item<2> it) {
+                        const int blk = (int)it.get_group(0);
+                        const int p = (int)it.get_group(1);
+                        const int tid = (int)it.get_local_id(0);
+                        const int cG = blk * 128 + tid;
+                        int lo = 0, hi = rows;
+                        while (hi - lo > 1) { const int mid = (lo + hi) >> 1;
+                            if (d_tokb[mid] <= p) lo = mid; else hi = mid; }
+                        const int t = lo;
+                        const int ent = d_toke[p];
+                        const int j = ent >> 2, s = ent & 3;
+                        const int e = chunks[j].expert;
+                        const float wgt = chunks[j].weight[s];
+                        const uint16_t* svhe = (const uint16_t*)tab[(F_SVH * 3 + CAT_DOWN) * E + e];
+                        const uint16_t* be = (const uint16_t*)tab[(F_BIAS * 3 + CAT_DOWN) * E + e];
+                        const Affine cd0 = qsxd[j * 8 + 2 * s], cd1 = qsxd[j * 8 + 2 * s + 1];
+                        sh[tid] = cd0.A * (float)accd8[((size_t)j * 8 + 2 * s) * H + cG]
+                                + cd1.A * (float)accd8[((size_t)j * 8 + 2 * s + 1) * H + cG];
+                        hadamard128(it, tid, sh.get_pointer());
+                        if (tid == 0) sh[0] += 128.0f * (cd0.B + cd1.B);
+                        float v = sh[tid] * (HAD_SCALE * f16(svhe[cG]));
+                        if (be) v += f16(be[cG]);
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                         sycl::memory_scope::device> ao(out[(size_t)t * H + cG]);
+                        ao.fetch_add(wgt * v);
+                    });
+                });
+            }
+        }
+        return dep;
     }
 
     // ---- K2/K5: GEMV over mul1 tiles for one matrix class

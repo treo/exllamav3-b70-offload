@@ -44,7 +44,9 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
     constexpr float HS = 0.088388347648f;   // HAD_SCALE
     printf("== i8trace: nc %d nm %d ==\n", nc, nm);
 
-    std::vector<float> tin((size_t)slots * 4 * H);
+    // tin is laid out by K1 at ts = (j*2+mu) slots EVEN for gateless (mu=0, ts=2j): the
+    // readback must cover all 2*nc ts-slots, not just the 'slots' the quant tier uses.
+    std::vector<float> tin((size_t)nc * 2 * 4 * H);
     layer.peek(tin.data(), layer.ws(0), tin.size() * 4);
     std::vector<int32_t> a8u((size_t)slots * (H / 8) * 64);
     layer.peek(a8u.data(), layer.i8buf(0), a8u.size() * 4);
@@ -64,7 +66,9 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
     int fails = 0;
     auto closef = [](float a, float b) {
         const double d = std::fabs((double)a - b);
-        return d <= 1e-5 * std::fabs((double)b) + 1e-9;
+        // abs floor 1e-8: the int8 path legitimately reorders/recontracts fp ops vs this
+        // emulation (FMA contraction in the kernel); genuine staging bugs are O(1e-3) here.
+        return d <= 1e-5 * std::fabs((double)b) + 1e-8;
     };
     auto x8row = [&](const std::vector<int32_t>& a8, int slot, int r, int k, int K) {
         const int kf = K / 8;
@@ -93,12 +97,27 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     const int vh = (v + 64) >> 7;
                     const int x8 = part ? (v - (vh << 7)) : vh;
                     sacc += x8;
-                    const int32_t want = x8 * 0x01010101;
+                    // uchar splat, mirroring the CPU's store_x8: plain x8*0x01010101 does NOT
+                    // replicate NEGATIVE values (-1 -> 0xFEFEFEFF); masking first is required.
+                    const int32_t want = (int32_t)((x8 & 0xff) * 0x01010101);
                     const int kf = H / 8;
                     const int32_t gotw = a8u[((size_t)slot * kf + (k >> 3)) * 64 + r * 8 + (k & 7)];
                     if (gotw != want) {
                         printf("B slot%d tok%d part%d k%d: got %08x want %08x\n",
                                slot, t, part, k, (unsigned)gotw, (unsigned)want);
+                        // forensic: per-row fingerprints of a8 + the tin row it came from
+                        for (int rr = 0; rr < 8; ++rr) {
+                            long rs = 0;
+                            for (int kk = 0; kk < H; kk += 8)
+                                rs += (int)(signed char)((unsigned)a8u[((size_t)slot * (H / 8) + kk / 8) * 64 + rr * 8 + (kk & 7)] & 0xffu);
+                            float tsum = 0.f, tam = 0.f;
+                            for (int kk = 0; kk < H; ++kk) {
+                                tsum += xr[kk];
+                                tam = std::max(tam, std::fabs(xr[kk]));
+                            }
+                            printf("   r%d a8sum=%ld  tinrow(ts%d,t%d) sum=%.6g amax=%.6g\n",
+                                   rr, rs, ts, rr >> 1, tsum, tam);
+                        }
                         ++fails;
                     }
                 }
@@ -226,8 +245,11 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 // barrier; hadamard; tind = *HAD_SCALE
                 moe_ref::hadamard_128(gv.data());
                 moe_ref::hadamard_128(uv.data());
-                gv[0] += 128.0f * gb;
-                uv[0] += 128.0f * ub;
+                // NOTE: gb/ub summed q[1] inside the 128-iteration loop above, so they ALREADY
+                // equal 128*(B0+B1) = the exact H*(B*ones) fold at element 0; the earlier
+                // extra *128 here was a harness bug (would demand a 16384x fold from the kernel).
+                gv[0] += gb;
+                uv[0] += ub;
                 for (int i = 0; i < 128; ++i) {
                     const int c = blk * 128 + i;
                     if (gated) {
@@ -240,17 +262,20 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 std::vector<float> hv(128);
                 for (int i = 0; i < 128; ++i) {
                     if (gated) {
+                        // exact mirror of the kernel's activation block (lim=inf synthetic):
+                        // NOTE act3 already contains the uv factor (earlier harness bug
+                        // multiplied by uv a second time for swiglu_oai).
                         float av;
                         switch (L.activation) {
                             case 0: { const float eg = std::exp(std::min(-gv[i], 80.0f));
-                                      av = gv[i] / (1.0f + eg); break; }
+                                      av = gv[i] / (1.0f + eg) * uv[i]; break; }
                             case 1: { const float cdf = 0.5f * (1.0f + std::erff(gv[i] * 0.70710678f));
-                                      av = gv[i] * cdf; break; }
+                                      av = gv[i] * cdf * uv[i]; break; }
                             case 3: av = (uv[i] + 1.0f) * gv[i] /
                                          (1.0f + std::exp(std::min(-1.702f * gv[i], 80.0f))); break;
                             default: av = gv[i]; break;
                         }
-                        hv[i] = av * std::max(-1e30f, std::min(uv[i], 1e30f));
+                        hv[i] = av;
                     } else {
                         const float rv = uv[i] > 0.f ? uv[i] : 0.f;
                         hv[i] = rv * rv;
@@ -293,7 +318,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     const int vh = (v + 64) >> 7;
                     const int x8 = part ? (v - (vh << 7)) : vh;
                     sacc += x8;
-                    const int32_t want = x8 * 0x01010101;
+                    const int32_t want = (int32_t)((x8 & 0xff) * 0x01010101);   // uchar splat (stage B note)
                     const int kf = I / 8;
                     const int32_t gotw = a8d[((size_t)j * kf + (k >> 3)) * 64 + r * 8 + (k & 7)];
                     if (gotw != want) {
@@ -371,6 +396,14 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
 
     // ---- stage G: gather-out (accd+qsxd+CSR -> out), all columns of block 0 per token
     {
+        // G is the float ENDPOINT: per-entry atomic ordering vs this sequential sum differs
+        // by a few ulp of the LARGEST intermediate (1e-7-ish absolutes on cancelled sums),
+        // so the gate is rel 1e-3 / abs 1e-6. Wiring faults (wrong fold, wrong row/entry)
+        // move values by O(1e-3+) at these scales and still cannot hide.
+        auto closeg = [](float a, float b) {
+            const double d = std::fabs((double)a - b);
+            return d <= 1e-3 * std::fabs((double)b) + 1e-6;
+        };
         const int rows = (int)tmap.begin.size() - 1;
         for (int tk = 0; tk < rows && !fails; ++tk) {
             for (int blk = 0; blk < H / 128 && !fails; blk += H / 128) {  // block 0 only
@@ -393,7 +426,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                         bb += q0[1] + q1[1];
                     }
                     moe_ref::hadamard_128(v.data());
-                    v[0] += 128.0f * bb;
+                    v[0] += bb;   // bb summed B over the 128 i-iters: the exact 128*B fold (see stage D note)
                     for (int i = 0; i < 128; ++i) {
                         const int c = blk * 128 + i;
                         float val = v[i] * (HS * exl3ref::f16_to_f32(svhd[c]));
@@ -404,7 +437,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 }
                 for (int i = 0; i < 128 && !fails; ++i) {
                     const float g = out_host[(size_t)tk * H + blk * 128 + i];
-                    if (!closef(g, sum[i])) {
+                    if (!closeg(g, sum[i])) {
                         printf("G MISMATCH tok%d c%d: got %.7g want %.7g\n", tk, blk * 128 + i, g, sum[i]);
                         ++fails;
                     }
@@ -706,7 +739,8 @@ int main(int argc, char** argv)
 
     // per-stage check: recompute stage 0..4 for chunk 0 row 0 from the reference,
     // and locate the first stage whose device output disagrees.
-    if (a.check && a.gated && a.act == 0) {
+    // (float-tier buffers only: the int8 tier never writes tout/toutd, skip there)
+    if (a.check && a.gated && a.act == 0 && !layer.int8_active) {
         const auto& ch = rchunks[0];
         const int j = 0, r = 0;
         const int e = ch.expert;
@@ -875,7 +909,12 @@ int main(int argc, char** argv)
         printf("check: max_rel %.3e  rms_rel %.3e  (worst idx %zu: ref %f got %f)  ref_ms %.1f\n",
                max_rel, std::sqrt(se / std::max(ss, 1e-30)), worst, ref[worst], got[worst],
                std::chrono::duration<double, std::milli>(t1 - t0).count());
-        if (max_rel > 2e-3) { printf("MISMATCH\n"); return 1; }
+        if (layer.int8_active) {
+            // int8-tier deviation vs the fp32 scalar reference is a ~0.9% class metric;
+            // gate on rms (NOT max_rel, which blows up on cancelling outputs).
+            const double rms = std::sqrt(se / std::max(ss, 1e-30));
+            if (rms > 3e-2) { printf("MISMATCH (int8 rms gate)\n"); return 1; }
+        } else if (max_rel > 2e-3) { printf("MISMATCH\n"); return 1; }
     }
 
     // ---------------------------------------------------- bench
