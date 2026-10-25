@@ -144,3 +144,22 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 - PoC1 (poc_dequant.cpp): GPU state extraction + mul1 dequant bit-exact vs host ref for
   K=1,1.5,2,2.5,3,3.5,4,6,8. Runtime-parameterized ring math works; perm(t) closed form:
   b=t>>3, j=t&7 -> row=((b&3)*2)+(j&1)+((j&2)?8:0), col=(b>>2)+((j&4)?8:0).
+
+## Quality gates (wikitext-2 ppl, -r 20 -l 2048, -mcs per model)
+| model            | mcs | CPU      | B70      |
+|------------------|-----|----------|----------|
+| 2.05bpw_h4_ng4   | 384 | 3.960071 | 3.968360 |
+| 2.68bpw_h6_ng8   | 384 | 3.824000 | 3.822094 |
+| 4.05bpw_h6_ng6   | 448 | 3.730495 | 3.730074 |  (17/48 layers resident on B70)
+
+## Device-memory governance (learned the hard way)
+- NEO/L0 does NOT reliably return null from malloc_device near capacity; the failure surfaces
+  LATER as an async UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY (39) throw from memcpy().wait() or
+  kernel launch, which crossed the plugin's C ABI and killed the worker.
+- Fixes (b70_lib.cpp): (1) soft budget = 0.60 x global_mem_size checked BEFORE every alloc,
+  (2) every device alloc recorded in Upload.keep BEFORE its copy so any throw still rolls back,
+  (3) b70_register_layer catches all exceptions -> -1 (layer stays on CPU) and sets dev_full,
+  (4) b70_forward returns int; nonzero -> moe_mul1 pins the layer to CPU for good.
+- GOTCHA: python .replace() patch scripts silently no-op when the anchor text is hallucinated.
+  Always assert anchor presence (this burned a whole debugging cycle: "the guard exists but
+  didn't fire" - it never got inserted).
