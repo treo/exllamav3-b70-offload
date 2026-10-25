@@ -502,3 +502,25 @@ and 16 lanes overlap ~5x on the same 64B row (L1 traffic, not DRAM: unique 8.2MB
 PoC idea: lane l loads word l (64B coalesced), rebuild windows with select_from_group (5
 SG-shuffles replace 4 LDGs, register-side). Applies to BOTH tiers (GemvK too). Must be a lab
 A/B first (t31 VARIANT 20), adoption bar >=15% on the isolated gemv.
+
+## Coalesced-load + shuffle variant: REJECTED (t31 VARIANT 20, checker /tmp/p20chk pattern)
+
+Lane-l-loads-word-l (1 fully coalesced 64B row fetch per SG per tile) + rebuild the 5-word
+window with select_from_group(sg, word, src_lane): CORRECT (bit-exact vs an independent
+ring-normalized host checker) but 77-104us vs V0's 57-62 at the gu lab shape (nsl 1..8).
+Indirect-lane shuffles lower to something worse than the redundant overlapped L1 loads they
+replace — the 5x word overlap was NOT the wall. Killed. (Checker lesson came out of this
+too: GemvK's G is NEGATIVE (ring slack); any host-side window formula must ring-normalize
+P = G + rel mod (W*32) BEFORE word/split extraction, or it flags correct kernels. The t30
+lab harness encodes the kernel formula and thus could not catch a shared misconception -
+independent checkers must be written from the FORMAT spec, not from the kernel.)
+
+## MAXM=8 scoping (for the next session's own-change increment)
+ChunkDev{x,sel,w} never crosses the worker ABI: b70_forward receives raw (x, sel, wts, rows,
+topk) and b70_lib.cpp::forward_impl does the expert grouping/chunking HOST-SIDE. So MAXM=8
+is contained in sycl_moe/: ChunkDev{token[8],weight[8]}, the b70_lib + harness chunkers,
+moe_sycl MAXM and every [.. MAXM ..] stride, GemvK/GemvFallback accumulator chains
+(acc0..3/accB0..3 exist for 4 rows; +4 chains, or chunk-split for the float tier), K1/K34
+row loops, b70_warm geometry. Value: mcs256/384 prefill chunks average 2.5-3 tokens ->
+8-slot chunks ~halve weight passes in the traffic-bound gemvs (both tiers benefit, int8
+most). Decode (m=1) unaffected; do NOT bother before it shows in a profiled prefill trace.

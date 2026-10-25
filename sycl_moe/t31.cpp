@@ -222,6 +222,130 @@ struct P
     }
 };
 
+// P20: coalesced-load variant (K2=4 ONLY): instead of 5 per-lane dword loads that overlap
+// ~5x across the 16 lanes, lane l loads ONE word (word l -> one 64B coalesced row fetch per
+// tile per SG) and rebuilds its 5-word window with select_from_group register shuffles.
+// Same pair-loop shape as VARIANT 0 for a like-for-like A/B. Timing probe only.
+struct P20
+{
+    const u32* w32;
+    const int32_t* a8;
+    int32_t* acc;
+    int TN, TK, W, KF, N, NSL;
+    sycl::local_accessor<unsigned char, 1> slab;
+    const uintptr_t* tab;
+    const int* experts;
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+        return sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::sub_group_size<16> };
+    }
+
+    static constexpr int K2V = 4;
+    static constexpr int AD27 = (27 * K2V) >> 1;
+    static constexpr int NW = (AD27 + 16 + 31 + 31) / 32 + 1;   // 5
+
+    void operator()(sycl::nd_item<2> it) const
+    {
+        const int gid = (int)it.get_group(0);
+        const int slot = (int)it.get_group(1);
+        const int tid = (int)it.get_local_id(0);
+        const int nf = gid % TN;
+        const int sl = gid / TN;
+        const int cin = tid & 15;
+        const int A2 = (K2V * (32 * (cin & 7) + 4 * ((cin >> 3) & 1))) >> 1;
+        const int G = (32 - (K2V >> 1)) - A2 - AD27;
+        const int wb = G >> 5;
+        const int pre = G - (wb << 5);
+        int src[NW + 1];
+#pragma unroll
+        for (int i = 0; i <= NW; ++i) src[i] = (wb + i) & 15;
+        unsigned char* const slb = slab.get_pointer().get();
+        u32* const sl32 = (u32*)slb;
+        const size_t row_step = (size_t)TN * W;
+        const u32* wp0 = (const u32*)(uintptr_t)tab[2 + experts[slot]];
+        const int tk_lo = (TK * sl) / NSL;
+        const int tk_hi = (TK * (sl + 1)) / NSL;
+        const u32* wp = wp0 + (size_t)nf * W + (size_t)tk_lo * row_step;
+        const int32_t* const pa0 = a8 + (size_t)slot * KF * 64;
+        sycl::sub_group sg = it.get_sub_group();
+        mx8::joint_matrix<sycl::sub_group, signed char, mx8::use::a, 8, 32,
+                          mx8::layout::row_major> ja;
+        mx8::joint_matrix<sycl::sub_group, unsigned char, mx8::use::b, 32, 16,
+                          mx8::layout::ext_intel_packed> jb;
+        mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc;
+        mx8::joint_matrix_fill(sg, jc, 0);
+        u32 mc0 = wp[tid], mc1 = 0;
+        const bool has2i = (tk_lo + 1) < tk_hi;
+        if (has2i) mc1 = wp[tid + row_step];
+        for (int tc = tk_lo; tc < tk_hi; tc += 2, wp += 2 * row_step) {
+            const bool has2 = (tc + 1) < tk_hi;
+            u32 mn0 = 0, mn1 = 0;
+            if (tc + 2 < tk_hi) mn0 = wp[tid + 2 * row_step];
+            if (has2 && tc + 3 < tk_hi) mn1 = wp[tid + 3 * row_step];
+            u32 ha[NW], hb[NW];
+#pragma unroll
+            for (int i = 0; i < NW; ++i) {
+                const u32 v0 = sycl::select_from_group(sg, mc0, src[i]);
+                const u32 v1 = sycl::select_from_group(sg, mc0, src[i + 1]);
+                ha[i] = (pre == 0) ? v0 : ((v0 >> pre) | (v1 << (32 - pre)));
+                const u32 w0 = sycl::select_from_group(sg, mc1, src[i]);
+                const u32 w1 = sycl::select_from_group(sg, mc1, src[i + 1]);
+                hb[i] = (pre == 0) ? w0 : ((w0 >> pre) | (w1 << (32 - pre)));
+            }
+            u32* const banda = sl32;
+            u32* const bandb = sl32 + 256;
+#pragma unroll
+            for (int rk = 0; rk < 16; ++rk) {
+                const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                const int rel = AD27 - ((K2V * d) >> 1);
+                const u32 lo4 = ha[rel >> 5], hi4 = ha[(rel >> 5) + 1];
+                const u32 s16a = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
+                banda[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = s16a * 0x83DCD12Du;
+                if (has2) {
+                    const u32 lo4b = hb[rel >> 5], hi4b = hb[(rel >> 5) + 1];
+                    const u32 s16b = ((lo4b >> (rel & 31)) | ((hi4b << 1) << (31u - (rel & 31)))) & 0xffffu;
+                    bandb[(rk >> 3) * 128 + (rk & 7) * 16 + cin] = s16b * 0x83DCD12Du;
+                }
+            }
+            sg.barrier();
+#pragma unroll
+            for (int fk = 0; fk < 2; ++fk) {
+                auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                    sycl::access::decorated::yes>(
+                    (const signed char*)(pa0 + (size_t)(2 * tc + fk) * 64));
+                mx8::joint_matrix_load(sg, ja, pag, 32);
+                mx8::joint_matrix_load(sg, jb,
+                    sycl::address_space_cast<sycl::access::address_space::local_space,
+                                             sycl::access::decorated::yes>(slb + fk * 512),
+                    16 * 4);
+                mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+            }
+            if (has2) {
+                const int tc1 = tc + 1;
+#pragma unroll
+                for (int fk = 0; fk < 2; ++fk) {
+                    auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                        sycl::access::decorated::yes>(
+                        (const signed char*)(pa0 + (size_t)(2 * tc1 + fk) * 64));
+                    mx8::joint_matrix_load(sg, ja, pag, 32);
+                    mx8::joint_matrix_load(sg, jb,
+                        sycl::address_space_cast<sycl::access::address_space::local_space,
+                                                 sycl::access::decorated::yes>(slb + 1024 + fk * 512),
+                        16 * 4);
+                    mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+                }
+            }
+            sg.barrier();
+            mc0 = mn0; mc1 = mn1;
+        }
+        auto pcg = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                            sycl::access::decorated::yes>(
+            acc + ((size_t)slot * NSL + sl) * 8 * N + nf * 16);
+        mx8::joint_matrix_store(sg, jc, pcg, N, mx8::layout::row_major);
+    }
+};
+
 // QuantIn-lookalike: 256-thread WGs over (slot,row), rewrites every a8 word from a tin
 // array. Same footprint/ordering as production Q1 running just before the gemv.
 struct QuantWriter
@@ -295,10 +419,10 @@ int main(int argc, char** argv)
     uint32_t* gscr = nullptr;
     if (VARIANT == 7)
         gscr = sycl::malloc_device<uint32_t>((size_t)SLOTS * NSL * TN * 128, q);
-#if VARIANT == 6 || VARIANT == 9 || VARIANT == 12 || VARIANT == 15
+#if VARIANT == 6 || VARIANT == 9 || VARIANT == 12 || VARIANT == 15 || VARIANT == 20
     uintptr_t* dtab = nullptr;
     int* dexps = nullptr;
-    if (VARIANT == 6 || VARIANT == 9 || VARIANT == 12 || VARIANT == 15) {
+    if (VARIANT == 6 || VARIANT == 9 || VARIANT == 12 || VARIANT == 15 || VARIANT == 20) {
         std::vector<uintptr_t> ht(16, 0);
         for (int i = 0; i < 16; ++i) ht[i] = (uintptr_t)dw;   // any expert -> same trellis
         dtab = sycl::malloc_device<uintptr_t>(16, q);
@@ -309,12 +433,10 @@ int main(int argc, char** argv)
     }
 #endif
     auto mkp = [&](sycl::handler& cgh, sycl::local_accessor<unsigned char, 1>& slm) {
-#if VARIANT == 6 || VARIANT == 9 || VARIANT == 12 || VARIANT == 15
-#if VARIANT == 15
-        return P{dw, da8, dacc, TN, TK, 16, KF, N, NSL, slm, dtab, dexps};
-#else
+#if VARIANT == 20
+        return P20{dw, da8, dacc, TN, TK, 16, KF, N, NSL, slm, dtab, dexps};
+#elif VARIANT == 6 || VARIANT == 9 || VARIANT == 12 || VARIANT == 15
         return P{dw, da8, dacc, TN, TK, W, KF, N, NSL, slm, dtab, dexps};
-#endif
 #elif VARIANT == 7
         return P{dw, da8, dacc, TN, TK, W, KF, N, NSL, slm, gscr, TN, NSL};
 #else
