@@ -155,6 +155,18 @@ struct GemvK
     // stream and extracts with compile-time shifts and pair selections only.
     GemvBase b;
 
+    // Xe2: prefer 16-lane subgroups (2x GRF per lane for the load pipeline); IGC's
+    // auto pick lands on SIMD32 otherwise. Override with MOE_SG32=1 to A/B.
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+#ifdef MOE_SG32
+        return sycl::ext::oneapi::experimental::properties{};
+#else
+        return sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::sub_group_size<16>};
+#endif
+    }
+
     static constexpr int W = 4 * K2V;
     static constexpr int KE = K2V & 1;
     static constexpr int AD27 = (27 * K2V + KE) >> 1;
