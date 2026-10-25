@@ -139,7 +139,10 @@ Treillis tile (16x16 weights) packed size: tile_u16 = 8*(2*bits+hb) u16 (=16K+8 
 - Bench harness build: source /opt/intel/oneapi/setvars.sh && icpx -fsycl -O2 x.cpp -o x
 - b70-bench measured: mem copy 674 GB/s, XMX int8 367 TOPS, FP32 vector 22.7 TFLOPS.
 - k_inv = fp16(0x1eee) = 0.00676727294921875 exactly (mantissa field 0x2EE = 750, not 766).
-- icpx 2026.2 CRASHES silently (exit 3, no diagnostic) on -O3 for poc_dequant.cpp; -O2 fine.
+- [SUPERSEDED] 'icpx -O3 crashes on this codebase' — could not reproduce: same poc_dequant.cpp,
+  same flags, 8/8 clean; full suite builds at -O3, bit-identical results, microbench -2.6%.
+  Likely a transient toolchain hiccup under memory pressure (parallel builds), not the source.
+  Standard builds now use -O3; drop to -O2 only if the compiler ever starts dying on these TUs.
   Build microbenches with -O2 until proven otherwise.
 - PoC1 (poc_dequant.cpp): GPU state extraction + mul1 dequant bit-exact vs host ref for
   K=1,1.5,2,2.5,3,3.5,4,6,8. Runtime-parameterized ring math works; perm(t) closed form:

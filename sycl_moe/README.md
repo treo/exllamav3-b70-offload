@@ -24,7 +24,7 @@ the fp32 reference than that tier.
 ```bash
 source sycl_moe/env.sh          # oneAPI setvars + torch-JIT env recipe + EXL3_MOE_B70_LIB
 cd sycl_moe
-icpx -fsycl -O2 -fPIC -shared b70_lib.cpp moe_sycl.cpp -o libb70moe.so \
+icpx -fsycl -O3 -fPIC -shared b70_lib.cpp moe_sycl.cpp -o libb70moe.so \
     -Xlinker -rpath -Xlinker /opt/intel/oneapi/compiler/2026.2/lib
 ```
 
@@ -101,7 +101,7 @@ The win is proportional to how much of the model the 3090 can't hold: at `-mcs 2
 
 ```bash
 cd sycl_moe
-icpx -fsycl -O2 moe_sycl.cpp bench_layer.cpp -o bench_layer
+icpx -fsycl -O3 moe_sycl.cpp bench_layer.cpp -o bench_layer
 ./bench_layer --e 12 --rows 1 --topk 10 --iters 50         # checks against fp32 host ref
 ./bench_layer --e 12 --rows 1 --topk 10 --iters 50 --v     # + per-kernel spans/gaps
 ./bench_layer --bits 2 --hb 1 ...                          # 2.5bpw tile family (K=5)
