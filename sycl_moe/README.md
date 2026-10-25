@@ -39,6 +39,16 @@ negative-splat trap, and why short benchmark windows lie about this GPU.
   -foffload-fp32-prec-div`. Without them the device's fused mul+round and approximate
   `127/amax`-style divisions flip int8-quantization ties vs the CPU reference (visible
   as ±1 x8 steps at rounding boundaries; the `--i8trace` stage-B gate catches it).
+- `EXL3_MOE_I8SLIM=0` — lab-forbid the slim decode kernel. When every chunk carries
+  ≤4 tokens the int8 pipeline auto-selects an `F1=false` Gemv8 instantiation that drops
+  the second m8 fragment (load, DPAS, store) and a matching QuantIn that skips frag1
+  zero-fill; rows 2–4 run ~10–16% faster. acc rows 8–15 are stale on that path
+  (never read; the trace knows via `i8slim()`).
+- `EXL3_MOE_I8W=1` — lab-only 128-lane wide workgroups (8 column tiles per WG).
+  Measured ≤ 0 everywhere (weight-stream latency, not thread occupancy, binds); kept
+  as documentation of the negative result.
+- `EXL3_MOE_I8NSLU/-NSLD` — per-kernel int8 split-K overrides (1–8), applied after
+  `MOE_NSL`; used to retune the gu fill target to 136000 lanes post-MAXM8.
 - Linux (the plugin hooks are `__linux__`-only; nothing changes on other platforms)
 
 ## Build

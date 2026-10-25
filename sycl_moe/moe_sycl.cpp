@@ -426,6 +426,9 @@ struct QuantIn
     Affine* __restrict__ qsb;          // [slot][8]
     const ChunkDev* chunks;
     int k, nm, tsmul;                  // tin tslot = slot * tsmul (gateless gu rows live at j*2)
+    int f1;                            // 0 = slim pass: frag1 (rows 8..15) is never READ by
+                                       // the F1=false Gemv8, so skip its zero-fill entirely
+                                       // (rows >= m of frag0 still zero: they ARE loaded)
     sycl::local_accessor<float, 1> red;
 
     void operator()(sycl::nd_item<2> it) const
@@ -439,6 +442,7 @@ struct QuantIn
         const int kf = k / 8;
         int32_t* aout = a8 + (size_t)slot * kf * 128 + r * 8;
         if (tok >= m) {
+            if (!f1 && frag) return;   // slim: stale bytes in unread frag1 rows are fine
             for (int i = tid; i < kf * 8; i += 256) aout[(i >> 3) * 128 + (i & 7)] = 0;
             if (tid == 0) qsb[slot * 16 + r] = Affine{ 0.f, 0.f };
             return;
@@ -501,11 +505,11 @@ struct Gemv8Base
     int E, nc, nm, H, I, nfl, down, nsl;
 };
 
-template <int K2V>
+template <int K2V, int NSUB, bool F1 = true>
 struct Gemv8
 {
     Gemv8Base b;
-    sycl::local_accessor<unsigned char, 1> slab;   // 2048B: two ping-pong tiles x two 512B bands
+    sycl::local_accessor<unsigned char, 1> slab;   // 2048B x NSUB: per sub-group ping-pong bands
 
     auto get(sycl::ext::oneapi::experimental::properties_tag) const
     {
@@ -520,11 +524,18 @@ struct Gemv8
 
     void operator()(sycl::nd_item<2> it) const
     {
-        const int gid = (int)it.get_group(0);      // (nf, slice) flattened, slice-major
+        const int gid = (int)it.get_group(0);      // (nf-group, slice) flattened, slice-major
         const int slot = (int)it.get_group(1);     // gu: j*nm + lmu; down: j
-        const int tid = (int)it.get_local_id(0);   // == lane, 16 per WG
-        const int nf = gid % b.nfl;
-        const int sl = gid / b.nfl;
+        // NSUB>1: a WG carries NSUB sub-groups, each owning ONE consecutive column tile
+        // (nf). Motivation (VTune rows=1): 16-thread WGs cap thread occupancy at ~23% and
+        // every WG re-reads the same A slab rows; a fat WG schedules 8x threads per slot
+        // and hits A in L1 across its tiles. The mapping is a pure permutation of
+        // (nf, sl) -> WG, so acc layout and everything downstream is untouched.
+        const int lid = (int)it.get_local_id(0);
+        const int tid = lid & 15;                  // == lane within the sub-group
+        const int sgid = lid >> 4;
+        const int nf = (gid % (b.nfl / NSUB)) * NSUB + sgid;
+        const int sl = gid / (b.nfl / NSUB);
         const bool down = b.down != 0;
         const int j = down ? slot : slot / b.nm;
         const int lmu = down ? 0 : slot % b.nm;
@@ -545,7 +556,7 @@ struct Gemv8
 #pragma unroll
         for (int i = 0; i < NW; ++i) widx[i] = ((wb + i) % W + W) % W;
 
-        unsigned char* const slb = slab.get_pointer().get();
+        unsigned char* const slb = slab.get_pointer().get() + (size_t)sgid * 2048;
         uint32_t* const sl32 = (uint32_t*)slb;
         const int32_t* const pa0 = b.a8 + (size_t)slot * (K / 8) * 128;   // [kfrag][128] i32 (16 rows)
         const size_t row_step = (size_t)b.nfl * W;
@@ -562,9 +573,15 @@ struct Gemv8
         mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc;
         mx8::joint_matrix_fill(sg, jc, 0);
         // second m8 fragment: tokens 4..7 (rows 8..15 of the slot) ride the SAME staged
-        // B band - one weight fetch + stage serves up to 8 tokens (the MAXM=8 payoff)
+        // B band - one weight fetch + stage serves up to 8 tokens (the MAXM=8 payoff).
+        // F1=false: the SLIM kernel, host-selected when EVERY chunk has m <= 4 (decode).
+        // Frag1 A rows are never read then, so QuantIn-slim never writes them and acc
+        // rows 8..15 keep stale bytes - K34/K6 index rr = (r>>2)*8 + 2*(r&3) and r <= 3
+        // never touch them. This is the RIGHT form of the narrow-slot skip: NOTES - a
+        // runtime branch or a sibling-branch peel INSIDE the fat kernel costs the full
+        // path ~20%; a separate instantiation is free.
         mx8::joint_matrix<sycl::sub_group, int, mx8::use::accumulator, 8, 16> jc1;
-        mx8::joint_matrix_fill(sg, jc1, 0);
+        if constexpr (F1) mx8::joint_matrix_fill(sg, jc1, 0);
 
         // FOUR NAMED word sets, one group of 4 tiles per refill: loads for tiles
         // t..t+3 are all issued before tile t is consumed, the next group's loads go
@@ -637,20 +654,26 @@ struct Gemv8
                         sycl::address_space_cast<sycl::access::address_space::local_space,
                                                  sycl::access::decorated::yes>(bnd + fk * 512),
                         16 * 4);   // packed stride = N * VNNI bytes
+                    if constexpr (F1) {
 #pragma unroll
-                    for (int f = 0; f < 2; ++f) {
-                        // UNCONDITIONAL dual-fragment mad. Do NOT add a runtime narrow-slot
-                        // skip here (neither a loop `break` nor a template<bool> peel with
-                        // runtime dispatch helped): both variants cost the FULL-slot path
-                        // ~20% (E128/rows128 w8: 3605 -> 4325 break / 4389 peel) even though
-                        // they speed the narrow-only path ~22%. Production runs width-8, so
-                        // the fat path is the one that must stay straight-line.
+                        for (int f = 0; f < 2; ++f) {
+                            // UNCONDITIONAL dual-fragment mad on the fat path. Do NOT add
+                            // a runtime narrow-slot skip here: break/peel variants both
+                            // cost the full-slot path ~20% (E128/rows128 w8: 3605 -> 4325
+                            // / 4389); narrow shapes get the F1=false instantiation instead.
+                            auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                                sycl::access::decorated::yes>(
+                                (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 128 + f * 64));
+                            mx8::joint_matrix_load(sg, ja, pag, 32);
+                            if (f) mx8::joint_matrix_mad(sg, jc1, ja, jb, jc1);
+                            else   mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+                        }
+                    } else {
                         auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
                                                             sycl::access::decorated::yes>(
-                            (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 128 + f * 64));
+                            (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 128));
                         mx8::joint_matrix_load(sg, ja, pag, 32);
-                        if (f) mx8::joint_matrix_mad(sg, jc1, ja, jb, jc1);
-                        else   mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
+                        mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
                     }
                 }
             }
@@ -668,7 +691,8 @@ struct Gemv8
                                             sycl::access::decorated::yes>(
             b.acc + ((size_t)slot * b.nsl + sl) * 16 * N + nf * 16);
         mx8::joint_matrix_store(sg, jc, pcg, N, mx8::layout::row_major);
-        mx8::joint_matrix_store(sg, jc1, pcg + 8 * N, N, mx8::layout::row_major);
+        if constexpr (F1)
+            mx8::joint_matrix_store(sg, jc1, pcg + 8 * N, N, mx8::layout::row_major);
     }
 };
 
@@ -872,23 +896,54 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const int slots = nc * nm;
         Gemv8Base g8{ d_tab, w_chunk, nullptr, nullptr, E, nc, nm, H, I, 0, 0, 1 };
 
+        // DECODE SHAPE: when no chunk exceeds 4 tokens, frag1 contributes nothing and the
+        // whole pipeline runs the SLIM instantiation (see Gemv8 F1 and QuantIn f1).
+        static const int noslim_env = []{
+            const char* e = std::getenv("EXL3_MOE_I8SLIM");
+            return e && e[0] == '0';
+        }();
+        const bool slim = (maxm_rows <= 4) && !noslim_env;
+        i8_slim_ = slim ? 1 : 0;
+
         // Q1: quantize the rotated gu inputs (one WG of 256 per (slot, DPAS row))
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8R * slots}, {256, 1}),
-                QuantIn{ tin, w_a8u, qsxu, chunks, H, nm, gated ? 1 : 2, red });
+                QuantIn{ tin, w_a8u, qsxu, chunks, H, nm, gated ? 1 : 2, slim ? 0 : 1, red });
         });
 
         // K2p: gate/up DPAS gemm, one sub-group per (16-col fragment, slice, slot)
         {
             g8.a8 = w_a8u; g8.acc = accgu; g8.nfl = I / 16; g8.down = 0; g8.nsl = nsl8_gu;
-            const size_t g0 = (size_t)(I / 16) * 16 * nsl8_gu;
+            static const int wide_ok = []{
+                const char* e = std::getenv("EXL3_MOE_I8W");
+                return e && e[0] == '1';
+            }();
+            const bool wide = wide_ok && (I / 16) % 8 == 0;
+            const size_t g0 = wide ? (size_t)(I / 16 / 8) * 128 * nsl8_gu
+                                   : (size_t)(I / 16) * 16 * nsl8_gu;
             launch([&](sycl::handler& cgh) {
-                sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
+                sycl::local_accessor<unsigned char, 1> slm({wide ? 16384u : 2048u}, cgh);
+                if (slim) {
+                    switch (k2) {
+                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4, 1, false>{g8, slm}); break;
+                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<5, 1, false>{g8, slm}); break;
+                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<8, 1, false>{g8, slm}); break;
+                    }
+                    return;
+                }
+                if (wide) {
+                    switch (k2) {
+                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<4, 8>{g8, slm}); break;
+                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<5, 8>{g8, slm}); break;
+                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<8, 8>{g8, slm}); break;
+                    }
+                    return;
+                }
                 switch (k2) {
-                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4>{g8, slm}); break;
-                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<5>{g8, slm}); break;
-                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<8>{g8, slm}); break;
+                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4, 1>{g8, slm}); break;
+                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<5, 1>{g8, slm}); break;
+                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<8, 1>{g8, slm}); break;
                 }
             });
         }
@@ -996,17 +1051,39 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8R * nc}, {256, 1}),
-                QuantIn{ tind, w_a8d, qsxd, chunks, I, 1, 1, red });
+                QuantIn{ tind, w_a8d, qsxd, chunks, I, 1, 1, slim ? 0 : 1, red });
         });
         {
             g8.a8 = w_a8d; g8.acc = accd8; g8.nfl = H / 16; g8.down = 1; g8.nsl = nsl8_d;
-            const size_t g0 = (size_t)(H / 16) * 16 * nsl8_d;
+            static const int wide_ok_d = []{
+                const char* e = std::getenv("EXL3_MOE_I8W");
+                return e && e[0] == '1';
+            }();
+            const bool wide = wide_ok_d && (H / 16) % 8 == 0;
+            const size_t g0 = wide ? (size_t)(H / 16 / 8) * 128 * nsl8_d
+                                   : (size_t)(H / 16) * 16 * nsl8_d;
             launch([&](sycl::handler& cgh) {
-                sycl::local_accessor<unsigned char, 1> slm({2048}, cgh);
+                sycl::local_accessor<unsigned char, 1> slm({wide ? 16384u : 2048u}, cgh);
+                if (slim) {
+                    switch (k2) {
+                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4, 1, false>{g8, slm}); break;
+                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<5, 1, false>{g8, slm}); break;
+                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<8, 1, false>{g8, slm}); break;
+                    }
+                    return;
+                }
+                if (wide) {
+                    switch (k2) {
+                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<4, 8>{g8, slm}); break;
+                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<5, 8>{g8, slm}); break;
+                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<8, 8>{g8, slm}); break;
+                    }
+                    return;
+                }
                 switch (k2) {
-                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4>{g8, slm}); break;
-                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<5>{g8, slm}); break;
-                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<8>{g8, slm}); break;
+                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4, 1>{g8, slm}); break;
+                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<5, 1>{g8, slm}); break;
+                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<8, 1>{g8, slm}); break;
                 }
             });
         }

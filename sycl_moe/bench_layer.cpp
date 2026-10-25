@@ -184,6 +184,8 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
             for (int r = 0; r < 16 && !fails; ++r) {
                 const int t = (r >> 3) * 4 + ((r >> 1) & 3);   // 16-row slot layout
                 if (t >= m) {
+                    // slim pass: frag1 (rows 8..15) is neither written nor read - stale
+                    if (!layer.i8slim() && r >= 8) continue;
                     for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
                         const int32_t g = accgu[((size_t)slot * 16 + r) * I + cols[ci]];
                         if (g != 0) { printf("C pad slot%d r%d n%d got %d\n", slot, r, cols[ci], g); ++fails; }
@@ -400,6 +402,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
             for (int r = 0; r < 16 && !fails; ++r) {
                 const int t = (r >> 3) * 4 + ((r >> 1) & 3);   // 16-row slot layout
                 if (t >= m) {
+                    if (!layer.i8slim() && r >= 8) continue;   // slim: frag1 stale
                     for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
                         const int32_t g = accd[((size_t)j * 16 + r) * H + cols[ci]];
                         if (g != 0) { printf("F pad j%d r%d n%d got %d\n", j, r, cols[ci], g); ++fails; }

@@ -632,3 +632,37 @@ kernel (own parallel_for, no shared function), not a branch inside this one.
 Registration trap HARDENED: 120s idle did NOT prevent it (1380 t/s, layers lost); the run
 IMMEDIATELY after always registers fully (48/48, 1861). New rule: model gates run TWICE,
 scored off the second run; time gaps are not a control.
+
+## The m=1 / decode study (and the slim kernel it produced)
+
+VTune rows=1 int8 vs float spans: G2 131 vs K2 51, G5 70 vs K5 27, plus Q1+Q2 18 and
+K34i8 17 (float K34 4). m=1 DPAS wastes 15/16 A rows, pays the slab round-trip, and
+K34i8/K6i8 serialize slice sums on 6k threads. Three interventions:
+
+1. NARROW-SLOT SLIM KERNEL (SHIPPED, default on when max chunk m <= 4, EXL3_MOE_I8SLIM=0
+   lab-forces fat): Gemv8 gains template<bool F1>; F1=false drops frag1 load/mad/store
+   entirely and QuantIn(f1=0) stops zero-writing frag1 rows (acc rows 8..15 are STALE BY
+   DESIGN on slim passes - K34/K6 index rr=(r>>2)*8+2*(r&3) <= 7 for m<=4, and the trace
+   skips those pad assertions via layer.i8slim()). Selected as a SEPARATE parallel_for -
+   the correct form of the frag1 skip after the branch/peel poison saga. Sustained: rows4
+   E16 241 vs 287 (-16%), rows2 224 (was 223-229 flat), single-iter spans G2 121->79,
+   G5 65->46, Q1 12->9. rows 5-8 untouched (fat dormant), all traces bit-exact.
+2. 128-LANE WIDE WG (NSUB=8 sub-groups/WG, EXL3_MOE_I8W=1): NEGATIVE. Bit-exact, but
+   rows=1 unchanged and rows=64 -8%; the 23% thread occupancy was not the binding
+   constraint (weight-stream latency is). Kept behind the env off-switch as documentation.
+3. THE rows=1 VERDICT: int8 at m=1 stays ~25% behind float (sustained 222 vs 179) even
+   slim. The remaining delta is launch-chain + structural 8x-row waste; float remains the
+   auto choice for rows=1. Slim's payoff zone is rows 2-4 (light batching, speculative
+   decode) where int8 now runs x1.2 over float instead of ~x1.17.
+
+Measurement traps hit during this study, both real:
+- SUSTAINED-MEDIAN vs SUM-OF-SPANS at rows=1 differ by ~60us (222 vs 160): every kernel
+  boundary in the per-iter-synced chain costs ~8us of dispatch that spans do not show.
+  Do not "spend" span sums as reachable sustained time at decode shapes.
+- I "found" a 16x grid-inflation bug in the int8 gemv launches (g0 = (N/16)*16*nsl while
+  the kernel decodes nfl*nsl workgroups). IT WAS NEVER A BUG: nd_range GLOBAL sizes
+  divide by LOCAL (16) to get group counts; the *16 is the local size. "Fixing" it
+  silently amputated 15/16 of the slices - the resulting I8DUMP showing only slice 0
+  alive is what caught it. Double ghost confirmed by: nsl=1 immune, nsl>=2 broken,
+  ~40-60% missing values, pad-zeros intact. Rule: before claiming a grid bug, compute
+  groups = global/local, not global.

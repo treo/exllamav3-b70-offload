@@ -115,6 +115,7 @@ public:
     }
     // accgu/accd are [slot][nsl][16][N] slice buffers; the trace must sum slices itself.
     int i8nsl(int which) const { return which ? nsl8_d_ : nsl8_gu_; }   // 0 gu, 1 down
+    int i8slim() const { return i8_slim_; }   // 1 = fat dual-fragment kernel ran
 
     // Tier choice for a forward of `rows` token rows (EXL3_MOE_B70_INT8 override, auto =
     // rows >= 2, stream-layout only). The HOST CHUNKER must call this BEFORE grouping:
@@ -154,6 +155,7 @@ private:
     bool use8_ = false;              // tier resolved for the last forward (read by ensure_ws)
     int nm_ws_ = 1;                  // gated ? 2 : 1, cached for ensure_ws sizing
     int nsl8_gu_ = 1, nsl8_d_ = 1;   // int8 split-K degrees of the last forward
+    int i8_slim_ = 1;                // 1 = fat kernel (frag1 live); 0 = slim decode pass
     int *w_tokb = nullptr;           // rows+1
     int *w_toke = nullptr;           // rows * topk (cap by alloc size)
 
