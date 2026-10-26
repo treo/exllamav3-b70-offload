@@ -119,6 +119,10 @@ void exl3_moe_cpu_stage_experts
 // Per-phase profiling of the compute pool, reported to stdout every 512 jobs. Set once at
 // worker startup from MoeCpuTuning.cpu_prof (EXL3_MOE_CPU_PROF env).
 void exl3_moe_cpu_set_prof(bool enabled);
+
+// Whether a registered layer's jobs are routed to the B70 plugin (worker-loop profiling
+// classifies compute time by this; 0 for invalid handles, CPU-only layers, or no B70 build)
+int exl3_moe_cpu_is_b70(int64_t handle);
 // Wake helpers before the GPU payload arrives; no work or completion barrier.
 void exl3_moe_cpu_pool_prime(int threads);
 int64_t exl3_moe_cpu_pool_stress(int threads, int iters, int small, int spin);   // test hook

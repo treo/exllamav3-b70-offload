@@ -385,6 +385,34 @@ void exl3_moe_cpu_worker_run
     // Dedicated stager: consumes the stage ring so weight memcpys run concurrently with the
     // compute pool's work on the token tail. Uses its own scratch threads, never the pool.
     // stage_threads comes from the parent (MoeCpuTuning), passed through the "start" layout.
+    //
+    // Handoff profiling (EXL3_MOE_HANDOFF_PROF, or the EXL3_MOE_PROF umbrella): per-job wall
+    // times for the three segments the worker can observe -- idle gap since the previous job,
+    // spin-on-data_ready, and compute -- accumulated per layer AND per backend class (plain
+    // CPU compute vs a layer routed through the B70 plugin), plus the stager's own wait/copy
+    // time. Rolling window every 64 jobs on stdout, plus a full run summary when the parent
+    // shuts the worker down.
+    const bool hprof = getenv("EXL3_MOE_HANDOFF_PROF") != nullptr;
+    constexpr int HP_LAYERS = 256;
+    struct HpAgg
+    {
+        double spin = 0.0, comp = 0.0, comp_mx = 0.0;   // ms
+        long jobs = 0, rows = 0, empty = 0;
+    };
+    struct HpTot
+    {
+        double spin = 0.0, comp = 0.0, comp_mx = 0.0, gap = 0.0;
+        long jobs = 0, n1 = 0, nsmall = 0, nbig = 0;
+    };
+    HpAgg* hp_layer = hprof ? new HpAgg[HP_LAYERS] {} : nullptr;
+    HpTot hp_tot[2];                      // [0] = CPU-compute layers, [1] = B70 layers
+    double hp_gap = 0.0, hp_spin = 0.0, hp_comp = 0.0;
+    double hp_gap_mx = 0.0, hp_spin_mx = 0.0, hp_comp_mx = 0.0;
+    long hp_jobs = 0, hp_empty = 0, hp_assign = 0, hp_rows = 0;
+    long hp_stg = 0; double hp_stg_wait = 0.0, hp_stg_copy = 0.0, hp_stg_copy_mx = 0.0;
+    auto hp_prev_end = std::chrono::steady_clock::now();
+    auto hp_ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
+        { return std::chrono::duration<double, std::milli>(b - a).count(); };
     int stage_threads_ = stage_threads > 0 ? (int) stage_threads : 1;
     std::thread stager([&]()
     {
@@ -410,11 +438,13 @@ void exl3_moe_cpu_worker_run
 
             // Wait until the slot's previous tenant has been DMA'd out (low half of the flag, cyclically)
             uint32_t* pf = pinned_free + size_t(job.slot) * 16;
+            const auto sg0 = hprof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             while ((int32_t)(load_acquire_u32(pf) - job.prev_seq) < 0)
             {
                 if (load_acquire_u32(quit)) return;
                 cpu_pause_();
             }
+            const auto sg1 = hprof ? std::chrono::steady_clock::now() : sg0;
             exl3_moe_cpu_stage_experts(
                 static_cast<int64_t>(job.layer),
                 job.experts,
@@ -422,6 +452,13 @@ void exl3_moe_cpu_worker_run
                 wstage + size_t(job.slot) * wslot_size,
                 stage_threads_
             );
+            if (hprof)
+            {
+                const auto sg2 = std::chrono::steady_clock::now();
+                const double cc = hp_ms(sg1, sg2);
+                hp_stg_wait += hp_ms(sg0, sg1); hp_stg_copy += cc; ++hp_stg;
+                if (cc > hp_stg_copy_mx) hp_stg_copy_mx = cc;
+            }
             store_release_flag(stage_done + size_t(job.slot) * 16, job);
         }
     });
@@ -431,14 +468,6 @@ void exl3_moe_cpu_worker_run
     const size_t off_sel = align64(off_x + size_t(cap_rows) * max_hi * 2);
     const size_t off_w = align64(off_sel + size_t(cap_rows) * max_topk * 4);
     const size_t off_out = align64(off_w + size_t(cap_rows) * max_topk * 2);
-
-    // Handoff profiling (EXL3_MOE_HANDOFF_PROF): per-job wall times for the three segments the
-    // worker can observe -- idle gap since the previous job, spin-on-data_ready, and compute
-    const bool hprof = getenv("EXL3_MOE_HANDOFF_PROF") != nullptr;
-    double hp_gap = 0.0, hp_spin = 0.0, hp_comp = 0.0;
-    double hp_gap_mx = 0.0, hp_spin_mx = 0.0, hp_comp_mx = 0.0;
-    long hp_jobs = 0, hp_empty = 0, hp_assign = 0, hp_rows = 0;
-    auto hp_prev_end = std::chrono::steady_clock::now();
 
     const char* prime_env = getenv("EXL3_MOE_POOL_PRIME");
     const bool prime_pool = !prime_env || prime_env[0] != '0';
@@ -531,14 +560,24 @@ void exl3_moe_cpu_worker_run
         if (hprof)
         {
             const auto hp_t2 = std::chrono::steady_clock::now();
-            auto ms = [](auto a, auto b)
-                { return std::chrono::duration<double, std::milli>(b - a).count(); };
-            const double g = ms(hp_prev_end, hp_t0), s = ms(hp_t0, hp_t1), c = ms(hp_t1, hp_t2);
+            const double g = hp_ms(hp_prev_end, hp_t0), s = hp_ms(hp_t0, hp_t1), c = hp_ms(hp_t1, hp_t2);
             hp_gap += g; hp_spin += s; hp_comp += c;
             if (g > hp_gap_mx) hp_gap_mx = g;
             if (s > hp_spin_mx) hp_spin_mx = s;
             if (c > hp_comp_mx) hp_comp_mx = c;
             hp_prev_end = hp_t2;
+
+            // Class + layer attribution (class = where the compute actually ran: the B70
+            // plugin swallows the whole job for registered layers, see forward_raw)
+            const int cls = exl3_moe_cpu_is_b70(static_cast<int64_t>(job.layer)) ? 1 : 0;
+            HpTot& t = hp_tot[cls];
+            t.jobs++; t.spin += s; t.comp += c;
+            if (c > t.comp_mx) t.comp_mx = c;
+            if (job.rows <= 1) t.n1++; else if (job.rows <= 8) t.nsmall++; else t.nbig++;
+            HpAgg& a = hp_layer[job.layer < HP_LAYERS ? job.layer : HP_LAYERS - 1];
+            a.jobs++; a.spin += s; a.comp += c; a.rows += job.rows;
+            if (c > a.comp_mx) a.comp_mx = c;
+
             if (++hp_jobs % 64 == 0)
             {
                 printf(" -- handoff prof (%ld jobs, ms/job avg|max): gap %.3f|%.3f "
@@ -552,8 +591,56 @@ void exl3_moe_cpu_worker_run
                 hp_gap_mx = hp_spin_mx = hp_comp_mx = 0.0;
                 hp_empty = 0; hp_assign = 0; hp_rows = 0;
             }
+            if (hp_jobs % 1024 == 0)
+                printf(" -- handoff prof [%ld jobs, cumulative ms]: cpu jobs %ld comp %.1f "
+                       "(%.3f/job, max %.2f) spin %.1f | b70 jobs %ld comp %.1f (%.3f/job, "
+                       "max %.2f) spin %.1f | rows1 %ld/%ld small %ld/%ld big %ld/%ld "
+                       "| stager %ld copies %.1f ms (wait %.1f, max %.2f)\n",
+                       hp_jobs, hp_tot[0].jobs, hp_tot[0].comp, hp_tot[0].jobs ? hp_tot[0].comp / hp_tot[0].jobs : 0.0,
+                       hp_tot[0].comp_mx, hp_tot[0].spin, hp_tot[1].jobs, hp_tot[1].comp,
+                       hp_tot[1].jobs ? hp_tot[1].comp / hp_tot[1].jobs : 0.0, hp_tot[1].comp_mx,
+                       hp_tot[1].spin, hp_tot[0].n1 + hp_tot[1].n1, hp_jobs,
+                       hp_tot[0].nsmall + hp_tot[1].nsmall, hp_jobs,
+                       hp_tot[0].nbig + hp_tot[1].nbig, hp_jobs,
+                       hp_stg, hp_stg_copy, hp_stg_wait, hp_stg_copy_mx);
         }
     }
     out:;
     stager.join();
+
+    // Run summary: where the worker's wall time actually went, per backend class and per layer
+    if (hprof)
+    {
+        printf(" -- handoff SUMMARY (%ld jobs): cpu jobs %ld, b70 jobs %ld\n", hp_jobs,
+               hp_tot[0].jobs, hp_tot[1].jobs);
+        for (int cls = 0; cls < 2; ++cls)
+        {
+            const HpTot& t = hp_tot[cls];
+            if (!t.jobs) continue;
+            printf(" --   [%s] spin %.2f ms total (%.4f/job) | compute %.2f ms total "
+                   "(%.4f/job avg, %.3f max) | rows: 1 %ld, 2-8 %ld, >8 %ld\n",
+                   cls ? "b70" : "cpu", t.spin, t.spin / t.jobs, t.comp, t.comp / t.jobs,
+                   t.comp_mx, t.n1, t.nsmall, t.nbig);
+        }
+        printf(" --   [stager] %ld weight stagings, copy %.2f ms total (%.4f/job, %.3f max), "
+               "pinned-free wait %.2f ms\n", hp_stg, hp_stg_copy,
+               hp_stg ? hp_stg_copy / hp_stg : 0.0, hp_stg_copy_mx, hp_stg_wait);
+        // Top layers by total compute: the per-layer spread is what placement decisions need
+        int shown = 0;
+        for (int pass = 0; pass < HP_LAYERS && shown < 8; ++pass)
+        {
+            int best = -1;
+            for (int l = 0; l < HP_LAYERS; ++l)
+                if (hp_layer[l].jobs && (best < 0 || hp_layer[l].comp > hp_layer[best].comp)) best = l;
+            if (best < 0) break;
+            const HpAgg& a = hp_layer[best];
+            printf(" --   layer %-3d jobs %6ld rows/job %.1f spin %.3f ms comp %.3f ms "
+                   "avg %.4f max %.3f\n", best, a.jobs, (double) a.rows / a.jobs,
+                   a.spin, a.comp, a.comp / a.jobs, a.comp_mx);
+            hp_layer[best].jobs = 0;   // consume for the ranking walk
+            ++shown;
+        }
+        fflush(stdout);
+        delete[] hp_layer;
+    }
 }

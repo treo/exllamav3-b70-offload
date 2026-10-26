@@ -504,10 +504,18 @@ Print per-layer and per-batch engagement: streamed bandwidth probe result and th
 counts, streamed-vs-tail assignment split, and fused-vs-reconstruct tier split within each
 streamed batch.
 
+### `EXL3_MOE_PROF` (default: `0`)
+
+Umbrella switch for the whole CPU-offload timing stack: turns on `EXL3_MOE_CPU_PROF`,
+`EXL3_MOE_HANDOFF_PROF` (set into the environment the worker child inherits) and
+`EXL3_SPLIT_PROF` at once. Individual flags still work and override nothing.
+
 ### `EXL3_MOE_CPU_PROF` (default: `0`)
 
-Accumulate per-phase wall time in the CPU compute pool and report every 512 jobs. Enabled once
-per worker at startup.
+Accumulate per-phase wall time in the CPU compute pool (prep_gu / gemv_gu / act+prep_d /
+gemv_d / tf_d / accum, with the GEMV phases reported against their trellis byte rate) and
+report every 512 jobs. Enabled once per worker at startup. B70-routed layers skip these
+phases entirely - their time lands in the handoff profiler's compute segment, class `b70`.
 
 ### `EXL3_MOE_ARENA_DEBUG` (default: `0`)
 
@@ -817,7 +825,22 @@ errors print a notice and leave the host unpinned.
 
 ### `EXL3_MOE_HANDOFF_PROF` (default: unset)
 
-Enable GPU/CPU handoff profiling, for debug purposes. 
+Worker-loop handoff profiling: per job, the idle gap since the previous job, the spin waiting
+for the GPU to publish the staged inputs, and the compute wall time. Reported as a rolling
+window every 64 jobs and cumulatively (per backend class - plain CPU compute vs B70-plugin
+layers - per rows bucket, and per layer) every 1024 jobs plus a full `handoff SUMMARY` at
+worker shutdown. The COMPUTE_GATED path additionally counts empty jobs (no CPU-resident pick)
+and the average CPU assignment per row. The dedicated stager thread times its own pinned-free
+wait and weight-copy segments. Note: enabling it makes the empty-job scan count full selections
+(instead of short-circuiting), a slight overhead on empty jobs only.
+
+### `EXL3_SPLIT_PROF` (default: `0`)
+
+Parent-side CUDA-event brackets around the split-decode fused issue enqueue and the collect
+wait+readback (the collect bracket is the true exposed stall: it runs after the GPU's own
+expert work). Rolling percentiles every 2048 brackets with the worst layers, and a
+`split prof SUMMARY` at process exit: total bracket ms, ms/bracket, and the top layers by
+cumulative time.
 
 ## Model loading
 

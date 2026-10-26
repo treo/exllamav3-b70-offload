@@ -11,8 +11,38 @@ _split_fused = os.environ.get("EXL3_MOE_SPLIT_FUSED", "1") != "0"
 # wait+readback, reported as stream-time percentiles every ~2048 brackets. The collect
 # bracket is the true exposed stall: it runs after the GPU's own expert work, so any time
 # there is worker lateness the GPU could not hide.
-_split_prof = bool(os.environ.get("EXL3_SPLIT_PROF"))
+_split_prof = bool(os.environ.get("EXL3_SPLIT_PROF")) or bool(os.environ.get("EXL3_MOE_PROF"))
 _sprof = {"issue": [], "wait": []}
+# Run-long accumulation (survives the rolling window flushes): per kind, per layer [n, sum, max]
+_sprof_tot = {"issue": {}, "wait": {}}
+
+def _sprof_add(kind, layer, t_ms):
+    s = _sprof_tot[kind].setdefault(layer, [0, 0.0, 0.0])
+    s[0] += 1
+    s[1] += t_ms
+    if t_ms > s[2]:
+        s[2] = t_ms
+
+def _sprof_report(title):
+    for kind, rs in _sprof.items():          # absorb the unfinished rolling window
+        for l, a, b in rs:
+            if b.query():
+                _sprof_add(kind, l, a.elapsed_time(b))
+        _sprof[kind] = []
+    for kind, per in _sprof_tot.items():
+        if not per:
+            continue
+        alln = sum(s[0] for s in per.values())
+        allsum = sum(s[1] for s in per.values())
+        worst = sorted(per.items(), key = lambda kv: -kv[1][1])[:6]
+        print(f" -- split prof {title} [{kind}] {alln} brackets, {allsum:.0f} ms total, "
+              f"{allsum / max(alln, 1):.3f} ms/bracket | top layers by total: "
+              + " ".join(f"L{l}:{v:.1f}ms/{n}x,max{mx:.2f}"
+                         for l, (n, v, mx) in worst), flush = True)
+
+if _split_prof:
+    import atexit
+    atexit.register(lambda: _sprof_report("SUMMARY"))
 
 def _sprof_wrap(kind, layer, fn):
     ev0 = torch.cuda.Event(enable_timing = True)
@@ -25,6 +55,8 @@ def _sprof_wrap(kind, layer, fn):
     if kind == "wait" and len(recs) >= 2048:
         for k, rs in _sprof.items():
             ts = [(l, a.elapsed_time(b)) for l, a, b in rs if b.query()]
+            for l, t in ts:
+                _sprof_add(k, l, t)
             if not ts:
                 continue
             vals = sorted(t for _, t in ts)

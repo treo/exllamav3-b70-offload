@@ -170,7 +170,14 @@ class MoeCpuTuning:
 
         # --- debug / kill switches ---
         self.stream_debug = bool(os.environ.get("EXL3_MOE_STREAM_DEBUG"))
-        self.cpu_prof = bool(os.environ.get("EXL3_MOE_CPU_PROF"))
+        # EXL3_MOE_PROF = umbrella for the whole CPU-offload timing stack: worker phase prof
+        # (EXL3_MOE_CPU_PROF), worker handoff/ring prof incl. per-layer and B70-vs-CPU split
+        # (EXL3_MOE_HANDOFF_PROF, read by the spawned child from the inherited env), and the
+        # parent-side CUDA-event brackets (EXL3_SPLIT_PROF, block_sparse_mlp_cpu.py)
+        self.prof_all = bool(os.environ.get("EXL3_MOE_PROF"))
+        if self.prof_all:
+            os.environ.setdefault("EXL3_MOE_HANDOFF_PROF", "1")
+        self.cpu_prof = bool(os.environ.get("EXL3_MOE_CPU_PROF")) or self.prof_all
         self.memops = os.environ.get("EXL3_MOE_MEMOPS", "1") != "0"
 
 

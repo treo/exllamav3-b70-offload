@@ -3882,6 +3882,12 @@ int64_t exl3_moe_cpu_pool_stress(int threads, int iters, int small, int spin)
     return anomalies;
 }
 
+int exl3_moe_cpu_is_b70(int64_t handle)
+{
+    const MoeCpuLayer* layer = get_layer(handle);
+    return layer && layer->b70 >= 0 && b70().usable ? 1 : 0;
+}
+
 void exl3_moe_cpu_forward_raw(
     int64_t handle,
     const at::Half* x,
@@ -4138,6 +4144,7 @@ void exl3_moe_cpu_forward
 #include <torch/extension.h>
 #define NO_MOE_CPU() TORCH_CHECK(false, "CPU MoE offload (moe_mul1) is not available on this CPU architecture (x86 AVX2/AVX-512 only)")
 void exl3_moe_cpu_set_prof(bool) {}
+int exl3_moe_cpu_is_b70(int64_t) { return 0; }
 void exl3_moe_cpu_pool_prime(int) {}
 int64_t exl3_moe_cpu_pool_stress(int, int, int, int) { NO_MOE_CPU(); return 0; }
 std::pair<std::vector<int64_t>, int64_t> exl3_moe_cpu_core_order() { return { {}, 0 }; }
