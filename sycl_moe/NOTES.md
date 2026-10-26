@@ -765,3 +765,44 @@ bench E128/rows128 = 3457 us against a ~250 us distinct-expert DRAM floor (13x o
 DPAS path is latency/scheduling-bound at m8n16k32 with 8-token chunks, not bandwidth-bound.
 Closing that gap (bigger m per DPAS chain, more co-resident WGs, 128-lane groups revisited
 NOW that the pipeline is DRAM-latency-clean) is what would let hot2/invert pay off.
+
+## Native-L0 submission: feasibility PROVEN (t35/t36/t37 labs)
+
+Question: can forwards be raw ze appends on ONE immediate command list (host cost
+~2 us/append) instead of N SYCL submits (~4-6 us host each + RT bookkeeping)?
+
+Measured on this stack (CR 26.35, UR v2 adapter, oneAPI 2026.2):
+- SYCL queue submits: ~3.7 us each HOST; a 6-kernel chain + wait = 23-44 us.
+- Raw ze appends: 12-15 us for the same 6-kernel chain (+wait). Immediate command
+  lists are ALREADY the RT default on DG2+ (UR_L0_USE_IMMEDIATE_COMMANDLISTS, device
+  default PerQueue), so the delta is handler/event-pool/capture overhead, not lists.
+- level-zero-devel now installed; compile interop with -lze_loader.
+  Current ze_group_count_t = 3 fields; local size via zeKernelSetGroupSize OR the
+  ByValue launch zeCommandListAppendLaunchKernelWithArguments (args = void*[] of
+  pointers to values; NULL pParams unused there). zeModuleCreate takes hDevice (1.16+).
+
+Traps found the hard way:
+1. sycl::get_native(kernel) handles from RT-JIT bundles ACCEPT raw launches (all rc=0,
+   timestamps fire) but NEVER execute - not even a no-builtin single_task. RT-module
+   kernel handles are not for external consumption. (t35)
+2. Appends to a zeCommandListCreateImmediate list built on get_native(context) DID
+   execute kernels?? No - they FAULTED SILENTLY and later segfaulted NEO's staging
+   copies. Lesson: one list, the queue's own.
+3. WORKING COMBINATION (t36/t37): OWN module from OWN SPIR-V in the SYCL context
+   (get_native<context>) executed on the queue's own immediate list
+   (get_native<queue> variant holds ze_command_list_handle_t when in-order+immediate):
+   correct args, correct get_global_id/get_group/get_local_id, correct subgroup
+   collectives. Verified with nd_item + reduce_over_group kernels.
+
+SPV pipeline for SYCL-flavored kernels (t37, needed for joint-matrix kernels):
+  icpx -fsycl -fsycl-targets=spir64 -save-temps -c k.cpp     # device bc
+  sycl-post-link <...spir64...>.bc -ir-output-only -spec-const=native -o tl
+  llvm-spirv tl -o k.spv                                     # entries: _ZTS2nk etc.
+Entry names = mangled typeinfo of the kernel-name class, stable for a given build.
+ocloc (`-device bmg`) is the fallback for plain kernels (emits both .bin and .spv).
+
+Integration sketch (b70_lib): build-time SPV extraction of the moe_sycl kernel set ->
+embedded blob; module+kernel table at b70_init; forward = WithArguments appends on the
+queue list + one trailing signal event; SYCL remains for allocation/upload/registration.
+Estimated win: ~15-30 us/forward host-side, more if RT event pools show up in the tail;
+gate with EXL3_MOE_B70_NATIVE, verify bit-exact with the i8trace battery.
