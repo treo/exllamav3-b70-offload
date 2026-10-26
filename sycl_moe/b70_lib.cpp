@@ -35,6 +35,12 @@ struct Global
 {
     sycl::queue* q = nullptr;
     std::mutex mu;
+    // Serializes queue+buffer use of the SHARED bounce/staging memory: b70_warm runs on the
+    // child's main thread during layer registration while the worker compute thread may be
+    // running real forwards of already-registered layers (the parent's autosplit-measure
+    // forwards start mid-load). Lock order: g.mu -> exec_mu (register/update hold mu and
+    // reach warm; the forward path takes exec_mu only).
+    std::mutex exec_mu;
     std::vector<Upload*> uploads;
     bool ok = false;
     size_t budget = ~(size_t)0;  // device bytes we allow ourselves to hold
@@ -313,6 +319,7 @@ void b70_warm(int64_t handle, int rows, int max_chunks)
 {
     auto* layer = (moe_sycl::MoeSyclLayer*)(intptr_t)handle;
     if (!layer) return;
+    std::lock_guard<std::mutex> exec_lk(g.exec_mu);
     const int H = layer->params().hidden;
     std::vector<moe_sycl::ChunkDev> chunks((size_t)max_chunks);
     for (auto& c : chunks) { c = moe_sycl::ChunkDev{}; c.expert = 0; c.m = 1; }
@@ -345,6 +352,7 @@ static void forward_impl
 {
     auto* layer = (moe_sycl::MoeSyclLayer*)(intptr_t)handle;
     if (!layer) return;
+    std::lock_guard<std::mutex> exec_lk(g.exec_mu);   // shared bounce/stage + growth
     using moe_sycl::ChunkDev;
     using moe_sycl::TokenMap;
     const int E = layer->params().num_experts;
@@ -406,6 +414,7 @@ void b70_free_layer(int64_t handle)
     auto* layer = (moe_sycl::MoeSyclLayer*)(intptr_t)handle;
     if (!layer) return;
     std::lock_guard<std::mutex> lk(g.mu);
+    std::lock_guard<std::mutex> exec_lk(g.exec_mu);   // no forward may run on the dying layer
     g.by_layer.erase((const void*)(intptr_t)handle);
     delete layer;
     // note: weight uploads stay allocated (layers are freed only at teardown)
@@ -429,6 +438,7 @@ int b70_update_expert
     auto it = g.by_layer.find((const void*)(intptr_t)handle);
     if (it == g.by_layer.end()) return 1;
     Upload* u = it->second;
+    std::lock_guard<std::mutex> exec_lk(g.exec_mu);   // robust even against a violated quiesce contract
     const auto& p = layer->params();
     const int E = p.num_experts, H = p.hidden, I = p.interm;
     const int k2 = 2 * p.bits + p.hb;
