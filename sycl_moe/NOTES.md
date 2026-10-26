@@ -741,3 +741,27 @@ Verdict: prefill is limited by (a) 3090 expert GEMV + streamed recon throughput 
 (b) the 13.4 GB/s link; decode by 3090 replay overhead. Offload-path software is at its
 plateau; further gains need kernel-level work on one side (b70 prefill job 11 us/row,
 bench-side) or the lane bifurcation fix (hardware-side).
+
+## Placement-policy campaign v2: the "hot experts love B70" theory was an artifact
+
+With the honest plugin (real >64-row jobs, exec_mu, growth fix), moving hot experts to the
+worker device LOSES ~18% prefill (invert/hot2 1375-1526 vs base 1645-1882) while B70
+utilization rises 20%->30% and power 91W->111W. Campaign v1's invert "+21% prefill" was
+entirely the FATAL-refusal bug: big tail jobs returned instantly with stale slot contents,
+so the "winning" runs simply skipped the work. Decode: all policies 67-73, no separation
+(the +/-3% run-to-run noise band is real; scoring rounds matter more than spacing - sleeps
+between runs were LONGER than whole evals; cache-warm load+run is ~40 s).
+
+Why B70 loses hot work: at model shapes a prefill tail job costs ~11-13 us/ROW (~2.2
+us/pick-row) - vs the 3090's streamed reconstruct at ~1.5-2 us/pick-row once the 93 us/expert
+PCIe stage amortizes over >=11 rows. So per hot pick the 3090 path wins ~5x, and only
+overlap makes it palatable. B70 wins where picks are SPARSE (cold experts: read once,
+few rows, and crucially no PCIe at all) - which is exactly what the default placement
+gives it. Verdict: default placement is not laziness of the split, it is the economic
+optimum of the current kernel speeds.
+
+The real lever for B70 share (and utilization) is therefore KERNEL-SIDE, not placement:
+bench E128/rows128 = 3457 us against a ~250 us distinct-expert DRAM floor (13x off) - the
+DPAS path is latency/scheduling-bound at m8n16k32 with 8-token chunks, not bandwidth-bound.
+Closing that gap (bigger m per DPAS chain, more co-resident WGs, 128-lane groups revisited
+NOW that the pipeline is DRAM-latency-clean) is what would let hot2/invert pay off.
