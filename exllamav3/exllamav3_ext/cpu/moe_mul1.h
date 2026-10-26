@@ -48,6 +48,10 @@ struct MoeCpuLayer
     int activation;       // 0 = silu, 1 = gelu, 2 = relu2 (gateless), 3 = swiglu_oai
     float act_limit;      // swiglu_oai clamp
     int64_t b70 = -1;     // handle into the optional B70/SYCL plugin (EXL3_MOE_B70=1)
+    // Three-tier placement: plugin slots [0, b70n) hold real device weights (B70 tier);
+    // slots [b70n, num_experts) are arena/CPU-tier only and filtered out of B70 jobs.
+    // b70n == num_experts means the classic full registration.
+    int b70n = 0;
 };
 
 // Register a layer: per-expert tensor lists (CPU, contiguous). Returns a handle.
@@ -124,6 +128,9 @@ void exl3_moe_cpu_set_prof(bool enabled);
 // Whether a registered layer's jobs are routed to the B70 plugin (worker-loop profiling
 // classifies compute time by this; 0 for invalid handles, CPU-only layers, or no B70 build)
 int exl3_moe_cpu_is_b70(int64_t handle);
+// B70-tier slot count for a layer (0 when the layer is not B70-registered). Slots
+// [0, count) of the worker's arena order are device-resident on the B70.
+int exl3_moe_cpu_b70_slots(int64_t handle);
 
 // Dynamic placement sync: after the worker REPLACES one expert in its arena (install), this
 // re-uploads that expert to the B70 device copy of a registered layer. No-op when the layer

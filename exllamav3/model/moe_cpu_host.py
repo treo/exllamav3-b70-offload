@@ -806,7 +806,7 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
                     pending = rehome_pool.submit(rehome_experts, bg, bu, bd)
                 if pending is not None:
                     collect(pending)
-                cext.exl3_moe_cpu_make_layer(
+                lh = cext.exl3_moe_cpu_make_layer(
                     [t[0] for t in g], [t[1] for t in g], [t[2] for t in g],
                     [t[0] for t in u], [t[1] for t in u], [t[2] for t in u],
                     [t[0] for t in d], [t[1] for t in d], [t[2] for t in d],
@@ -827,8 +827,9 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
                     except Exception:
                         pass
                 # The ack carries the expert block locations (only meaningful to a parent that
-                # maps the arena)
-                conn.send(("ok", blocks if pinned else None, auxlocs if pinned else None))
+                # maps the arena) and the B70-tier slot count for three-tier routing (0 = none)
+                conn.send(("ok", blocks if pinned else None, auxlocs if pinned else None,
+                           cext.exl3_moe_cpu_b70_slots(lh)))
             elif msg[0] == "start":
                 shm_name, layout = msg[1], msg[2]
                 break
@@ -1012,6 +1013,8 @@ class MoeCpuHost:
         self.arena_registered = None
         self.layer_blocks = []
         self.layer_auxloc = []
+        # B70-tier slot count per registered layer (ack field; 0 = CPU-computed worker)
+        self.layer_b70n = []
         # Promote-on-miss transfers (see BlockSparseMLP_CPU._split_promote_step): per device a
         # stream of its own and two expert-sized staging buffers (packed and native order)
         self._promo = {}
@@ -1062,6 +1065,7 @@ class MoeCpuHost:
                 # Layer acks arrive in registration order: entry i describes specs[i]
                 self.layer_blocks.append(msg[1] if len(msg) > 1 else None)
                 self.layer_auxloc.append(msg[2] if len(msg) > 2 else None)
+                self.layer_b70n.append(msg[3] if len(msg) > 3 else 0)
                 self.acked += 1
             elif msg[0] == "chunk":
                 self._attach_chunk(msg[1], msg[2], msg[3])
@@ -1913,7 +1917,12 @@ class MoeCpuHost:
             counts1.scatter_add_(0, shifted, torch.ones_like(shifted))
             counts1_h = counts1.tolist()
             neg, counts_h = counts1_h[0], counts1_h[1:]
-            streamed = [e for e in range(E) if counts_h[e] >= st["stream_t"]]
+            # Three-tier: slots [0, b70n) are B70-device-resident; streaming them to the
+            # main GPU would steal work the B70 does locally for free (and, with the int8
+            # ring kernel, does fast). Only CPU-tier slots (>= b70n) may stream. A fully
+            # registered layer (b70n == E) streams nothing and just runs as a plain job.
+            hn = self.layer_b70n[layer_idx] if layer_idx < len(self.layer_b70n) else 0
+            streamed = [e for e in range(E) if counts_h[e] >= st["stream_t"] and e >= hn]
             if TUNING.stream_debug:
                 n_str = sum(counts_h[e] for e in streamed)
                 print(f" -- stream L{layer_idx}: rows {rows}, streamed experts "
@@ -2361,6 +2370,7 @@ class MoeCpuHost:
         self.arena_views = []
         self.layer_blocks = []
         self.layer_auxloc = []
+        self.layer_b70n = []
         self._promo = {}
         maps, self.arena_maps = self.arena_maps, []
         if maps:

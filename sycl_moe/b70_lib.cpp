@@ -29,6 +29,10 @@ struct Upload
     // Per (expert*3+cat) {trellis,suh,svh,bias} currently published in the layer's d_tab;
     // b70_update_expert frees these, re-uploads, and repoints (dynamic placement installs)
     std::vector<std::array<uint16_t*, 4>> slots;
+    // Three-tier placement: only slots [0, n_sub) own real device weights (B70 tier); the
+    // rest alias slot 0's buffers in the lookup table and are NEVER addressed by a job
+    // (the child filters sel by membership) nor updated (b70_update_expert no-ops).
+    int n_sub = 0;
 };
 
 struct Global
@@ -222,13 +226,15 @@ static int64_t register_impl
     int activation, float act_limit, int gated,
     const uint64_t* gate_trellis, const uint64_t* gate_suh, const uint64_t* gate_svh, const uint64_t* gate_bias,
     const uint64_t* up_trellis,   const uint64_t* up_suh,   const uint64_t* up_svh,   const uint64_t* up_bias,
-    const uint64_t* down_trellis, const uint64_t* down_suh, const uint64_t* down_svh, const uint64_t* down_bias
+    const uint64_t* down_trellis, const uint64_t* down_suh, const uint64_t* down_svh, const uint64_t* down_bias,
+    int n_sub
 )
 {
     if (!ensure_ctx()) return -1;
     std::lock_guard<std::mutex> lk(g.mu);
     g.uploads.push_back(new Upload());
     const int E = num_experts;
+    if (n_sub <= 0 || n_sub > E) n_sub = E;
     const int H = hidden, I = interm;
     const int pu_gu = (H / 16) * (I / 16) * 8 * (2 * bits + hb);
     const int pu_d  = (I / 16) * (H / 16) * 8 * (2 * bits + hb);
@@ -246,7 +252,7 @@ static int64_t register_impl
         sl = { (uint16_t*)m.trellis, (uint16_t*)m.suh, (uint16_t*)m.svh, (uint16_t*)m.bias };
         return true;
     };
-    for (int e = 0; e < E; ++e) {
+    for (int e = 0; e < n_sub; ++e) {
         if ((gated && !fill(gs[e], gate_trellis, gate_suh, gate_svh, gate_bias, e, pu_gu, H, I, 0)) ||
             !fill(us[e], up_trellis, up_suh, up_svh, up_bias, e, pu_gu, H, I, 1) ||
             !fill(ds[e], down_trellis, down_suh, down_svh, down_bias, e, pu_d, I, H, 2)) {
@@ -260,17 +266,74 @@ static int64_t register_impl
             return -1;
         }
     }
+    // non-members share slot 0's device buffers: a stray chunk would read finite weights
+    // instead of unmapped memory, and the table stays dense (zero kernel-side changes)
+    for (int e = n_sub; e < E; ++e) { gs[e] = gs[0]; us[e] = us[0]; ds[e] = ds[0]; }
+    g.uploads.back()->n_sub = n_sub;
     moe_sycl::LayerParams p;
     p.num_experts = E; p.hidden = H; p.interm = I; p.bits = bits; p.hb = hb;
     p.activation = activation; p.act_limit = act_limit; p.gated = gated != 0;
     auto* layer = new moe_sycl::MoeSyclLayer();
     layer->init(g.q, p, gs, us, ds);
     g.by_layer[(const void*)(intptr_t)layer] = g.uploads.back();
-    fprintf(stderr, "[b70moe] registered layer: E %d, B70 bytes so far %.2f GB\n", E, g_alloc_bytes / 1e9);
+    fprintf(stderr, "[b70moe] registered layer: E %d (B70 tier %d), B70 bytes so far %.2f GB\n",
+            E, n_sub, g_alloc_bytes / 1e9);
     // pre-size for typical handoff geometries (slot cap rows x topk)
     b70_warm((int64_t)(intptr_t)layer, 64, 1024);
     b70_warm((int64_t)(intptr_t)layer, 1, 16);
     return (int64_t)(intptr_t)layer;
+}
+
+// Three-tier variant: upload only the first n_sub experts ([0, n_sub) = the B70 tier);
+// remaining slots alias slot 0 and must never be addressed by a job (child-side filter)
+// or updated (no-op below). n_sub <= 0 = full registration.
+int64_t b70_register_layer_n
+(
+    int num_experts,
+    int hidden, int interm,
+    int bits, int hb,
+    int activation, float act_limit, int gated,
+    const uint64_t* gate_trellis, const uint64_t* gate_suh, const uint64_t* gate_svh, const uint64_t* gate_bias,
+    const uint64_t* up_trellis,   const uint64_t* up_suh,   const uint64_t* up_svh,   const uint64_t* up_bias,
+    const uint64_t* down_trellis, const uint64_t* down_suh, const uint64_t* down_svh, const uint64_t* down_bias,
+    int n_sub
+)
+{
+    if (!ensure_ctx()) return -1;
+    size_t ups0 = g.uploads.size();
+    try {
+        return register_impl(num_experts, hidden, interm, bits, hb, activation, act_limit, gated,
+            gate_trellis, gate_suh, gate_svh, gate_bias,
+            up_trellis, up_suh, up_svh, up_bias,
+            down_trellis, down_suh, down_svh, down_bias, n_sub);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[b70moe] registration threw: %s; layer stays on CPU\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "[b70moe] registration threw; layer stays on CPU\n");
+    }
+    g.dev_full = true;
+    while (g.uploads.size() > ups0) {
+        Upload* u = g.uploads.back();
+        for (uint16_t* p : u->keep) sycl::free(p, *g.q);
+        g.uploads.pop_back();
+        delete u;
+    }
+    return -1;
+}
+
+// Budget introspection for child-side auto tier sizing
+int64_t b70_budget_left()
+{
+    return (int64_t)(g.budget > g_alloc_bytes ? g.budget - g_alloc_bytes : 0);
+}
+
+int64_t b70_expert_bytes(int hidden, int interm, int bits, int hb, int gated)
+{
+    const int k2 = 2 * bits + hb;
+    const size_t gu = (size_t)(hidden / 16) * (interm / 16) * 8 * k2 * 2;
+    const size_t dn = (size_t)(interm / 16) * (hidden / 16) * 8 * k2 * 2;
+    const size_t scales = (size_t)(hidden + 2 * interm) * 2;
+    return (int64_t)(gated ? 2 * gu + dn + 3 * scales : gu + dn + 3 * scales);
 }
 
 // Any SYCL throw during upload/warm (device OOM surfaces late, often from memcpy().wait() or
@@ -293,7 +356,7 @@ int64_t b70_register_layer
         return register_impl(num_experts, hidden, interm, bits, hb, activation, act_limit, gated,
             gate_trellis, gate_suh, gate_svh, gate_bias,
             up_trellis, up_suh, up_svh, up_bias,
-            down_trellis, down_suh, down_svh, down_bias);
+            down_trellis, down_suh, down_svh, down_bias, 0);
     } catch (const std::exception& e) {
         fprintf(stderr, "[b70moe] registration threw: %s; layer stays on CPU\n", e.what());
     } catch (...) {
@@ -438,6 +501,7 @@ int b70_update_expert
     auto it = g.by_layer.find((const void*)(intptr_t)handle);
     if (it == g.by_layer.end()) return 1;
     Upload* u = it->second;
+    if (e >= u->n_sub) return 0;   // non-member slot: arena-only, nothing published on device
     std::lock_guard<std::mutex> exec_lk(g.exec_mu);   // robust even against a violated quiesce contract
     const auto& p = layer->params();
     const int E = p.num_experts, H = p.hidden, I = p.interm;

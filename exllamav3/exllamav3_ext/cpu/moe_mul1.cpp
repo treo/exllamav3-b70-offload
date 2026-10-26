@@ -85,6 +85,10 @@ struct B70Backend
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*);
     using FwdFn = int (*)(int64_t, const void*, const int32_t*, const void*, float*, int, int);
     using FreeFn = void (*)(int64_t);
+    using RegNFn = int64_t (*)(int, int, int, int, int, int, float, int,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*, int);
     using UpdFn = int (*)(int64_t, int,
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
@@ -94,6 +98,9 @@ struct B70Backend
     bool usable = false;
     InitFn init = nullptr;
     RegFn register_layer = nullptr;
+    RegNFn register_layer_n = nullptr;   // subset registration (older plugins: absent)
+    int64_t (*budget_left)() = nullptr;
+    int64_t (*expert_bytes)(int, int, int, int, int) = nullptr;
     FwdFn forward = nullptr;
     FreeFn free_layer = nullptr;
     UpdFn update = nullptr;
@@ -115,6 +122,9 @@ struct B70Backend
         forward = (FwdFn)dlsym(h, "b70_forward");
         free_layer = (FreeFn)dlsym(h, "b70_free_layer");
         update = (UpdFn)dlsym(h, "b70_update_expert");   // optional symbol (older plugins: no dyn sync)
+        register_layer_n = (RegNFn)dlsym(h, "b70_register_layer_n");
+        budget_left = (int64_t (*)())dlsym(h, "b70_budget_left");
+        expert_bytes = (int64_t (*)(int, int, int, int, int))dlsym(h, "b70_expert_bytes");
         usable = init && register_layer && forward && free_layer && init() == 0;
         if (!usable) fprintf(stderr, "[b70] plugin present but unusable; falling back to CPU\n");
 #endif
@@ -3806,15 +3816,39 @@ int64_t exl3_moe_cpu_make_layer
         ptrs(up_trellis, ut);   ptrs(up_suh, us);   ptrs(up_svh, uv);   ptrs(up_bias, ub);
         ptrs(down_trellis, dt); ptrs(down_suh, ds2); ptrs(down_svh, dv); ptrs(down_bias, db);
         const bool gated2 = !gate_trellis.empty();
-        const int64_t h = b70().register_layer(
-            (int)E2, layer->hidden_size, layer->interm_size,
-            layer->ups[0].bits, layer->ups[0].hb,
-            layer->activation, layer->act_limit, gated2 ? 1 : 0,
-            gated2 ? gt.data() : nullptr, gated2 ? gs.data() : nullptr, gated2 ? gv.data() : nullptr,
-            gated2 && !gb2.empty() ? gb2.data() : nullptr,
-            ut.data(), us.data(), uv.data(), !ub.empty() ? ub.data() : nullptr,
-            dt.data(), ds2.data(), dv.data(), !db.empty() ? db.data() : nullptr);
-        if (h >= 0) layer->b70 = h;
+        // B70-tier size: EXL3_MOE_B70_SUB = integer slot count, or a fraction in (0,1] of
+        // the worker slice. 0/unset = full registration (classic behaviour). With a subset,
+        // slots [0, n_sub) (hottest by the seeded arena order) stay device-resident while
+        // the coldest slots of every layer fall back to CPU/RAM compute - the three-tier
+        // shape, spread across all layers instead of whole layers.
+        int n_sub = (int)E2;
+        const char* sb = getenv("EXL3_MOE_B70_SUB");
+        if (sb && sb[0] && b70().register_layer_n)
+        {
+            double v = atof(sb);
+            n_sub = (v > 0.0 && v < 1.0) ? (int)(v * (double)E2) : (int)v;
+            n_sub = std::max(1, std::min((int)E2, n_sub));
+        }
+        else if (sb && sb[0] && !b70().register_layer_n)
+            fprintf(stderr, "[b70] plugin lacks subset registration; using full layer\n");
+        const int64_t h = n_sub < (int)E2 && b70().register_layer_n
+            ? b70().register_layer_n(
+                (int)E2, layer->hidden_size, layer->interm_size,
+                layer->ups[0].bits, layer->ups[0].hb,
+                layer->activation, layer->act_limit, gated2 ? 1 : 0,
+                gated2 ? gt.data() : nullptr, gated2 ? gs.data() : nullptr, gated2 ? gv.data() : nullptr,
+                gated2 && !gb2.empty() ? gb2.data() : nullptr,
+                ut.data(), us.data(), uv.data(), !ub.empty() ? ub.data() : nullptr,
+                dt.data(), ds2.data(), dv.data(), !db.empty() ? db.data() : nullptr, n_sub)
+            : b70().register_layer(
+                (int)E2, layer->hidden_size, layer->interm_size,
+                layer->ups[0].bits, layer->ups[0].hb,
+                layer->activation, layer->act_limit, gated2 ? 1 : 0,
+                gated2 ? gt.data() : nullptr, gated2 ? gs.data() : nullptr, gated2 ? gv.data() : nullptr,
+                gated2 && !gb2.empty() ? gb2.data() : nullptr,
+                ut.data(), us.data(), uv.data(), !ub.empty() ? ub.data() : nullptr,
+                dt.data(), ds2.data(), dv.data(), !db.empty() ? db.data() : nullptr);
+        if (h >= 0) { layer->b70 = h; layer->b70n = n_sub; }
         else fprintf(stderr, "[b70] layer registration failed; this layer stays on CPU\n");
     }
 
@@ -3935,6 +3969,12 @@ int exl3_moe_cpu_is_b70(int64_t handle)
     return layer && layer->b70 >= 0 && b70().usable ? 1 : 0;
 }
 
+int exl3_moe_cpu_b70_slots(int64_t handle)
+{
+    const MoeCpuLayer* layer = get_layer(handle);
+    return layer && layer->b70 >= 0 && b70().usable ? layer->b70n : 0;
+}
+
 void exl3_moe_cpu_forward_raw(
     int64_t handle,
     const at::Half* x,
@@ -3947,11 +3987,42 @@ void exl3_moe_cpu_forward_raw(
 )
 {
     const MoeCpuLayer* layer = get_layer(handle);
+    bool b70_add = false;
+    static thread_local std::vector<int32_t> t_sel_a, t_sel_b;
+    static thread_local std::vector<float> t_scratch;
     if (layer->b70 >= 0 && b70().usable) {
-        if (b70().forward(layer->b70, x, sel, wts, out, rows, topk) == 0) return;
-        // device-side failure (typically launch-time OOM): pin this layer to the CPU path
-        fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
-        const_cast<MoeCpuLayer*>(layer)->b70 = -1;
+        const int bn = layer->b70n > 0 ? layer->b70n : (int)layer->num_experts;
+        const int nsel = rows * topk;
+        int nm = 0, nc = 0;
+        for (int i = 0; i < nsel; ++i) { const int32_t v = sel[i]; if (v >= 0) { if (v < bn) ++nm; else ++nc; } }
+        if (nm > 0 && nc == 0) {
+            if (b70().forward(layer->b70, x, sel, wts, out, rows, topk) == 0) return;
+            // device-side failure (typically launch-time OOM): pin this layer to the CPU path
+            fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
+            const_cast<MoeCpuLayer*>(layer)->b70 = -1;
+        } else if (nm > 0) {
+            // Mixed job: B70-tier assignments run on the device, CPU-tier assignments run
+            // below, and the contributions are merged at the end. -1 = "not mine" is the
+            // skip convention both sides already honour (parent-owned entries arrive this
+            // way on fused jobs), so each half needs no weight fudging.
+            t_sel_a.resize(nsel); t_sel_b.resize(nsel);
+            for (int i = 0; i < nsel; ++i) {
+                const int32_t v = sel[i];
+                t_sel_a[i] = (v >= 0 && v < bn) ? v : -1;
+                t_sel_b[i] = (v >= bn) ? v : -1;
+            }
+            t_scratch.resize((size_t)rows * layer->hidden_size);
+            if (b70().forward(layer->b70, x, t_sel_a.data(), wts, t_scratch.data(), rows, topk) == 0)
+            {
+                b70_add = true;
+                sel = t_sel_b.data();   // consumed by the grouping below; no nested forwards
+            }
+            else
+            {
+                fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
+                const_cast<MoeCpuLayer*>(layer)->b70 = -1;
+            }
+        }
     }
     const int m_total = rows;
     const int top_k = topk;
@@ -4135,6 +4206,13 @@ void exl3_moe_cpu_forward_raw(
                phase_us[4] / prof_jobs, phase_us[5] / prof_jobs);
         fflush(stdout);
     }
+    if (b70_add)
+    {
+        // merge the B70-tier contribution; the CPU pass zero-initialised out, so plain add
+        float* sp = t_scratch.data();
+        const size_t nout = static_cast<size_t>(m_total) * layer->hidden_size;
+        for (size_t i = 0; i < nout; ++i) out[i] += sp[i];
+    }
 }
 
 void exl3_moe_cpu_forward
@@ -4192,6 +4270,7 @@ void exl3_moe_cpu_forward
 #define NO_MOE_CPU() TORCH_CHECK(false, "CPU MoE offload (moe_mul1) is not available on this CPU architecture (x86 AVX2/AVX-512 only)")
 void exl3_moe_cpu_set_prof(bool) {}
 int exl3_moe_cpu_is_b70(int64_t) { return 0; }
+int exl3_moe_cpu_b70_slots(int64_t) { return 0; }
 void exl3_moe_cpu_pool_prime(int) {}
 int64_t exl3_moe_cpu_pool_stress(int, int, int, int) { NO_MOE_CPU(); return 0; }
 std::pair<std::vector<int64_t>, int64_t> exl3_moe_cpu_core_order() { return { {}, 0 }; }

@@ -204,6 +204,12 @@ class _PromoteState:
         # with the host confined to its reserved cores beside the worker's pinned threads
         # (EXL3_MOE_HOST_CORES) that region costs tens of milliseconds
         self.first = np.array([m.cpu_split_first for m in self.modules], dtype = np.int64).reshape(n, 1)
+        # B70-tier slot count per module: misses on B70-resident slots are NOT promotion
+        # candidates - the device computes them locally, and promoting one would steal
+        # that work onto the main GPU while churning a 3090 slot and a device upload
+        self.b70n = np.array([
+            m.cpu_host.layer_b70n[m.cpu_layer_idx] if m.cpu_layer_idx < len(m.cpu_host.layer_b70n) else 0
+            for m in self.modules], dtype = np.int64).reshape(n, 1)
         self.mp = np.full((n, e), 1 << 30, dtype = np.int64)
         for i, m in enumerate(self.modules):
             self.mp[i, :m.num_experts] = m._split_mp
@@ -293,7 +299,7 @@ def _split_promote_step(ip, modules, rows):
         quiet = resident & ~routed & ~ps.busy                 # demotion candidates
         inf = np.full(ps.prev.shape, np.inf, dtype = np.float32)
         victim = np.maximum(np.where(quiet, ps.prev, inf).min(axis = 1), 1.0)   # [n]
-        misses = routed & ~resident & ~ps.busy
+        misses = routed & ~resident & ~ps.busy & ((ps.mp - ps.first) >= ps.b70n)
         if debug:
             ps.stats["routed"] += int(routed.sum())
             ps.stats["missed"] += int((routed & ~resident).sum())
