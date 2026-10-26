@@ -15,6 +15,8 @@
 #include <mutex>
 #include <exception>
 #include <vector>
+#include <array>
+#include <unordered_map>
 #include "moe_sycl.hpp"
 using moe_sycl::g_alloc_bytes;
 
@@ -23,6 +25,9 @@ namespace {
 struct Upload
 {
     std::vector<uint16_t*> keep;   // device allocations owned here
+    // Per (expert*3+cat) {trellis,suh,svh,bias} currently published in the layer's d_tab;
+    // b70_update_expert frees these, re-uploads, and repoints (dynamic placement installs)
+    std::vector<std::array<uint16_t*, 4>> slots;
 };
 
 struct Global
@@ -33,6 +38,7 @@ struct Global
     bool ok = false;
     size_t budget = ~(size_t)0;  // device bytes we allow ourselves to hold
     bool dev_full = false;       // a registration failed; stop trying (CPU covers the rest)
+    std::unordered_map<const void*, Upload*> by_layer;   // MoeSyclLayer* -> its Upload
 };
 
 Global g;
@@ -66,7 +72,9 @@ bool ensure_ctx()
         // Leave a fat margin for scratch pools, queue/page-table allocations and driver
         // bookkeeping; running right up to physical VRAM makes LAUNCHES fault asynchronously
         // with UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY instead of failing an allocation cleanly.
-        double frac = 0.70;
+        // 0.82 fits 384-of-512 expert placement on a 32 GB card (23.9 GB weights) with
+        // ~5 GB of driver/workspace margin; 0.70 used to refuse the last layers outright
+        double frac = 0.82;
         if (const char* fb = getenv("EXL3_MOE_B70_BUDGET")) { double v = atof(fb); if (v > 0.05 && v < 0.98) frac = v; }
         g.budget = (size_t)(g.q->get_device().get_info<sycl::info::device::global_mem_size>() * frac);
         g.ok = true;
@@ -89,6 +97,23 @@ const uint16_t* upload_trellis(const uint16_t* host, size_t n_u16, int K2)
     g_alloc_bytes += tmp.size() * 4;                  // wait() still rolls back cleanly
     g.q->memcpy(p, tmp.data(), tmp.size() * 4).wait();
     return (const uint16_t*)p;
+}
+
+const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required);
+
+// One expert matrix: upload trellis (repacked native->stream) + scales + optional bias.
+// Shared by registration and the dynamic-placement update path. NOTE the keep push targets
+// the CURRENT back Upload - during b70_update_expert that is the last-registered layer's
+// list, whose entries are never individually freed (teardown keeps weights by design), so
+// the extra record is inert; the authoritative per-expert tracking is Upload::slots.
+bool fill_one(moe_sycl::MatrixSrc& m, const uint64_t* tr, const uint64_t* suh,
+              const uint64_t* svh, const uint64_t* bias, int e, int tri_sz, int k, int n, int k2)
+{
+    m.trellis = upload_trellis((const uint16_t*)tr[e], tri_sz, k2);
+    m.suh = (const uint16_t*)upload_u16((const uint16_t*)suh[e], (size_t)k, true);
+    m.svh = (const uint16_t*)upload_u16((const uint16_t*)svh[e], (size_t)n, true);
+    m.bias = bias && bias[e] ? (const uint16_t*)upload_u16((const uint16_t*)bias[e], (size_t)n, true) : nullptr;
+    return m.trellis && m.suh && m.svh;
 }
 
 const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
@@ -151,19 +176,23 @@ static int64_t register_impl
     const int pu_gu = (H / 16) * (I / 16) * 8 * (2 * bits + hb);
     const int pu_d  = (I / 16) * (H / 16) * 8 * (2 * bits + hb);
     std::vector<moe_sycl::MatrixSrc> gs(E), us(E), ds(E);
+    g.uploads.back()->slots.assign((size_t)E * 3, {});
     auto fill = [&](moe_sycl::MatrixSrc& m, const uint64_t* tr, const uint64_t* suh,
-                    const uint64_t* svh, const uint64_t* bias, int e, int tri_sz, int k, int n) {
+                    const uint64_t* svh, const uint64_t* bias, int e, int tri_sz, int k, int n,
+                    int cat) {
         m.trellis = upload_trellis((const uint16_t*)tr[e], tri_sz, 2 * bits + hb);
         m.suh = (const uint16_t*)upload_u16((const uint16_t*)suh[e], (size_t)k, true);
         m.svh = (const uint16_t*)upload_u16((const uint16_t*)svh[e], (size_t)n, true);
         m.bias = bias && bias[e] ? (const uint16_t*)upload_u16((const uint16_t*)bias[e], (size_t)n, true) : nullptr;
         if (!m.trellis || !m.suh || !m.svh) return false;
+        std::array<uint16_t*, 4>& sl = g.uploads.back()->slots[(size_t)e * 3 + cat];
+        sl = { (uint16_t*)m.trellis, (uint16_t*)m.suh, (uint16_t*)m.svh, (uint16_t*)m.bias };
         return true;
     };
     for (int e = 0; e < E; ++e) {
-        if ((gated && !fill(gs[e], gate_trellis, gate_suh, gate_svh, gate_bias, e, pu_gu, H, I)) ||
-            !fill(us[e], up_trellis, up_suh, up_svh, up_bias, e, pu_gu, H, I) ||
-            !fill(ds[e], down_trellis, down_suh, down_svh, down_bias, e, pu_d, I, H)) {
+        if ((gated && !fill(gs[e], gate_trellis, gate_suh, gate_svh, gate_bias, e, pu_gu, H, I, 0)) ||
+            !fill(us[e], up_trellis, up_suh, up_svh, up_bias, e, pu_gu, H, I, 1) ||
+            !fill(ds[e], down_trellis, down_suh, down_svh, down_bias, e, pu_d, I, H, 2)) {
             // roll back this layer's device allocations and fall back to CPU for it
             fprintf(stderr, "[b70moe] registration out of device memory; layer stays on CPU\n");
             g.dev_full = true;
@@ -179,6 +208,7 @@ static int64_t register_impl
     p.activation = activation; p.act_limit = act_limit; p.gated = gated != 0;
     auto* layer = new moe_sycl::MoeSyclLayer();
     layer->init(g.q, p, gs, us, ds);
+    g.by_layer[(const void*)(intptr_t)layer] = g.uploads.back();
     fprintf(stderr, "[b70moe] registered layer: E %d, B70 bytes so far %.2f GB\n", E, g_alloc_bytes / 1e9);
     // pre-size for typical handoff geometries (slot cap rows x topk)
     b70_warm((int64_t)(intptr_t)layer, 64, 1024);
@@ -349,8 +379,64 @@ void b70_free_layer(int64_t handle)
     auto* layer = (moe_sycl::MoeSyclLayer*)(intptr_t)handle;
     if (!layer) return;
     std::lock_guard<std::mutex> lk(g.mu);
+    g.by_layer.erase((const void*)(intptr_t)handle);
     delete layer;
     // note: weight uploads stay allocated (layers are freed only at teardown)
+}
+
+// Dynamic placement sync: the worker replaced expert `e` of this layer in its arena
+// (install); re-upload it and repoint the device table so B70 jobs never run on stale
+// weights. Must be called with the layer quiesced. 0 = ok; nonzero = the new tensors could
+// not be uploaded (slot keeps its old content; the caller must demote the layer to CPU).
+int b70_update_expert
+(
+    int64_t handle, int e,
+    const uint64_t* gate_trellis, const uint64_t* gate_suh, const uint64_t* gate_svh, const uint64_t* gate_bias,
+    const uint64_t* up_trellis,   const uint64_t* up_suh,   const uint64_t* up_svh,   const uint64_t* up_bias,
+    const uint64_t* down_trellis, const uint64_t* down_suh, const uint64_t* down_svh, const uint64_t* down_bias
+)
+{
+    auto* layer = (moe_sycl::MoeSyclLayer*)(intptr_t)handle;
+    if (!layer || e < 0 || e >= layer->params().num_experts) return 1;
+    std::lock_guard<std::mutex> lk(g.mu);
+    auto it = g.by_layer.find((const void*)(intptr_t)handle);
+    if (it == g.by_layer.end()) return 1;
+    Upload* u = it->second;
+    const auto& p = layer->params();
+    const int E = p.num_experts, H = p.hidden, I = p.interm;
+    const int k2 = 2 * p.bits + p.hb;
+    const int pu_gu = (H / 16) * (I / 16) * 8 * k2;
+    const int pu_d  = (I / 16) * (H / 16) * 8 * k2;
+    // the thirteen pointer arrays carry ONE expert (index 0); e selects the layer slot
+    moe_sycl::MatrixSrc nm[3];
+    if ((p.gated && !fill_one(nm[0], gate_trellis, gate_suh, gate_svh, gate_bias, 0, pu_gu, H, I, k2)) ||
+        !fill_one(nm[1], up_trellis, up_suh, up_svh, up_bias, 0, pu_gu, H, I, k2) ||
+        !fill_one(nm[2], down_trellis, down_suh, down_svh, down_bias, 0, pu_d, I, H, k2))
+    {
+        // partial upload: free the just-allocated pieces and undo their budget accounting
+        const size_t tb = (size_t)pu_gu * 2, db = (size_t)pu_d * 2;
+        for (int c = 0; c < 3; ++c)
+        {
+            const bool isg = c < 2;
+            uint16_t* x[4] = { (uint16_t*)nm[c].trellis, (uint16_t*)nm[c].suh,
+                               (uint16_t*)nm[c].svh, (uint16_t*)nm[c].bias };
+            size_t by[4] = { isg ? tb : db, (size_t)H * 2, (size_t)I * 2, (size_t)I * 2 };
+            if (c == 2) { by[1] = (size_t)I * 2; by[2] = (size_t)H * 2; by[3] = (size_t)H * 2; }
+            for (int f = 0; f < 4; ++f)
+                if (x[f]) { sycl::free(x[f], *g.q); g_alloc_bytes -= by[f]; }
+        }
+        return 1;
+    }
+    for (int c = 0; c < 3; ++c)
+    {
+        std::array<uint16_t*, 4>& sl = u->slots[(size_t)e * 3 + c];
+        for (uint16_t* old : sl) if (old) sycl::free(old, *g.q);      // quiesced: safe
+        sl = { (uint16_t*)nm[c].trellis, (uint16_t*)nm[c].suh,
+               (uint16_t*)nm[c].svh, (uint16_t*)nm[c].bias };
+        for (uint16_t* x : sl) if (x) u->keep.push_back(x);
+        layer->update_expert(c, e, nm[c]);
+    }
+    return 0;
 }
 
 } // extern "C"

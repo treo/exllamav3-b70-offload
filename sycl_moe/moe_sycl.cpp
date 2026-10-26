@@ -95,6 +95,19 @@ void MoeSyclLayer::init(sycl::queue* q, const LayerParams& p,
     q->memcpy(d_tab, tab.data(), tab.size() * sizeof(uintptr_t)).wait();
 }
 
+// Swap-in for dynamic placement (see hpp): four table entries, one small async memcpy each,
+// waited before return. Jobs must be quiesced; the next forward's table load sees the new
+// pointers (d_tab is read at kernel time, never cached host-side).
+void MoeSyclLayer::update_expert(int cat, int e, const MatrixSrc& m)
+{
+    const int E = P.num_experts;
+    const uintptr_t ent[4] = { (uintptr_t)m.trellis, (uintptr_t)m.suh,
+                               (uintptr_t)m.svh, (uintptr_t)m.bias };
+    for (int f = 0; f < 4; ++f)
+        Q->memcpy(d_tab + ((f * 3 + cat) * E) + e, &ent[f], sizeof(uintptr_t));
+    Q->wait();
+}
+
 MoeSyclLayer::~MoeSyclLayer()
 {
     auto freep = [&](auto*& p) { if (p) { sycl::free(p, *Q); p = nullptr; } };

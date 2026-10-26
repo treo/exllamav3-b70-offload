@@ -658,6 +658,23 @@ experts instead of the checkpoint's arbitrary head. A profile from a different w
 what the default placement costs anyway, and the map adapts from there. `EXL3_MOE_CPU_SPLIT_STATS`
 (an explicit stats file in the same per-layer format) takes precedence.
 
+### `EXL3_MOE_CPU_SWAP_INVERT` / `EXL3_MOE_CPU_SWAP_POLICY=hot2` (default: unset)
+
+Alternative placement directions for the periodic swap sweep, both aimed at the two-device
+(B70 worker) shape where the worker keeps its whole expert slice in LOCAL VRAM - a hot expert
+there costs no PCIe streaming at all, while on the main GPU slice a hot expert beyond the
+resident set must have its weights DMA'd in per chunk (`EXL3_MOE_STREAM_T`).
+`EXL3_MOE_CPU_SWAP_INVERT=1` moves experts that went hot on the GPU side to the worker (and
+cold ones back); `EXL3_MOE_CPU_SWAP_POLICY=hot2` splits the hot set by popularity-rank parity,
+so roughly half the hot picks stay device-local on each side. Both need dynamic placement
+(`--moe_cpu_split` without `EXL3_MOE_CPU_SWAP=0`); pair them with a high
+`EXL3_MOE_STREAM_T` so the streamed path does not drag the worker-side hot experts back over
+PCIe. When the worker computes on a registered B70, installs re-upload the replaced expert to
+the device (`b70_update_expert`) - layers whose update fails are pinned to the CPU path.
+Sweeps cost ~2.5-3 ms per install (checkpoint read + arena copy + device upload) and quiesce
+the pipeline: let placement converge in a warmup run, then steady-state with
+`EXL3_MOE_CPU_SWAP_MAX=0` so measurement windows stay churn-free.
+
 ### `EXL3_MOE_CPU_PROMOTE_VERIFY` (default: unset)
 
 Debug: after every landed transfer, read the expert back and compare it with the checkpoint (a

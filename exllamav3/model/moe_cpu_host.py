@@ -842,9 +842,14 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
 
         def install(li, ei, keys):
             """Replace expert ei of layer li with the checkpoint tensors at `keys` (one key
-            per projection, gate omitted for gateless layers), in place in the arena."""
+            per projection, gate omitted for gateless layers), in place in the arena. When
+            the layer is registered on the B70, the same tensors are re-uploaded to its
+            DEVICE copy afterwards - without that sync the plugin would keep computing on
+            the demoted expert's weights for any future pick of this slot. The g_layers
+            handle equals the registration order, which is `li` (layers arrive in order)."""
             views = layer_views[li]
             projs = views if len(keys) == 3 else views[1:]
+            got = []
             for key, plist in zip(keys, projs):
                 v_tr, v_suh, v_svh, v_bias = plist[ei]
                 new = stc.get_tensor(key + ".trellis", cpu)
@@ -854,10 +859,21 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
                     _copy_repacked(v_tr, new, grp, cext.exl3_moe_cpu_planar_layout(new.shape[2] / 16.0))
                 else:
                     v_tr.copy_(new)
-                v_suh.copy_(stc.get_tensor(key + ".suh", cpu, float2half = True))
-                v_svh.copy_(stc.get_tensor(key + ".svh", cpu, float2half = True))
+                t_suh = stc.get_tensor(key + ".suh", cpu, float2half = True)
+                t_svh = stc.get_tensor(key + ".svh", cpu, float2half = True)
+                t_b = stc.get_tensor(key + ".bias", cpu, float2half = True) if v_bias is not None else None
+                v_suh.copy_(t_suh)
+                v_svh.copy_(t_svh)
                 if v_bias is not None:
-                    v_bias.copy_(stc.get_tensor(key + ".bias", cpu, float2half = True))
+                    v_bias.copy_(t_b)
+                got.append((new, t_suh, t_svh, t_b))
+            if len(got) == 3:
+                (gtr, gsuh, gsvh, gb), (utr, usuh, usvh, ub), (dtr, dsuh, dsvh, db) = got
+            else:
+                (gtr, gsuh, gsvh, gb) = (None, None, None, None)
+                (utr, usuh, usvh, ub), (dtr, dsuh, dsvh, db) = got
+            cext.exl3_moe_cpu_b70_update(li, ei, gtr, gsuh, gsvh, gb,
+                                         utr, usuh, usvh, ub, dtr, dsuh, dsvh, db)
 
         # The compute loop runs on its own thread (worker_run releases the GIL); the main
         # thread keeps serving the pipe for runtime installs

@@ -69,6 +69,10 @@ class MoeSyclLayer
 {
 public:
     // MatrixSrc pointers are DEVICE pointers owned by the caller, alive for the layer's life.
+    // Dynamic placement: repoint one expert's device weights (cat 0 gate, 1 up, 2 down) to
+    // a NEW device-resident MatrixSrc. Requires a quiesced layer (installs run after a full
+    // stream sync). The CALLER owns freeing the previous allocation.
+    void update_expert(int cat, int e, const MatrixSrc& m);
     void init(sycl::queue* q, const LayerParams& p, const std::vector<MatrixSrc>& gates,
               const std::vector<MatrixSrc>& ups, const std::vector<MatrixSrc>& downs);
     ~MoeSyclLayer();

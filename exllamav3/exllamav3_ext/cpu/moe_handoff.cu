@@ -595,7 +595,7 @@ void exl3_moe_cpu_worker_run
                 hp_gap_mx = hp_spin_mx = hp_comp_mx = 0.0;
                 hp_empty = 0; hp_assign = 0; hp_rows = 0;
             }
-            if (hp_jobs % 1024 == 0)
+            if (hp_jobs % 1024 == 0) {
                 printf(" -- handoff prof [%ld jobs, cumulative ms]: cpu jobs %ld comp %.1f "
                        "(%.3f/job, max %.2f) spin %.1f | b70 jobs %ld comp %.1f (%.3f/job, "
                        "max %.2f) spin %.1f | rows1 %ld/%ld small %ld/%ld big %ld/%ld "
@@ -618,6 +618,7 @@ void exl3_moe_cpu_worker_run
                            t.nbig ? t.compb / t.nbig : 0.0,
                            t.rows_big ? t.compb * 1000.0 / t.rows_big : 0.0);
                 }
+            }
         }
     }
     out:;

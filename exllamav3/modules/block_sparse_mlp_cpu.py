@@ -1022,14 +1022,64 @@ class BlockSparseMLP_CPU:
             * float(hist.sum()) / self.num_experts
         head = [(float(hist[r]), r) for r in range(self.num_experts) if int(mp[r]) < first]
         tail = [(float(hist[r]), r) for r in range(self.num_experts) if int(mp[r]) >= first]
-        head.sort()
-        tail.sort(reverse = True)
+        # EXL3_MOE_CPU_SWAP_POLICY=hot2 splits the HOT set between the devices by rank
+        # parity: even-ranked popular experts stay (or move to) the GPU side, odd-ranked
+        # ones move to the worker side - where a registered B70 keeps them in LOCAL VRAM,
+        # so prefill needs no PCIe weight streaming for them and decode still finds half
+        # the hot picks device-local. GPU slots left over hold the coldest experts.
+        policy = os.environ.get("EXL3_MOE_CPU_SWAP_POLICY", "")
         nswaps = 0
-        for (c_cold, r_cold), (c_hot, r_hot) in zip(head, tail):
-            if nswaps >= budget or c_hot < max(hyst * max(c_cold, 1.0), floor):
-                break
-            if self._split_swap_experts(r_cold, r_hot, mp):
-                nswaps += 1
+        if policy == "hot2":
+            cnt = {r: float(hist[r]) for r in range(self.num_experts)}
+            order = sorted(range(self.num_experts), key = lambda r: -cnt[r])
+            hot = [r for r in order if cnt[r] >= floor]
+            want_gpu = {r for i, r in enumerate(hot) if i % 2 == 0}
+            in_gpu = [r for r in range(self.num_experts) if int(mp[r]) < first]
+            excess = [r for r in in_gpu if r not in want_gpu and cnt[r] >= floor]   # hot that belongs worker-side
+            excess.sort(key = lambda r: -cnt[r])
+            need = [r for r in want_gpu if int(mp[r]) >= first]                      # hot-even stranded worker-side
+            need.sort(key = lambda r: -cnt[r])
+            cold_w = [r for r in order if cnt[r] < floor and int(mp[r]) >= first]    # coldest worker-side fillers
+            swaps = list(zip(excess, need))                                          # straight rank repair
+            swaps += [(excess[i], cold_w[i]) for i in range(len(need), len(excess))
+                      if i < len(cold_w)]                                            # fill vacated GPU slots coldest-first
+            for r_gpu, r_want in swaps[:budget]:
+                if cnt[r_want] * hyst < cnt[r_gpu] and cnt[r_gpu] < floor * hyst:
+                    continue   # neither direction is confidently profitable
+                if self._split_swap_experts(r_gpu, r_want, mp):
+                    nswaps += 1
+            if nswaps:
+                if os.environ.get("EXL3_MOE_CPU_SWAP_VERIFY"):
+                    assert mp.sort().values.equal(torch.arange(self.num_experts)), \
+                        f"{self.key}: placement map is not a permutation after sweep"
+                self._split_map.copy_(mp.to(self._split_map.device))
+            self._split_hist.mul_(0.5)
+            return nswaps
+        # EXL3_MOE_CPU_SWAP_INVERT=1 reverses the direction: GPU-resident experts that got
+        # HOT move to the worker slots vacated by cold ones. This is the B70 shape - the
+        # worker device holds its whole expert set in local VRAM, so hot experts (many rows
+        # per weight read) are worth multiples more there than on the streaming main GPU,
+        # while cold experts cost the main GPU nothing extra. Same primitive, opposite pairs
+        invert = bool(os.environ.get("EXL3_MOE_CPU_SWAP_INVERT"))
+        if invert:
+            head.sort(reverse = True)     # hottest GPU-resident first
+            tail.sort()                   # coldest worker-resident first
+            for (c_hot_gpu, r_hot_gpu), (c_cold_w, r_cold_w) in zip(head, tail):
+                if nswaps >= budget or c_hot_gpu < max(hyst * max(c_cold_w, 1.0), floor):
+                    break
+                # same primitive, arguments mirrored: the cold worker expert takes over the
+                # hot GPU expert's VRAM slot, the hot one lands in the worker's vacated slot
+                # (and now travels to the device through b70_update_expert)
+                if self._split_swap_experts(r_hot_gpu, r_cold_w, mp):
+                    nswaps += 1
+        else:
+            head.sort()
+            tail.sort(reverse = True)
+            for (c_cold, r_cold), (c_hot, r_hot) in zip(head, tail):
+                if nswaps >= budget or c_hot < max(hyst * max(c_cold, 1.0), floor):
+                    break
+                if self._split_swap_experts(r_cold, r_hot, mp):
+                    nswaps += 1
         if nswaps:
             if os.environ.get("EXL3_MOE_CPU_SWAP_VERIFY"):
                 assert mp.sort().values.equal(torch.arange(self.num_experts)), \

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ATen/Tensor.h>
+#include <c10/util/Optional.h>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -123,6 +124,29 @@ void exl3_moe_cpu_set_prof(bool enabled);
 // Whether a registered layer's jobs are routed to the B70 plugin (worker-loop profiling
 // classifies compute time by this; 0 for invalid handles, CPU-only layers, or no B70 build)
 int exl3_moe_cpu_is_b70(int64_t handle);
+
+// Dynamic placement sync: after the worker REPLACES one expert in its arena (install), this
+// re-uploads that expert to the B70 device copy of a registered layer. No-op when the layer
+// is not B70-registered. On device-side upload failure the layer is demoted to the CPU path
+// (safe: installs run with the ring drained). Pointer arrays carry ONE expert; tensors are
+// the freshly read checkpoint values (native mul1 layout while B70 is active).
+void exl3_moe_cpu_b70_update
+(
+    int64_t handle,
+    int64_t e,
+    const c10::optional<at::Tensor>& gate_trellis,
+    const c10::optional<at::Tensor>& gate_suh,
+    const c10::optional<at::Tensor>& gate_svh,
+    const c10::optional<at::Tensor>& gate_bias,
+    const c10::optional<at::Tensor>& up_trellis,
+    const c10::optional<at::Tensor>& up_suh,
+    const c10::optional<at::Tensor>& up_svh,
+    const c10::optional<at::Tensor>& up_bias,
+    const c10::optional<at::Tensor>& down_trellis,
+    const c10::optional<at::Tensor>& down_suh,
+    const c10::optional<at::Tensor>& down_svh,
+    const c10::optional<at::Tensor>& down_bias
+);
 // Wake helpers before the GPU payload arrives; no work or completion barrier.
 void exl3_moe_cpu_pool_prime(int threads);
 int64_t exl3_moe_cpu_pool_stress(int threads, int iters, int small, int spin);   // test hook

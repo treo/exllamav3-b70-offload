@@ -85,6 +85,10 @@ struct B70Backend
         const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*);
     using FwdFn = int (*)(int64_t, const void*, const int32_t*, const void*, float*, int, int);
     using FreeFn = void (*)(int64_t);
+    using UpdFn = int (*)(int64_t, int,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+        const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*);
 
     bool enabled = false;
     bool usable = false;
@@ -92,6 +96,7 @@ struct B70Backend
     RegFn register_layer = nullptr;
     FwdFn forward = nullptr;
     FreeFn free_layer = nullptr;
+    UpdFn update = nullptr;
 
     B70Backend()
     {
@@ -109,6 +114,7 @@ struct B70Backend
         register_layer = (RegFn)dlsym(h, "b70_register_layer");
         forward = (FwdFn)dlsym(h, "b70_forward");
         free_layer = (FreeFn)dlsym(h, "b70_free_layer");
+        update = (UpdFn)dlsym(h, "b70_update_expert");   // optional symbol (older plugins: no dyn sync)
         usable = init && register_layer && forward && free_layer && init() == 0;
         if (!usable) fprintf(stderr, "[b70] plugin present but unusable; falling back to CPU\n");
 #endif
@@ -3882,6 +3888,47 @@ int64_t exl3_moe_cpu_pool_stress(int threads, int iters, int small, int spin)
     return anomalies;
 }
 
+void exl3_moe_cpu_b70_update
+(
+    int64_t handle,
+    int64_t e,
+    const c10::optional<at::Tensor>& gate_trellis,
+    const c10::optional<at::Tensor>& gate_suh,
+    const c10::optional<at::Tensor>& gate_svh,
+    const c10::optional<at::Tensor>& gate_bias,
+    const c10::optional<at::Tensor>& up_trellis,
+    const c10::optional<at::Tensor>& up_suh,
+    const c10::optional<at::Tensor>& up_svh,
+    const c10::optional<at::Tensor>& up_bias,
+    const c10::optional<at::Tensor>& down_trellis,
+    const c10::optional<at::Tensor>& down_suh,
+    const c10::optional<at::Tensor>& down_svh,
+    const c10::optional<at::Tensor>& down_bias
+)
+{
+    const MoeCpuLayer* layer = get_layer(handle);
+    if (!layer || layer->b70 < 0 || !b70().usable) return;   // not a B70 layer: arena is truth
+    auto p = [](const c10::optional<at::Tensor>& t) -> uint64_t
+        { return t && t->defined() && t->numel() ? (uint64_t)(uintptr_t)t->data_ptr() : 0u; };
+    const uint64_t gt[1] = { p(gate_trellis) }, gs[1] = { p(gate_suh) },
+                   gv[1] = { p(gate_svh) },   gb[1] = { p(gate_bias) };
+    const uint64_t ut[1] = { p(up_trellis) },   us[1] = { p(up_suh) },
+                   uv[1] = { p(up_svh) },       ub[1] = { p(up_bias) };
+    const uint64_t dt[1] = { p(down_trellis) }, ds2[1] = { p(down_suh) },
+                   dv[1] = { p(down_svh) },     db[1] = { p(down_bias) };
+    // the plugin's REGISTERED params decide which categories it reads; gateless simply
+    // never indexes the (zero) gate arrays
+    if (!b70().update || b70().update(layer->b70, (int)e,
+            gt, gs, gv, gb, ut, us, uv, ub, dt, ds2, dv, db) != 0)
+    {
+        // stale device copy: demote the WHOLE layer to the CPU path (quiesced: installs
+        // run after a full sync). Arena keeps serving; correctness first.
+        fprintf(stderr, "[b70] expert update failed; layer pinned to CPU\n");
+        if (b70().free_layer) b70().free_layer(layer->b70);
+        const_cast<MoeCpuLayer*>(layer)->b70 = -1;
+    }
+}
+
 int exl3_moe_cpu_is_b70(int64_t handle)
 {
     const MoeCpuLayer* layer = get_layer(handle);
@@ -4162,6 +4209,13 @@ int64_t exl3_moe_cpu_make_layer(
     const std::vector<at::Tensor>&, const std::vector<at::Tensor>&, const std::vector<at::Tensor>&,
     int64_t, double, int64_t) { NO_MOE_CPU(); return 0; }
 void exl3_moe_cpu_free_layer(int64_t) {}
+void exl3_moe_cpu_b70_update(int64_t, int64_t,
+    const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&,
+    const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&) {}
 void exl3_moe_cpu_forward_raw(int64_t, const at::Half*, const int32_t*, const at::Half*, float*, int, int, int) { NO_MOE_CPU(); }
 void exl3_moe_cpu_forward(int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t) { NO_MOE_CPU(); }
 #endif
