@@ -4039,6 +4039,8 @@ void exl3_moe_cpu_forward_raw(
 {
     const MoeCpuLayer* layer = get_layer(handle);
     bool b70_add = false;   // mixed job: scratch must be merged at job end
+    std::future<int> b70_fut;
+    const int32_t* sel_orig = nullptr;   // set iff the overlap path is taken
     static thread_local std::vector<int32_t> t_sel_a, t_sel_b;
     static thread_local std::vector<float> t_scratch;
     if (layer->b70 >= 0 && b70().usable) {
@@ -4064,10 +4066,25 @@ void exl3_moe_cpu_forward_raw(
                 t_sel_b[i] = (v >= bn) ? v : -1;
             }
             t_scratch.resize((size_t)rows * layer->hidden_size);
-            // (overlap experiment: running this half on a borrowed std::async thread while
-            // the CPU pool works sel_b measured +/-0 at tier 0.5 and -1.5 tok/s at 0.2 -
-            // the halves were not the serial cost; EXL3_MOE_B70_ASYNC dropped.)
-            if (b70().forward(layer->b70, x, t_sel_a.data(), wts, t_scratch.data(), rows, topk) == 0)
+            // Prefill-size mixed jobs overlap: B70 half on a borrowed thread while the CPU
+            // pool works the other half on this thread (pool threads are caller-idle
+            // meanwhile; a round-6 all-size overlap measured +/-0 prefill and -1.5 decode,
+            // so decode sizes keep the sequential path). EXL3_MOE_B70_OVERLAP=0 disables.
+            static const bool b70_ovl = []{
+                const char* e = getenv("EXL3_MOE_B70_OVERLAP");
+                return !e || e[0] != '0';
+            }();
+            if (b70_ovl && rows >= 16)
+            {
+                sel_orig = sel;
+                b70_fut = std::async(std::launch::async,
+                    [hb = layer->b70, x, a = t_sel_a.data(), wts, s = t_scratch.data(), rows, topk]() {
+                        return b70().forward(hb, x, a, wts, s, rows, topk);
+                    });
+                b70_add = true;
+                sel = t_sel_b.data();
+            }
+            else if (b70().forward(layer->b70, x, t_sel_a.data(), wts, t_scratch.data(), rows, topk) == 0)
             {
                 b70_add = true;
                 sel = t_sel_b.data();   // consumed by the grouping below; no nested forwards
@@ -4263,7 +4280,21 @@ void exl3_moe_cpu_forward_raw(
     }
     if (b70_add)
     {
-        // merge the B70 half; the CPU pass zero-initialised out, so plain add
+        // merge the B70 half; the CPU pass zero-initialised out, so plain add. An overlapped
+        // half that failed reruns the WHOLE job on the CPU (pinned first: the recursive
+        // call takes the pure-CPU path)
+        if (sel_orig)
+        {
+            bool ok = false;
+            try { ok = b70_fut.get() == 0; } catch (...) { ok = false; }
+            if (!ok)
+            {
+                fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
+                const_cast<MoeCpuLayer*>(layer)->b70 = -1;
+                exl3_moe_cpu_forward_raw(handle, x, sel_orig, wts, out, rows, topk, threads);
+                return;
+            }
+        }
         float* sp = t_scratch.data();
         const size_t nout = static_cast<size_t>(m_total) * layer->hidden_size;
         for (size_t i = 0; i < nout; ++i) out[i] += sp[i];
