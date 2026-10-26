@@ -705,3 +705,39 @@ Current sustained floor budget at rows=1 (int8 183 / float 168): memcpy ~10 + pe
 chain (7 int8 / 6 float commands incl. barriers) ~60-80 + real kernel spans ~90. The
 remaining big int8 cut would be K34i8+Q2 (needs 5-block-wide WGs for the row amax, same
 register-carry trick), worth maybe -10us; below that it is one fused megakernel or stop.
+
+## End-to-end speed sweep: everything is at a measured optimum (and why)
+
+With the profiling umbrella (EXL3_MOE_PROF) in place, swept the whole offload stack on
+2.05bpw. Baseline auto/B70: prefill 1886, decode ~70.5 (noise band to 73 run-to-run;
+score runs twice, mind 3090 SW-power-cap counters - it boosts down under sustained load).
+
+Hardware truth (nvidia-smi + /sys/bus/pci + direct probes):
+  - main GPU = RTX 3090, link trains Gen4 **x8** (max x16 - the board bifurcates the
+    5950X's 24 lanes); pinned->device probe 13.4 GB/s = 92% of link
+  - B70 pinned H2D/D2H 12.9-14.5 GB/s (same physical class of link). sysfs lies for the
+    Arc: shows x1/max-x1 - ignore it, trust measured copies
+  - both facts mean the streamed-prefill weight DMA is HARD link-bound; no software knob
+    can beat ~13.5 GB/s. A chassis that gives the 3090 x16 would lift prefill directly.
+
+Sweep results (min-of-2 unless noted; auto = the incumbent):
+  - mcs (worker-share experts): 256 = the FLOOR on this box - 224/192 die in
+    _load_autosplit with "Insufficient VRAM in split" (3090 is full); 320 prefill 1480
+    (-22%), 384 prefill ~1300 + only 46/48 registrations (B70 VRAM edge). Balanced.
+  - EXL3_MOE_STREAM_T (hot-expert threshold): 8 -> 1779, auto (=11 via the live
+    bandwidth probe) -> 1886, 16 -> 1757, 32 -> 1590, off -> 1493. The probe nails the
+    peak; it is bandwidth-scaled, so the x8 link is already priced in.
+  - WSLOTS/WSLOT_MB/STAGE_THREADS/BATCH_EXPERTS/FUSED_ROWS: all defaults win
+    (1735-1880 range, none above noise).
+  - CPU_SWAP=0 (static placement, kills the 3.7 s/run stager): decode identical, prefill
+    -1.5% - the staging churn pays for itself.
+
+Decode anatomy (why decode won't move): 14.2 ms/token; rows1 b70 compute 18 us x 48
+= 0.86 ms + exposed collect ~10 us x 48 = 0.5 ms - the offload path is ~10% of the
+budget; the rest is the 3090's captured-graph replay floor. Force-int8 stays WORSE at
+rows=1 in the real model (67.8 vs 70.9) - auto-float for m=1 is right, end of debate.
+
+Verdict: prefill is limited by (a) 3090 expert GEMV + streamed recon throughput and
+(b) the 13.4 GB/s link; decode by 3090 replay overhead. Offload-path software is at its
+plateau; further gains need kernel-level work on one side (b70 prefill job 11 us/row,
+bench-side) or the lane bifurcation fix (hardware-side).

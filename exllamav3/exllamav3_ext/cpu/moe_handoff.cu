@@ -403,6 +403,8 @@ void exl3_moe_cpu_worker_run
     {
         double spin = 0.0, comp = 0.0, comp_mx = 0.0, gap = 0.0;
         long jobs = 0, n1 = 0, nsmall = 0, nbig = 0;
+        double comp1 = 0.0, comps = 0.0, compb = 0.0;   // compute ms per rows bucket
+        long rows_big = 0;                              // rows summed over bucket >8
     };
     HpAgg* hp_layer = hprof ? new HpAgg[HP_LAYERS] {} : nullptr;
     HpTot hp_tot[2];                      // [0] = CPU-compute layers, [1] = B70 layers
@@ -573,7 +575,9 @@ void exl3_moe_cpu_worker_run
             HpTot& t = hp_tot[cls];
             t.jobs++; t.spin += s; t.comp += c;
             if (c > t.comp_mx) t.comp_mx = c;
-            if (job.rows <= 1) t.n1++; else if (job.rows <= 8) t.nsmall++; else t.nbig++;
+            if (job.rows <= 1) { t.n1++; t.comp1 += c; }
+            else if (job.rows <= 8) { t.nsmall++; t.comps += c; }
+            else { t.nbig++; t.compb += c; t.rows_big += job.rows; }
             HpAgg& a = hp_layer[job.layer < HP_LAYERS ? job.layer : HP_LAYERS - 1];
             a.jobs++; a.spin += s; a.comp += c; a.rows += job.rows;
             if (c > a.comp_mx) a.comp_mx = c;
@@ -603,6 +607,17 @@ void exl3_moe_cpu_worker_run
                        hp_tot[0].nsmall + hp_tot[1].nsmall, hp_jobs,
                        hp_tot[0].nbig + hp_tot[1].nbig, hp_jobs,
                        hp_stg, hp_stg_copy, hp_stg_wait, hp_stg_copy_mx);
+                for (int cls = 0; cls < 2; ++cls)
+                {
+                    const HpTot& t = hp_tot[cls];
+                    if (!t.jobs) continue;
+                    printf(" --   [%s by rows] 1: %.1f ms (%ld jobs)  2-8: %.1f ms (%ld)  "
+                           ">8: %.1f ms (%ld jobs, %.1f rows/job, %.4f ms/job, %.0f us/row)\n",
+                           cls ? "b70" : "cpu", t.comp1, t.n1, t.comps, t.nsmall,
+                           t.compb, t.nbig, t.nbig ? (double) t.rows_big / t.nbig : 0.0,
+                           t.nbig ? t.compb / t.nbig : 0.0,
+                           t.rows_big ? t.compb * 1000.0 / t.rows_big : 0.0);
+                }
         }
     }
     out:;
@@ -621,6 +636,9 @@ void exl3_moe_cpu_worker_run
                    "(%.4f/job avg, %.3f max) | rows: 1 %ld, 2-8 %ld, >8 %ld\n",
                    cls ? "b70" : "cpu", t.spin, t.spin / t.jobs, t.comp, t.comp / t.jobs,
                    t.comp_mx, t.n1, t.nsmall, t.nbig);
+            if (t.nbig)
+                printf(" --   [%s prefill] >8-row jobs: %.2f ms total, %.4f ms/job, %.0f us/row\n",
+                       cls ? "b70" : "cpu", t.compb, t.compb / t.nbig, t.compb * 1000.0 / t.rows_big);
         }
         printf(" --   [stager] %ld weight stagings, copy %.2f ms total (%.4f/job, %.3f max), "
                "pinned-free wait %.2f ms\n", hp_stg, hp_stg_copy,
