@@ -640,7 +640,7 @@ struct Gemv8Base
     int E, nc, nm, H, I, nfl, down, nsl;
 };
 
-template <int K2V, int NSUB, bool F1 = true>
+template <int K2V, int NSUB, bool F1 = true, bool RING = false>
 struct Gemv8
 {
     Gemv8Base b;
@@ -726,6 +726,28 @@ struct Gemv8
         // 149us); named sets + unrolled group cost ~nothing (lab t31 V22 vs V0: -2..6%
         // at the gu shape, bit-exact). Depth-2 kept for reference below the loop.
         const int cnt = tk_hi - tk_lo;
+        // RING (lab t39 st14): cooperative A staging. The joint_matrix global A load
+        // lowers to a per-lane byte gather costing ~2.8x the whole kernel (t39 st4 vs
+        // st18); the same bytes delivered via SLM and loaded LOCALLY run at the no-A-cost
+        // ceiling (st12 ~= st6). One 4 KB contiguous copy per k-group (a8 rows are dense
+        // over (tk,fk,f)) into 4 rotating regions + one group barrier per group; reads
+        // trail writes by >= 2 groups. A is nf-independent: all subgroups share one copy.
+        unsigned char* const ring = slab.get_pointer().get() + (size_t)NSUB * 2048;
+        auto copygrp = [&](int g) {
+            const int tq0 = tk_lo + g * 4;
+            if (tq0 >= tk_hi) return;
+            const sycl::uint4* s = (const sycl::uint4*)(pa0 + (size_t)(2 * tq0) * 128);
+            sycl::uint4* d = (sycl::uint4*)(ring + (g & 3) * 4096);
+            const int nq = sycl::min(tk_hi - tq0, 4);
+            if (nq == 4) { d[lid] = s[lid]; d[lid + 128] = s[lid + 128]; }
+            else if (lid < 64)
+                for (int qq = 0; qq < nq; ++qq) d[qq * 64 + lid] = s[qq * 64 + lid];
+        };
+        if constexpr (RING)
+        {
+            copygrp(0); copygrp(1);
+            sycl::group_barrier(it.get_group());
+        }
         uint32_t gA[NW], gB[NW], gC[NW], gD[NW];
 #pragma unroll
         for (int i = 0; i < NW; ++i) {
@@ -735,6 +757,11 @@ struct Gemv8
             gD[i] = (cnt > 3) ? wp[3 * row_step + widx[i]] : 0u;
         }
         for (int t = 0; t < cnt; t += 4) {
+            if constexpr (RING)
+            {
+                copygrp((t >> 2) + 2);
+                sycl::group_barrier(it.get_group());
+            }
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
                 if (t + q >= cnt) break;
@@ -796,10 +823,18 @@ struct Gemv8
                             // a runtime narrow-slot skip here: break/peel variants both
                             // cost the full-slot path ~20% (E128/rows128 w8: 3605 -> 4325
                             // / 4389); narrow shapes get the F1=false instantiation instead.
+                            if constexpr (RING) {
+                                const signed char* asrc = (const signed char*)
+                                    (ring + ((t >> 2) & 3) * 4096 + q * 1024 + (fk * 2 + f) * 256);
+                                auto pal = sycl::address_space_cast<sycl::access::address_space::local_space,
+                                                                    sycl::access::decorated::yes>(asrc);
+                                mx8::joint_matrix_load(sg, ja, pal, 32);
+                            } else {
                             auto pag = sycl::address_space_cast<sycl::access::address_space::global_space,
                                                                 sycl::access::decorated::yes>(
                                 (const signed char*)(pa0 + (size_t)(2 * tk + fk) * 128 + f * 64));
                             mx8::joint_matrix_load(sg, ja, pag, 32);
+                            }
                             if (f) mx8::joint_matrix_mad(sg, jc1, ja, jb, jc1);
                             else   mx8::joint_matrix_mad(sg, jc, ja, jb, jc);
                         }
@@ -1068,11 +1103,24 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 const char* e = std::getenv("EXL3_MOE_I8W");
                 return e && e[0] == '1';
             }();
+            static const int ring_ok = []{
+                const char* e = std::getenv("EXL3_MOE_I8RING");
+                return e && e[0] == '1';
+            }();
             const bool wide = wide_ok && (I / 16) % 8 == 0;
-            const size_t g0 = wide ? (size_t)(I / 16 / 8) * 128 * nsl8_gu
+            const bool ring = ring_ok && !slim && (I / 16) % 8 == 0;
+            const size_t g0 = (wide || ring) ? (size_t)(I / 16 / 8) * 128 * nsl8_gu
                                    : (size_t)(I / 16) * 16 * nsl8_gu;
             launch([&](sycl::handler& cgh) {
-                sycl::local_accessor<unsigned char, 1> slm({wide ? 16384u : 2048u}, cgh);
+                sycl::local_accessor<unsigned char, 1> slm({ring ? 32768u : (wide ? 16384u : 2048u)}, cgh);
+                if (ring) {
+                    switch (k2) {
+                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<4, 8, true, true>{g8, slm}); break;
+                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<5, 8, true, true>{g8, slm}); break;
+                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<8, 8, true, true>{g8, slm}); break;
+                    }
+                    return;
+                }
                 if (slim) {
                     switch (k2) {
                         case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4, 1, false>{g8, slm}); break;
@@ -1208,11 +1256,24 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 const char* e = std::getenv("EXL3_MOE_I8W");
                 return e && e[0] == '1';
             }();
+            static const int ring_ok_d = []{
+                const char* e = std::getenv("EXL3_MOE_I8RING");
+                return e && e[0] == '1';
+            }();
             const bool wide = wide_ok_d && (H / 16) % 8 == 0;
-            const size_t g0 = wide ? (size_t)(H / 16 / 8) * 128 * nsl8_d
+            const bool ring = ring_ok_d && !slim && (H / 16) % 8 == 0;
+            const size_t g0 = (wide || ring) ? (size_t)(H / 16 / 8) * 128 * nsl8_d
                                    : (size_t)(H / 16) * 16 * nsl8_d;
             launch([&](sycl::handler& cgh) {
-                sycl::local_accessor<unsigned char, 1> slm({wide ? 16384u : 2048u}, cgh);
+                sycl::local_accessor<unsigned char, 1> slm({ring ? 32768u : (wide ? 16384u : 2048u)}, cgh);
+                if (ring) {
+                    switch (k2) {
+                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<4, 8, true, true>{g8, slm}); break;
+                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<5, 8, true, true>{g8, slm}); break;
+                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<8, 8, true, true>{g8, slm}); break;
+                    }
+                    return;
+                }
                 if (slim) {
                     switch (k2) {
                         case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4, 1, false>{g8, slm}); break;

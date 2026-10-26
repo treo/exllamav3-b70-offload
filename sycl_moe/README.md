@@ -54,7 +54,14 @@ negative-splat trap, and why short benchmark windows lie about this GPU.
   (never read; the trace knows via `i8slim()`).
 - `EXL3_MOE_I8W=1` — lab-only 128-lane wide workgroups (8 column tiles per WG).
   Measured ≤ 0 everywhere (weight-stream latency, not thread occupancy, binds); kept
-  as documentation of the negative result.
+  as documentation of the negative result. (Superseded for the fat path by `I8RING`,
+  which uses the wide geometry plus SLM-staged A and is a large win — see below.)
+- `EXL3_MOE_I8RING=1` — cooperative A staging for the fat int8 gemvs (gu+down, prefill
+  shapes; slim decode unaffected). The `joint_matrix` global A load lowers to a per-lane
+  byte gather costing ~2.8x the kernel (labs t39 st4 vs st18); wide WGs + a 4 KB contiguous
+  copy per k-group into 4 rotating SLM regions + local fragment loads recover the no-A-cost
+  ceiling. Measured bit-exact (full i8trace + fingerprint battery): E128/rows128 −32%,
+  E256/rows128 −33%, E512/rows128 −43%, rows32 −21…−24%, decode neutral. Lab: t39/t40.
 - `EXL3_MOE_I8NSLU/-NSLD` — per-kernel int8 split-K overrides (1–8), applied after
   `MOE_NSL`; used to retune the gu fill target to 136000 lanes post-MAXM8.
 - Linux (the plugin hooks are `__linux__`-only; nothing changes on other platforms)

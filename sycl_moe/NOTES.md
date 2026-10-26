@@ -845,3 +845,47 @@ of the command-cost win anyway (see lab entries above), or (b) an actual grid-sy
 primitive (cooperative launch/CLC) that lets phases use full-size disjoint grids.
 Keep t38_bar as the barrier lab. The exec()/exec_cluster virtualization seam is not
 needed by the split path and was reverted with it.
+
+## Prefill roofline, corrected: it was the A-operand gather all along (labs t39/t40 -> I8RING)
+
+The "E128/rows128 is 13x off the DRAM floor" note was WRONG twice over: (a) the floor
+was computed with a 3.3MB B matrix - the int8 tier streams the native K2-bit trellis
+(~410-520KB per gu matrix at 2bpw), and (b) per-slot cost was attributed to B re-reads.
+The t39 sweep over (E, rows) shapes fits time ~= F x chunks + V x assignments with
+F ~ 8/16 us (slim/fat slot) and V ~ 0.03 us: cost is per slot (per matrix traversal),
+per-token DPAS is free; and MORE chunks per expert (10x B re-read at E16/rows128) made
+per-token cost LOWER, not higher. Re-reads are a ~1.5-2x secondary term at most shapes.
+
+t39_stream.cpp replays the real Gemv8 B-ladder + band + fragment pipeline standalone
+with the DPAS segment stage-gated (compile-time stages 1..18). At production footprint:
+loads alone 581 GB/s (saturated), +band stores 577, +jb SLM loads 576, +global ja
+fragment loads + mads 141 (!!), +mads with ja loads removed 517. The joint_matrix
+GLOBAL A load is the entire regression: it lowers to a per-lane byte gather. Feeding
+the identical bytes with per-lane contiguous 16B vector loads (fragment stale) runs at
+the no-A ceiling (st18 == st6): 2.76x of the whole kernel recovered by memory form
+alone. joint_matrix cannot take a packed i8 A operand (no IGL builtin - the error even
+prints the intended v8i8 lowering name). SLM-ring delivery works (st12 local-ja ~=
+free; st14 wide-WG + 4-region group ring: 1.67x) but its WG barrier/copy tax leaves
+~40% on the table vs the ceiling.
+
+Production fix shipped behind EXL3_MOE_I8RING=1 (fat gemvs only): wide 128-lane WGs +
+4 KB contiguous cooperative A copy per k-group into 4 rotating SLM regions + one group
+barrier per group + local ja loads. Bit-exact by construction (same values, new
+delivery; full i8trace + fingerprint battery agree to the digit). E128/rows128 3445 ->
+2354 us (-32%), E512/rows128 8181 -> 4695 (-43%), rows32 -21..-24%, decode untouched
+(slim path not gated). Default stays OFF pending the model eval gate, then flip.
+
+t40_esimd.cpp proves the endgame for later: per-thread xmx::dpas<8,8,int>(acc,b,a) with
+s8/u8 works TODAY - operand layouts verified by impulse probes (A: per-thread row-major
+8x32B blocks via load_2d; B: VNNI byte order ((k>>2)*16+n)*4+(k&3), 512B per k32 panel);
+random-regression bit-exact both u8 and s8 (bias-128) weight modes; DRAM-regime perf
+1280 threads x 41KB panels = 62 ns/unit, on par with the fixed SIMT pattern - ESIMD's
+prize is removing the gather AND the SLM-ring barriers in one move when we rewrite the
+tier (likely together with MAXM 16/32 wide-row instantiation, CUDA m32/m64-style).
+
+Traps recorded this session: (1) q.copy() H2D SEGVs inside NEO staging on this stack -
+use q.memcpy (everything already did; the lab was the exception). (2) A failed SYCL
+kernel build fails at first LAUNCH, and piped icpx rc hides build death - ALWAYS check
+the log, never just grep the last line (two "results" this session came from stale
+binaries). (3) runtime stage-gates let LLVM DCE the loads being benchmarked - gate at
+compile time. (4) probe K must be a multiple of the dpas k-step or windows alias.
