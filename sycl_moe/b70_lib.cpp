@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <mutex>
 #include <exception>
+#include <stdexcept>
 #include <vector>
 #include <array>
 #include <unordered_map>
@@ -83,6 +84,56 @@ bool ensure_ctx()
         return false;
     }
     return true;
+}
+
+// Grow the shared device bounce and pinned host staging to serve forwards of `rows` token
+// rows (registration primes these at 64; jobs can legitimately be larger - EXL3_MOE_CPU
+// _SLOT_ROWS). Growth is geometric and primed with a queue memset: first-touch transfers on
+// this stack can otherwise read back stale zeros despite completed events. On allocation
+// failure this THROWS - b70_forward converts that to a nonzero return, the worker logs and
+// pins the layer to the CPU path, and the job is RE-RUN there rather than consumed as the
+// silent garbage a logged-and-returned refusal would produce (the original bug: FATAL line,
+// out[] left holding the slot's previous contents, success returned).
+void ensure_capacity(int rows, int H)
+{
+    static int cap = 0;
+    if (rows > cap)
+    {
+        const int want = 2 * cap > rows ? 2 * cap : rows;
+        uint16_t* nx = (uint16_t*)sycl::malloc_device<uint16_t>((size_t)want * H * 2, *g.q);
+        float* no = (float*)sycl::malloc_device<float>((size_t)want * H, *g.q);   // rows x H fp32
+        if (!nx || !no)
+        {
+            if (nx) sycl::free(nx, *g.q);
+            if (no) sycl::free(no, *g.q);
+            throw std::runtime_error("b70moe: bounce growth failed (OOM)");
+        }
+        g.q->memset(nx, 0, (size_t)want * H * 2);
+        g.q->memset(no, 0, (size_t)want * H * 4);
+        g.q->wait();
+        if (g_bounce.d_x) sycl::free(g_bounce.d_x, *g.q);
+        if (g_bounce.d_out) sycl::free(g_bounce.d_out, *g.q);
+        g_bounce.d_x = nx; g_bounce.d_out = no; g_bounce.cap_rows = want;
+        cap = want;
+    }
+    if ((size_t)rows * H * 4 > g_stage.stage_cap)
+    {
+        const size_t want = g_stage.stage_cap * 2 > (size_t)rows * H * 4
+                                ? g_stage.stage_cap * 2 : (size_t)rows * H * 4;
+        void* ns = sycl::malloc_host(want, *g.q);
+        void* nu = sycl::malloc_host(want / 2, *g.q);   // fp16 mirror needs rows*H*2 bytes
+        if (!ns || !nu)
+        {
+            if (ns) sycl::free(ns, *g.q);
+            if (nu) sycl::free(nu, *g.q);
+            throw std::runtime_error("b70moe: pinned stage growth failed (OOM)");
+        }
+        if (g_stage.stage) sycl::free(g_stage.stage, *g.q);
+        if (g_stage.stage_u16) sycl::free(g_stage.stage_u16, *g.q);
+        g_stage.stage = (float*)ns; g_stage.stage_u16 = (uint16_t*)nu; g_stage.stage_cap = want;
+        memset(g_stage.stage, 0, want);
+        memset(g_stage.stage_u16, 0, want / 2);
+    }
 }
 
 // repacked upload: per-tile u32 word reversal (native ring -> column-window stream)
@@ -274,34 +325,12 @@ void b70_warm(int64_t handle, int rows, int max_chunks)
         int j = std::min(max_chunks - 1, i / std::max(1, max_chunks / std::max(1, rows)));
         tmap.entry[i] = j * 4 + (i % 4);
     }
-    static uint16_t* dx = nullptr;
-    static float* dout = nullptr;
-    static int warm_rows = 0;
-    if (rows > warm_rows) {
-        if (dx) sycl::free(dx, *g.q);
-        if (dout) sycl::free(dout, *g.q);
-        dx = sycl::malloc_device<uint16_t>((size_t)rows * H, *g.q);
-        dout = sycl::malloc_device<float>((size_t)rows * H, *g.q);
-        if (!dx || !dout) fprintf(stderr, "[b70moe] OOM warm bounce\n");
-        g.q->memset(dx, 0, (size_t)rows * H * 2);
-        g.q->memset(dout, 0, (size_t)rows * H * 4);
-        g.q->wait();
-        warm_rows = rows;
-    }
-    g_bounce.d_x = dx; g_bounce.d_out = dout; g_bounce.cap_rows = warm_rows;
-    if ((size_t)rows * H * 4 > g_stage.stage_cap) {
-        if (g_stage.stage) sycl::free(g_stage.stage, *g.q);
-        if (g_stage.stage_u16) sycl::free(g_stage.stage_u16, *g.q);
-        g_stage.stage_cap = (size_t)rows * H * 4;
-        g_stage.stage = (float*)sycl::malloc_host(g_stage.stage_cap, *g.q);
-        g_stage.stage_u16 = (uint16_t*)sycl::malloc_host(g_stage.stage_cap / 2, *g.q);
-        if (!g_stage.stage || !g_stage.stage_u16) fprintf(stderr, "[b70moe] OOM pinned stage\n");
-        memset(g_stage.stage, 0, g_stage.stage_cap);
-        memset(g_stage.stage_u16, 0, g_stage.stage_cap / 2);
-    }
+    ensure_capacity(rows, H);
+    uint16_t* dx = g_bounce.d_x;
+    float* dout = g_bounce.d_out;
     sycl::event e0 = g.q->memcpy(dx, g_stage.stage_u16, (size_t)rows * H * 2);
     sycl::event e1 = layer->forward(chunks.data(), max_chunks, tmap, dx, dout, rows, &e0);
-    sycl::event e2 = g.q->memcpy(g_stage.stage, dout, g_stage.stage_cap, {e1});
+    sycl::event e2 = g.q->memcpy(g_stage.stage, dout, (size_t)rows * H * 4, {e1});
     e2.wait();
     g_last_ev = e2;
     fprintf(stderr, "[b70moe] warm done rows %d chunks %d; B70 bytes %.2f GB\n", rows, max_chunks, g_alloc_bytes / 1e9);
@@ -358,10 +387,8 @@ static void forward_impl
 
     uint16_t* d_x = g_bounce.d_x;
     float* d_out = g_bounce.d_out;
-    if ((size_t)rows > g_bounce.cap_rows) {
-        fprintf(stderr, "[b70moe] FATAL: rows %d exceeds preallocated cap %zu\n", rows, g_bounce.cap_rows);
-        return;
-    }
+    if ((size_t)rows > g_bounce.cap_rows) ensure_capacity(rows, H);   // grows (or throws)
+    d_x = g_bounce.d_x; d_out = g_bounce.d_out;   // re-read: growth replaced the buffers
     // all queue ops carry explicit event dependencies; implicit ordering is unreliable here
     memcpy(g_stage.stage_u16, x, (size_t)rows * H * 2);
     sycl::event e_x = g.q->memcpy(d_x, g_stage.stage_u16, (size_t)rows * H * 2, {g_last_ev});
