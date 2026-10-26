@@ -806,3 +806,42 @@ embedded blob; module+kernel table at b70_init; forward = WithArguments appends 
 queue list + one trailing signal event; SYCL remains for allocation/upload/registration.
 Estimated win: ~15-30 us/forward host-side, more if RT event pools show up in the tail;
 gate with EXL3_MOE_B70_NATIVE, verify bit-exact with the i8trace battery.
+
+## Megakernel experiment: worked, then lost on its own premise (ripped out)
+
+Built the single-launch int8 forward (moe_mega.inl, now removed): six pipeline stages
+as phases of one persistent kernel with grid-wide arrival barriers, virtualized group
+coords reusing the real kernel bodies (exec/exec_cluster entries kept? NO - fully
+reverted; labs and lessons below).
+
+Hard-won facts:
+1. BARRIER CORRECTNESS: wg barriers are NOT memory fences at device scope. The first
+   "partial sum" corruptions (deterministic-looking ratios 0.72/0.16...) were other
+   WGs' stores unpublished, fixed by it.barrier(sycl::access::fence_space::global_space)
+   around the arrival/spin (sycl::atomic_thread_fence does not exist in 2026.2).
+   Split kernels never show this because kernel boundaries flush implicitly.
+2. Pair-symmetric loops are mandatory wherever two 128-threads halves run different
+   units inside one 256-WG: ANY conditional group_barrier (hadamard128's seven, K6's
+   WAR guard) must execute the same number of times in both halves - pair-max
+   iteration counts with replay-and-skip-stores is the pattern that works.
+3. The F1 polarity trap: Gemv8's third template parameter is F1 (frag1 ENABLED), not
+   "slim". Mega passed SLIM straight through and silently zero-filled frag1 at m>4.
+   rows<=4 battery passed; rows>=16 caught it. (Same bug shape as the historical
+   frag1 peeling poison - see the F1 notes above.)
+4. PERFORMANCE VERDICT (the real reason to rip it out): the barrier mechanics cost
+   what t38 predicted (~2-5 us/barrier at 32-128 WGs), but phasing serializes the
+   device. The gemv phases want the whole machine (rows=4/tk=8: 1240 tile-units); a
+   megakernel grid must be <= co-residency, and the DPAS WGs are register-fat:
+   GRID=96 never completed (t38's thin-kernel ceiling of 160-280 does NOT transfer),
+   and at the safe grids (16-32) mega measured 2.5-6x SLOWER than the split pipeline
+   at every shape including rows=1 decode (466 us vs 183). The per-command overhead
+   it removes (~5 x 4-10 us) was never the dominant cost - starvation is.
+5. An unresolved cluster-B store anomaly (one unit's stores landing in the wrong
+   slice region at dual-cluster gemv-down; sentinel-probed, not root-caused before
+   removal) - would need t37-style native dispatch to dig out; moot unless (4) changes.
+
+Restart conditions: only worth revisiting with (a) native-L0 submission landing most
+of the command-cost win anyway (see lab entries above), or (b) an actual grid-sync
+primitive (cooperative launch/CLC) that lets phases use full-size disjoint grids.
+Keep t38_bar as the barrier lab. The exec()/exec_cluster virtualization seam is not
+needed by the split path and was reverted with it.
