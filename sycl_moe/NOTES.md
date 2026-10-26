@@ -927,3 +927,16 @@ Open: stream_t sweep at SUB=0.5 (round 7) - the pinned-arena stream to the 3090 
 26 ms/layer of pure PCIe at st=auto during 1024-token prefill; larger tiers shrink
 the streamed SET (fewer, hotter streamed experts), smaller tiers grow it; the
 interaction may dominate the remaining prefill gap. Then: 2.68bpw sweep.
+
+## Rounds 7-9 verdict: stream_t interacts strongly with the tier size
+
+4.05/SUB=0.5 prefill: st auto(11) 530 | st6 575 | st16 495 | st24 444. With three tiers
+the streamed SET is only CPU-tier experts, so the classic conservative threshold starves
+the fast path; lowering it streams more, colder experts and still wins (they'd cost the
+CPU pool more). But optima are model/depth-specific: 4.05 st3+auto-tier COLLAPSED to 452
+(deep oversubscription: streamed bytes outrun the DMA), while 2.68 auto-tier runs 748
+prefill / 53.3 decode WITHOUT any stream_t override (+43% prefill vs classic full-layer).
+=> keep the adaptive auto probe as default; SUB=auto is the recommended setting for any
+model whose expert bytes exceed 3090+B70; explicit stream_t is a per-model trim knob,
+worth ~8% on 4.05 (st4: 599/53.8 - beats classic on BOTH axes). no-mcpa pays only ~9%
+prefill at auto-tier on 2.68: the tier wins even without page-locked streaming.
