@@ -19,6 +19,7 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -3823,7 +3824,38 @@ int64_t exl3_moe_cpu_make_layer
         // shape, spread across all layers instead of whole layers.
         int n_sub = (int)E2;
         const char* sb = getenv("EXL3_MOE_B70_SUB");
-        if (sb && sb[0] && b70().register_layer_n)
+        const bool defer = sb && !strcmp(sb, "auto") && b70().register_layer_n && b70().budget_left && b70().expert_bytes;
+        if (defer)
+        {
+            // Auto three-tier: defer to worker start, where the true pending-layer count
+            // lets us divide the remaining device budget evenly (fair share per layer).
+            const int E_ = (int)E2, hs = layer->hidden_size, is = layer->interm_size;
+            const int bits_ = layer->ups[0].bits, hb_ = layer->ups[0].hb, act_ = layer->activation;
+            const float lim_ = layer->act_limit, gat_ = gated2 ? 1 : 0;
+            layer->b70_reg = [E_, hs, is, bits_, hb_, act_, lim_, gat_,
+                              gt = std::move(gt), gs = std::move(gs), gv = std::move(gv), gb2 = std::move(gb2),
+                              ut = std::move(ut), us = std::move(us), uv = std::move(uv), ub = std::move(ub),
+                              dt = std::move(dt), ds2 = std::move(ds2), dv = std::move(dv), db = std::move(db),
+                              layer](int rem) -> int64_t
+            {
+                const long eb = (long)b70().expert_bytes(hs, is, bits_, hb_, (int)gat_);
+                const long left = (long)b70().budget_left();
+                int n = (eb > 0 && rem > 0) ? (int)(left / eb / rem) : E_;
+                n = std::max(1, std::min(E_, n));
+                const int64_t h = b70().register_layer_n(
+                    E_, hs, is, bits_, hb_, act_, lim_, (int)gat_,
+                    gat_ ? gt.data() : nullptr, gat_ ? gs.data() : nullptr, gat_ ? gv.data() : nullptr,
+                    gat_ && !gb2.empty() ? gb2.data() : nullptr,
+                    ut.data(), us.data(), uv.data(), !ub.empty() ? ub.data() : nullptr,
+                    dt.data(), ds2.data(), dv.data(), !db.empty() ? db.data() : nullptr, n);
+                if (h >= 0) { layer->b70 = h; layer->b70n = n; }
+                else fprintf(stderr, "[b70] deferred registration failed; layer stays on CPU\n");
+                return h;
+            };
+        }
+        else
+        {
+        if (sb && sb[0] && !defer && b70().register_layer_n)
         {
             double v = atof(sb);
             n_sub = (v > 0.0 && v < 1.0) ? (int)(v * (double)E2) : (int)v;
@@ -3850,11 +3882,30 @@ int64_t exl3_moe_cpu_make_layer
                 dt.data(), ds2.data(), dv.data(), !db.empty() ? db.data() : nullptr);
         if (h >= 0) { layer->b70 = h; layer->b70n = n_sub; }
         else fprintf(stderr, "[b70] layer registration failed; this layer stays on CPU\n");
+        }
     }
 
     std::lock_guard<std::mutex> lock(g_layers_mutex);
     g_layers.push_back(layer_owner.release());
     return static_cast<int64_t>(g_layers.size() - 1);
+}
+
+int64_t exl3_moe_cpu_b70_register_all()
+{
+    if (!b70().usable) return 0;
+    std::vector<MoeCpuLayer*> ls;
+    { std::lock_guard<std::mutex> lock(g_layers_mutex); ls = g_layers; }
+    int pending = 0;
+    for (auto* l : ls) if (l && l->b70_reg) ++pending;
+    int64_t n = 0;
+    for (auto* l : ls)
+        if (l && l->b70_reg)
+        {
+            if (l->b70_reg(pending) >= 0) ++n;
+            --pending;
+        }
+    fprintf(stderr, "[b70] auto tier: registered %lld/%zu layers\n", (long long)n, ls.size());
+    return n;
 }
 
 void exl3_moe_cpu_free_layer(int64_t handle)
@@ -3987,7 +4038,9 @@ void exl3_moe_cpu_forward_raw(
 )
 {
     const MoeCpuLayer* layer = get_layer(handle);
-    bool b70_add = false;
+    bool b70_add = false;   // mixed job: scratch must be merged at job end (async iff sel_orig != null)
+    std::future<int> b70_fut;
+    const int32_t* sel_orig = nullptr;
     static thread_local std::vector<int32_t> t_sel_a, t_sel_b;
     static thread_local std::vector<float> t_scratch;
     if (layer->b70 >= 0 && b70().usable) {
@@ -4001,10 +4054,11 @@ void exl3_moe_cpu_forward_raw(
             fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
             const_cast<MoeCpuLayer*>(layer)->b70 = -1;
         } else if (nm > 0) {
-            // Mixed job: B70-tier assignments run on the device, CPU-tier assignments run
-            // below, and the contributions are merged at the end. -1 = "not mine" is the
-            // skip convention both sides already honour (parent-owned entries arrive this
-            // way on fused jobs), so each half needs no weight fudging.
+            // Mixed job: B70-tier assignments run on the device WHILE the CPU pool works
+            // the CPU-tier half on this thread, merged at the end. -1 = "not mine" is the
+            // skip convention both sides already honour (parent-owned picks arrive this
+            // way on fused jobs), so neither half needs weight fudging. The plugin call
+            // blocks its borrowed thread only; all plugin locks are private to it.
             t_sel_a.resize(nsel); t_sel_b.resize(nsel);
             for (int i = 0; i < nsel; ++i) {
                 const int32_t v = sel[i];
@@ -4012,10 +4066,27 @@ void exl3_moe_cpu_forward_raw(
                 t_sel_b[i] = (v >= bn) ? v : -1;
             }
             t_scratch.resize((size_t)rows * layer->hidden_size);
-            if (b70().forward(layer->b70, x, t_sel_a.data(), wts, t_scratch.data(), rows, topk) == 0)
+            static const bool b70_async = []{
+                const char* e = getenv("EXL3_MOE_B70_ASYNC");
+                return e && e[0] == '1';
+            }();
+            if (b70_async)
             {
+                // Overlap: the plugin call runs on a borrowed thread while the CPU pool
+                // works this thread. Costs a thread handoff per job and one core outside
+                // the pool's pinning - measurable on small CPU-heavy tiers, so opt-in.
+                sel_orig = sel;
+                b70_fut = std::async(std::launch::async,
+                    [hb = layer->b70, x, a = t_sel_a.data(), wts, s = t_scratch.data(), rows, topk]() {
+                        return b70().forward(hb, x, a, wts, s, rows, topk);
+                    });
                 b70_add = true;
                 sel = t_sel_b.data();   // consumed by the grouping below; no nested forwards
+            }
+            else if (b70().forward(layer->b70, x, t_sel_a.data(), wts, t_scratch.data(), rows, topk) == 0)
+            {
+                b70_add = true;         // sync merge at job end
+                sel = t_sel_b.data();
             }
             else
             {
@@ -4208,7 +4279,21 @@ void exl3_moe_cpu_forward_raw(
     }
     if (b70_add)
     {
-        // merge the B70-tier contribution; the CPU pass zero-initialised out, so plain add
+        // merge the B70 half; the CPU pass zero-initialised out, so plain add. An async
+        // half that failed reruns the WHOLE job on the CPU (pinned first: the recursive
+        // call takes the pure-CPU path)
+        bool ok = true;
+        if (sel_orig)
+        {
+            try { ok = b70_fut.get() == 0; } catch (...) { ok = false; }
+            if (!ok)
+            {
+                fprintf(stderr, "[b70] forward failed; layer pinned to CPU\n");
+                const_cast<MoeCpuLayer*>(layer)->b70 = -1;
+                exl3_moe_cpu_forward_raw(handle, x, sel_orig, wts, out, rows, topk, threads);
+                return;
+            }
+        }
         float* sp = t_scratch.data();
         const size_t nout = static_cast<size_t>(m_total) * layer->hidden_size;
         for (size_t i = 0; i < nout; ++i) out[i] += sp[i];
@@ -4271,6 +4356,7 @@ void exl3_moe_cpu_forward
 void exl3_moe_cpu_set_prof(bool) {}
 int exl3_moe_cpu_is_b70(int64_t) { return 0; }
 int exl3_moe_cpu_b70_slots(int64_t) { return 0; }
+int64_t exl3_moe_cpu_b70_register_all() { return 0; }
 void exl3_moe_cpu_pool_prime(int) {}
 int64_t exl3_moe_cpu_pool_stress(int, int, int, int) { NO_MOE_CPU(); return 0; }
 std::pair<std::vector<int64_t>, int64_t> exl3_moe_cpu_core_order() { return { {}, 0 }; }

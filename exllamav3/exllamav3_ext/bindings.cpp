@@ -206,6 +206,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("exl3_moe_cpu_set_memops", &exl3_moe_cpu_set_memops, "exl3_moe_cpu_set_memops");
     m.def("exl3_moe_cpu_set_prof", &exl3_moe_cpu_set_prof, "exl3_moe_cpu_set_prof");
     m.def("exl3_moe_cpu_b70_slots", &exl3_moe_cpu_b70_slots, "exl3_moe_cpu_b70_slots");
+    m.def("exl3_moe_cpu_b70_register_all", &exl3_moe_cpu_b70_register_all, "exl3_moe_cpu_b70_register_all");
     m.def("exl3_moe_cpu_b70_update", &exl3_moe_cpu_b70_update, "exl3_moe_cpu_b70_update",
         py::arg("handle"), py::arg("e"),
         py::arg("gate_trellis"), py::arg("gate_suh"), py::arg("gate_svh"), py::arg("gate_bias"),

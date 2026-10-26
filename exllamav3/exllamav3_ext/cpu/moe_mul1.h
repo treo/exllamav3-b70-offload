@@ -35,6 +35,7 @@ struct MoeCpuMatrix
     int swz = 0;
 };
 
+#include <functional>
 struct MoeCpuLayer
 {
     std::vector<MoeCpuMatrix> gates;
@@ -52,6 +53,10 @@ struct MoeCpuLayer
     // slots [b70n, num_experts) are arena/CPU-tier only and filtered out of B70 jobs.
     // b70n == num_experts means the classic full registration.
     int b70n = 0;
+    // Deferred (auto-sized) B70 registration: set when EXL3_MOE_B70_SUB=auto; invoked by
+    // exl3_moe_cpu_b70_register_all() at worker start, when the true layer count is known.
+    // Receives this layer's 1-based remaining count; returns the plugin handle (or -1).
+    std::function<int64_t(int)> b70_reg;
 };
 
 // Register a layer: per-expert tensor lists (CPU, contiguous). Returns a handle.
@@ -131,6 +136,9 @@ int exl3_moe_cpu_is_b70(int64_t handle);
 // B70-tier slot count for a layer (0 when the layer is not B70-registered). Slots
 // [0, count) of the worker's arena order are device-resident on the B70.
 int exl3_moe_cpu_b70_slots(int64_t handle);
+// Register every layer that deferred (SUB=auto), dividing the device budget fairly by
+// the true pending-layer count. Returns the number of registered layers.
+int64_t exl3_moe_cpu_b70_register_all();
 
 // Dynamic placement sync: after the worker REPLACES one expert in its arena (install), this
 // re-uploads that expert to the B70 device copy of a registered layer. No-op when the layer

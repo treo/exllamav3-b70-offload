@@ -840,6 +840,16 @@ def _moe_cpu_child_main(conn, model_dir, threads, stage_threads, pinned = False,
         shm = shared_memory.SharedMemory(name = shm_name)
         base = np.frombuffer(shm.buf, dtype = np.uint8).ctypes.data
         cext.exl3_moe_cpu_set_prof(layout.get("cpu_prof", False))
+        # Deferred (EXL3_MOE_B70_SUB=auto) B70 registrations: NOW the layer count is known,
+        # so the device budget divides evenly across all of them. The resulting tier sizes
+        # go back to the parent (streaming and promote-on-miss must not steal B70 work);
+        # until the parent consumes this message its masks read 0 = classic behaviour,
+        # which is only a transient pre-start perf nuance, never a correctness one.
+        cext.exl3_moe_cpu_b70_register_all()
+        try:
+            conn.send(("b70n", [cext.exl3_moe_cpu_b70_slots(i) for i in range(len(layer_views))]))
+        except Exception:
+            pass
 
         def install(li, ei, keys):
             """Replace expert ei of layer li with the checkpoint tensors at `keys` (one key
@@ -1069,6 +1079,9 @@ class MoeCpuHost:
                 self.acked += 1
             elif msg[0] == "chunk":
                 self._attach_chunk(msg[1], msg[2], msg[3])
+            elif msg[0] == "b70n":
+                # auto-sized B70 tiers (deferred registration): replaces the per-layer acks
+                self.layer_b70n = list(msg[1])
             return True
         if not self.proc.is_alive():
             raise RuntimeError("CPU MoE worker process died")
@@ -1884,7 +1897,12 @@ class MoeCpuHost:
         caller must have quiesced (full stream sync => job ring drained, worker idle) before
         calling; blocks until the child acks the in-place arena copy."""
         self._send_queue.put(("install", layer_idx, local_idx, keys))
-        msg = self.conn.recv()
+        while True:
+            msg = self.conn.recv()
+            if msg[0] == "b70n":
+                self.layer_b70n = list(msg[1])
+                continue
+            break
         if msg[0] != "ok":
             raise RuntimeError(f"CPU MoE worker expert install failed: {msg[1] if len(msg) > 1 else msg}")
 
