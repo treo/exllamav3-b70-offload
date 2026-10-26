@@ -889,3 +889,41 @@ kernel build fails at first LAUNCH, and piped icpx rc hides build death - ALWAYS
 the log, never just grep the last line (two "results" this session came from stale
 binaries). (3) runtime stage-gates let LLVM DCE the loads being benchmarked - gate at
 compile time. (4) probe K must be a multiple of the dpas k-step or windows alias.
+
+## Three-tier B70 placement campaign (4.05bpw -mcs 420, pinned arena, ring, budget 0.70)
+
+Columns: prefill tok/s @1024 / decode S=1 @ctx0. All rows are real log extractions
+(/tmp/tt_grid*.csv), interleaved, one pass.
+
+| placement                             | pre   | dec  |
+|---------------------------------------|-------|------|
+| no B70 (pure CPU + pinned streaming)  | 226   | 37.5 |
+| classic full-layer (21/48 registered) | 590   | 48.1 |
+| SUB=0.20 (48/48, tier 84)             | 447   | 46.9 |
+| SUB=0.35 (tier 148)                   | ~495  | 54.0 |
+| SUB=0.50 (tier 212)                   | 532   | 54.2 |
+| SUB=0.70 (tier 294)                   | 558   | 51.4 |
+| SUB=auto (fair share, tier 201)       | 577   | 51.0 |
+
+Readings:
+- Decode is where three-tier pays: +6 t/s (+13%) over full-layer at SUB 0.35-0.5; the
+  hot experts of ALL layers hit device VRAM instead of 27 layers' CPU compute. The
+  -mcpa anti-theft masks (streaming + promote-on-miss skip B70-tier slots) are a
+  necessary half: without them the pinned arena strips the B70 of exactly that work.
+- Prefill wants BIG device tiers (monotone in SUB): mixed jobs put the CPU-tier tail
+  through the CPU pool, and the pool is slower than either GPU. Full-layer + aggressive
+  streamed prefill still wins prefill by ~8% at equal budget.
+- auto (deferred fair-share at worker start; also kills the load-time register/forward
+  race entirely) lands prefill-best of any three-tier config (577) with dec 51.
+- std::async overlap of the mixed-job halves: +/-0 at tier 0.5, -1.5 at 0.2 (thread
+  handoff + a core outside the pinned pool). REMOVED. The serial cost was elsewhere.
+- budget 0.82 + subsets: registration fault storm gone (footprint now bounded per
+  layer); keep 0.70 as the sane default anyway.
+- Trap recounted: I again reasoned from "measurements" that had never run (round5 died
+  on a missing chmod +x while I narrated its results). CHECK THE CSV EXISTS BEFORE
+  BELIEVING A NUMBER. The commit carrying the phantom async numbers was amended.
+
+Open: stream_t sweep at SUB=0.5 (round 7) - the pinned-arena stream to the 3090 is
+26 ms/layer of pure PCIe at st=auto during 1024-token prefill; larger tiers shrink
+the streamed SET (fewer, hotter streamed experts), smaller tiers grow it; the
+interaction may dominate the remaining prefill gap. Then: 2.68bpw sweep.
