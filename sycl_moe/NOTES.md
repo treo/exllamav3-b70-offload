@@ -315,14 +315,20 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
        (EXL3_MOE_CPU_SLOTS, max 8) is full - with big jobs there are few of them, but deeper
        ring/lookahead is untested;
    (d) the 3090 streamed fused kernel charges ~2 ms per mt64 launch for ~24 experts of ~60-80
-       picks each (padding to the 64-row tile is ~1.5x, and the tier ladder only offers 16/32/64).
-
-7. **Coupled-knob sweeps only.** `stream_t` and `cap_rows` interact multiplicatively (measured:
-   `stream_t` 11→24 gains nothing at `cap_rows` 128, +8% at 1024; `cap_rows` 128→1024 gains
-   nothing at `stream_t` 11, +8-10% at 24). Sweeping one inside the dead zone of the other is how
-   both got recorded as 'flat'. Related: measure the **converged** placement (pb.py reps 2+, or
-   perf.py's second run) - on the first forward the worker tier still holds the hot experts, which
-   inverts the streamed/tail split (20.8 k picks/layer vs 5-7 k converged).
+       picks each (padding to the 64-row tile is ~1.5x, and the tier ladder only offers 16/32/64);
+   (e) the residual ~400 ms of 3090 idle per 4096-row pass is NOT one big stall: besides ~143 ms
+       in 46 gaps ≥400 us, ~250 ms sits in ~18 thousand sub-300 us gaps, i.e. the queue drains
+       between the per-layer syncs (`counts1.tolist()` and the tail `nonzero()` are the only two,
+       but the python between them and the first launch is exposed). Chasing it means either
+       fewer exposed host µs per layer or fewer syncs, and it must be measured with `pb.py`
+       interleaving, because it is the same order as box drift.
+   RE-CHECKED 2026-10-28, all flat-or-worse at the new defaults (`ab.sh knobs`, `knobs2`):
+   `CPU_WSLOTS=4` (-6% @4096), `CPU_WSLOT_MB=64 + STREAM_BATCH_EXPERTS=48` (-2%), `CPU_SLOTS=8`
+   (mixed), `B70_OVERLAP=0`, `SLOT_ROWS_DEV=2048`, `STREAM_T_DEV=20` (all within ±3%), and
+   `MTILE=0` (-6%, so the streamed m-tile ladder does pay). `-mcs 320` (moving 64 more experts
+   per layer out of the 3090's resident tier into the B70-backed worker tier) is WORSE:
+   1645-1712/2037-2078 vs 1731/2139 at 2048/4096 - the 3090's resident path is cheaper per pick
+   than either offload leg, so the split line stays at 256.
 
 Dead ends — do not re-litigate (evidence in `archive/kernel-microopt.md`, `archive/int8-dpas-tier.md`,
 `archive/decode-command-latency.md`): dp4a/esimd in generic kernels, `dot_acc` ext, col-major
@@ -332,9 +338,18 @@ bytesum tree, `-510` folding, large GRF, annotated_ptr hints, 128-lane WGs witho
 `-mcs 512`, `std::async` mixed-job overlap at small tiers, **wide-M (MOE_MAXM 16/32)**, **A-ring
 for the all-narrow slim kernel (`EXL3_MOE_I8SLIMRING=1`: +14..+18% at rows 1-8, lever 6 closed)**,
 **int8 m16 joint_matrix accumulator (not supported by the device)**, **blocking the streamed tier
-on fully B70-registered layers** (the 2026-10-27 prefill regression; see Standing decisions).
+on fully B70-registered layers** (the 2026-10-27 prefill regression; see Standing decisions),
+**`-mcs 320` on 2.05bpw** and **`CPU_WSLOTS>2` / bigger streamed batches** (2026-10-28, all under
+the new split: `ab.sh knobs`/`knobs2` in `SESSION_20261028.md`).
 
 ## Also
 
 - `PLAN_L0.md` — scoped native-L0 v1 (int8 decode chain), gates and footguns.
+- `SESSION_20261028.md` — the prefill session log behind this file's 'State' section: the timeline
+  measurements (kineto/dmon/xpu-smi), the `stream_t` × `cap_rows` campaign, the negative knob
+  results, the accuracy investigation, and the `pb.py` vs `perf.py` disagreement (use `perfab.sh`
+  for anything you intend to ship).
+- Tools: `pb.py` (in-process prefill bench, `-prof` for kineto), `tl_analyze.py` (trace busy/idle),
+  `mon.py` (both cards' link/power/util), `ab.sh` / `perfab.sh` (interleaved arms),
+  `split_report.py` (per-forward workload split from `EXL3_MOE_STREAM_DEBUG`).
 - `archive/INDEX.md` — what's where, symptom→page lookup, provenance of this rewrite.
