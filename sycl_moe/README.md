@@ -130,8 +130,10 @@ EXL3_MOE_PINNED_ARENA=1   # -mcpa: page-locked arena + streamed prefill + promot
 ```
 
 The B70 holds the hot tier of *every* layer (fair budget share, sized at worker start);
-`-mcpa` mechanisms then cooperate instead of stealing: streaming and promote-on-miss only
-touch CPU-tier slots. On deep oversubscription (4.05bpw) `EXL3_MOE_B70_SUB=0.50
+`-mcpa` mechanisms then cooperate instead of stealing: streaming, promote-on-miss and the
+placement sweep only take CPU-tier slots (prefill-priority deployments may trade ~10% prefill
+for that protection - `EXL3_MOE_CPU_SWAP_TIER=0` reverts to the steal-friendly classic regime,
+which measured the best raw prefill on 2.68bpw). On deep oversubscription (4.05bpw) `EXL3_MOE_B70_SUB=0.50
 EXL3_MOE_STREAM_T=4` measured ~580-600 prefill / 54 decode (overlap adds 0-4%, noise-bound).
 Measured (this box, 3090+B70):
 2.68bpw 748 prefill / 53.3 decode (+43%/+12% vs the classic whole-layer tier),

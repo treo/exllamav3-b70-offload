@@ -953,3 +953,23 @@ Final headline configs measured this session (pre/dec tok/s):
   4.05bpw SUB=0.5+st4+pinned+ring: ~580-600/54 (classic 590/48.1, CPU-only 226/37.5)
 2.05bpw regression trio running (full-tier registration + anti-theft rule = streaming
 blocked on fully registered layers by design; must confirm no prefill loss there).
+
+## Guard trade-off finale (rounds 15-17): placement regime is a real fork
+
+2.68bpw same-build comparisons, pre/dec:
+  pre-guard  (SWAP_TIER=0-era, r9): 748 / 53.3   <- prefill king
+  hard guard (tier-only sources):          484 / 58.7
+  soft guard (HOTMULT=4):                  512 / 59.2
+  soft guard + st2:                        558 / 59.1  (st4: 528/58.3, sub0.7+st4: 562/56.5)
+4.05: pre-guard auto 577/51.0 -> guarded default 491-508/57.3-57.9; SUB=0.5+st4 guarded 598/54.7.
+Keeping hot experts B70-resident (guard) buys +5..6 decode t/s and costs prefill proportionally
+to how much hot mass the sweep would have moved to the 3090 - streaming can partly compensate
+(st2 recovers ~46 on 2.68) but the ~750 prefill number belongs to the steal-from-B70 regime.
+HOTMULT 8 vs 4 vs 2: no material prefill difference (outliers are rare); 2 kept decode best.
+RECOMMENDED DEFAULTS STAND as shipped: guard on (decode-weighted; this box is decode-poor),
+stream_t auto probe, tier auto. Prefill-priority deployments: EXL3_MOE_CPU_SWAP_TIER=0
+(+ optionally pinned streaming) reverts to the 748-era behavior; documented knob, not default.
+Every model on every axis this session (best measured, pre/dec):
+  2.05: 1886 / 72.6   (pure defaults, self-tuned full tier)
+  2.68: 748 / 60.0    (TIER=0 era max prefill | guard+st2/HOTMULT=2 for decode-first 556/60)
+  4.05: 599 / 57.9    (SUB=0.5+st4 prefill | default guarded for 494/57.9, +165%/+54% vs no-B70)
