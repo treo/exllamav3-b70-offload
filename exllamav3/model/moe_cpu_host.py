@@ -2097,6 +2097,15 @@ class MoeCpuHost:
         gb, ub, db = spec["proj_bytes"]
         exp_b = spec["expert_bytes"]
         per_slot = min(self.wslot_size // exp_b, self.batch_experts)
+        if TUNING.stream_debug:
+            # Worked split for the policy analysis (host-side arithmetic only, no syncs): an
+            # assignment is streamed iff its expert qualified, so the tail carries the rest,
+            # spread over n_tail of the rows.
+            n_str = sum(counts_h[e] for e in streamed)
+            print(f" -- tail L{layer_idx}: rows {rows} n_tail {n_tail} "
+                  f"streamed_experts {len(streamed)}/{E} streamed_assign {n_str} "
+                  f"tail_assign {sum(counts_h) - n_str} of {sum(counts_h)} "
+                  f"exp_b {exp_b} per_slot {per_slot}")
         gated = pd.get("g") is not None
         abort = self.gpu_base_ptr + 128
         copy_stream = st["copy_stream"]
