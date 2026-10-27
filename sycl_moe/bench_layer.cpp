@@ -597,7 +597,7 @@ int main(int argc, char** argv)
         // chunks + CSR; width cap follows the tier (see int8_pick): int8 8, fp32 4
         const int k2x = 2 * a.bits + a.hb;
         const int mcapx = moe_sycl::int8_mcap_pick(
-            moe_sycl::int8_pick(k2x == 4 || k2x == 5 || k2x == 8, rows),
+            moe_sycl::int8_pick(moe_sycl::moe_k2_dpas(k2x), rows),
             rows, rows * topk, E);
         std::vector<std::vector<std::pair<int, float>>> per_expert(E);
         for (int t = 0; t < rows; ++t)
@@ -752,7 +752,7 @@ int main(int argc, char** argv)
     // width cap must equal what layer.forward() will pick (fp32 tier = 4 accumulator chains)
     const int k2m = 2 * a.bits + a.hb;
     const int MAX_M = moe_sycl::int8_mcap_pick(
-        moe_sycl::int8_pick(k2m == 4 || k2m == 5 || k2m == 8, rows),
+        moe_sycl::int8_pick(moe_sycl::moe_k2_dpas(k2m), rows),
         rows, rows * std::min(a.topk, a.E), a.E);
     std::vector<std::vector<std::pair<int, float>>> per_expert(a.E);
     for (int t = 0; t < rows; ++t)

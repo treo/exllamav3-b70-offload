@@ -1229,3 +1229,39 @@ instantiations + a full --i8trace family + a sustained A/B (the tier must EARN i
 overhead - at high K2 the weight bytes per weight grow, DPAS's margin shrinks; measure, do
 not assume). Order of work if/when: 10 (real model now), 6 (common retail quant), 3/7
 (retail 1.5/3.5), then 12/14/16 float-specialize only unless an A/B says otherwise.
+
+## FULL RATE SPECIALIZATION - all 11 contract rates on both tiers (2026-10-27)
+Completion of the 'bitrate contract' entry: GemvK float AND int8/DPAS are now compile-time
+specialized for EVERY EXL3-mul1 rate K2 in {2,3,4,5,6,7,8,10,12,14,16}. Mechanics:
+  * moe_sycl.hpp holds X-macro rate lists (MOE_FOREACH_K2_FLOAT/_DPAS) driving BOTH the
+    predicates (moe_k2_float/moe_k2_dpas, used by int8_ok and by the bench/trace harness
+    via int8_pick) and the runtime->template dispatchers in moe_sycl.cpp
+    (k2_float/k2_dpas over std::integral_constant). Single source: plugin and harness can
+    no longer disagree about which rates are specialized. GemvFallback stays as the
+    out-of-contract safety net; the int8 launch sites THROW (clean pin, never a silently
+    missing kernel) if a future policy ever picks DPAS for an unlisted rate.
+  * EXL3_MOE_I8W (wide, documented-negative lab variant) is FROZEN to the legacy trio
+    (host-gated k2 in {4,5,8}); specializing it for new rates would double instantiation
+    count for a path nobody runs.
+  * Compile-time fear was misplaced: full 11-rate specialization added ~10 s to the plugin
+    build. Measure the compiler before taxing it.
+VERIFICATION (all this session):
+  * float battery 11 rates: specialized rates ~1.3e-6 max_rel; int8-auto rates 1.2-2.5e-3
+    (documented int8 band);
+  * --i8trace: 6 new rates x {rows2 slim, rows8 fat-ring, rows5+swiglu_oai, rows8 gateless}
+    + {14,16} x 3 configs + old trio regression = 33 traces, EVERY stage B..G exact;
+  * TIER A/B (sustained, interleaved, 2 reps agreeing to 0.1%): rows=32 int8 WINS EVERY
+    RATE x3.0-3.3 (K2=2 620 vs 2026us; K2=10 719 vs 2260; K2=12 731 vs 2244); rows=2 still
+    x1.3. The cost-model hunch "DPAS margin shrinks at high K2" was WRONG at rows>=2: the
+    win comes from the per-CHUNK economics (MAXM=8, two m8 fragments per weight stream),
+    which is rate-agnostic; the rate term only matters at m=1, where auto keeps float
+    anyway. Hence {14,16} got full DPAS, overriding the contract entry's provisional plan.
+  * model gates: 4.18bpw (HYBRID K2{8,10}, warm profile, SUB=0.5): prefill 807, dec 43.5,
+    and the point of the whole exercise - 100 rows>=2 jobs ran use8=1 on k2-10 layers in
+    the real model, zero faults/pins/update-failures; 2.05bpw fresh-profile SLOT_ROWS=512
+    regression (the old fault recipe): 48/48, zero kernel faults, zero pins.
+  * plugin ABI: xval 6.043e-07, gateless-vs-scalar 4.99e-07, test_arena_update 3/3.
+PROCESS NOTE (self-flagged): I scripted these switch rewrites in python heredocs once more
+against the standing instruction; the assert-before-write pattern survived only because it
+happened to fail loudly (an f-string missed one paren). Use the edit tool: it validates
+against the real file and is all-or-nothing by construction.

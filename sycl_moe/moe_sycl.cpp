@@ -24,6 +24,7 @@ using AP_W = expe::annotated_ptr<const uint32_t, decltype(expe::properties{g_rea
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <unistd.h>
 #include <sys/time.h>
 
@@ -119,9 +120,12 @@ void MoeSyclLayer::init(sycl::queue* q, const LayerParams& p,
         }
     nsl = getenv("MOE_NSL") ? atoi(getenv("MOE_NSL")) : 0;  // 0 = auto per matrix class
     const int k2 = 2 * p.bits + p.hb;
-    // DPAS tier: stream-layout window decode is instantiated for these rates; N/K divisibility
-    // (tiles of 16, k-frags of 8) holds for the Qwen3.8-Flash-Next shapes (H 2560, I 640).
-    int8_ok = (k2 == 4 || k2 == 5 || k2 == 8) && (p.hidden % 16 == 0) && (p.interm % 16 == 0)
+    // DPAS tier: stream-layout window decode is instantiated for the CONTRACT rates
+    // (moe_k2_dpas; geometry divisibility - tiles of 16, k-frags of 8 - holds for the
+    // Qwen3.8-Flash-Next shapes H 2560, I 640). The product-word identity and the t29
+    // stream windows are rate-agnostic: this gate is instantiation coverage, and the
+    // list is single-sourced with the trace harness (see hpp 'bitrate contract').
+    int8_ok = moe_k2_dpas(k2) && (p.hidden % 16 == 0) && (p.interm % 16 == 0)
               && (p.hidden % 8 == 0) && (p.interm % 8 == 0);
     nm_ws_ = p.gated ? 2 : 1;
     d_tab = sycl::malloc_device<uintptr_t>(tab.size(), *q);
@@ -923,6 +927,23 @@ struct Gemv8
 
 // ------------------------------------------------------------------ forward
 
+// runtime k2 -> compile-time rate specialization. Lists live in moe_sycl.hpp and drive
+// BOTH the predicates and these dispatchers, so 'specialized' and 'dispatchable' cannot
+// drift. V == -1 reaches only non-specialized (contract-violating) rates: float callers
+// fall through to GemvFallback; int8 launch sites are unreachable for them because the
+// tier itself is gated on moe_k2_dpas (assert catches a future policy bug as a crash,
+// never as a silently missing kernel).
+#define MOE_K2D(V) case V: f(std::integral_constant<int, V>{}); return;
+template <typename F> static inline void k2_dpas(int k2, F&& f)
+{
+    switch (k2) { MOE_FOREACH_K2_DPAS(MOE_K2D) default: f(std::integral_constant<int, -1>{}); }
+}
+template <typename F> static inline void k2_float(int k2, F&& f)
+{
+    switch (k2) { MOE_FOREACH_K2_FLOAT(MOE_K2D) default: f(std::integral_constant<int, -1>{}); }
+}
+#undef MOE_K2D
+
 static int int8_env()
 {
     static const int v = []{
@@ -1184,26 +1205,28 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 const char* e = std::getenv("EXL3_MOE_I8RING");
                 return !e || e[0] != '0';   // default ON since -21..-43% prefill bit-exact; =0 opts out
             }();
-            const bool wide = wide_ok && (I / 16) % 8 == 0;
+            const bool wide = wide_ok && (I / 16) % 8 == 0 && (k2 == 4 || k2 == 5 || k2 == 8);  // I8W lab variant frozen to the trio
             const bool ring = ring_ok && !slim && (I / 16) % 8 == 0;
             const size_t g0 = (wide || ring) ? (size_t)(I / 16 / 8) * 128 * nsl8_gu
                                    : (size_t)(I / 16) * 16 * nsl8_gu;
             launch([&](sycl::handler& cgh) {
                 sycl::local_accessor<unsigned char, 1> slm({ring ? 32768u : (wide ? 16384u : 2048u)}, cgh);
                 if (ring) {
-                    switch (k2) {
-                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<4, 8, true, true>{g8, slm}); break;
-                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<5, 8, true, true>{g8, slm}); break;
-                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<8, 8, true, true>{g8, slm}); break;
-                    }
+                    k2_dpas(k2, [&](auto R) {
+                        constexpr int V = decltype(R)::value;
+                        if constexpr (V > 0)
+                            cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {128, 1}), Gemv8<V, 8, true, true>{g8, slm});
+                        else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
+                    });
                     return;
                 }
                 if (slim) {
-                    switch (k2) {
-                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4, 1, false>{g8, slm}); break;
-                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<5, 1, false>{g8, slm}); break;
-                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<8, 1, false>{g8, slm}); break;
-                    }
+                    k2_dpas(k2, [&](auto R) {
+                        constexpr int V = decltype(R)::value;
+                        if constexpr (V > 0)
+                            cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<V, 1, false>{g8, slm});
+                        else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
+                    });
                     return;
                 }
                 if (wide) {
@@ -1214,11 +1237,12 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     }
                     return;
                 }
-                switch (k2) {
-                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<4, 1>{g8, slm}); break;
-                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<5, 1>{g8, slm}); break;
-                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<8, 1>{g8, slm}); break;
-                }
+                k2_dpas(k2, [&](auto R) {
+                    constexpr int V = decltype(R)::value;
+                    if constexpr (V > 0)
+                        cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)slots}, {16, 1}), Gemv8<V, 1>{g8, slm});
+                    else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
+                });
             });
         }
 
@@ -1337,26 +1361,28 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 const char* e = std::getenv("EXL3_MOE_I8RING");
                 return !e || e[0] != '0';   // default ON (see gu launcher)
             }();
-            const bool wide = wide_ok_d && (H / 16) % 8 == 0;
+            const bool wide = wide_ok_d && (H / 16) % 8 == 0 && (k2 == 4 || k2 == 5 || k2 == 8); // I8W lab variant frozen to the trio
             const bool ring = ring_ok_d && !slim && (H / 16) % 8 == 0;
             const size_t g0 = (wide || ring) ? (size_t)(H / 16 / 8) * 128 * nsl8_d
                                    : (size_t)(H / 16) * 16 * nsl8_d;
             launch([&](sycl::handler& cgh) {
                 sycl::local_accessor<unsigned char, 1> slm({ring ? 32768u : (wide ? 16384u : 2048u)}, cgh);
                 if (ring) {
-                    switch (k2) {
-                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<4, 8, true, true>{g8, slm}); break;
-                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<5, 8, true, true>{g8, slm}); break;
-                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<8, 8, true, true>{g8, slm}); break;
-                    }
+                    k2_dpas(k2, [&](auto R) {
+                        constexpr int V = decltype(R)::value;
+                        if constexpr (V > 0)
+                            cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {128, 1}), Gemv8<V, 8, true, true>{g8, slm});
+                        else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
+                    });
                     return;
                 }
                 if (slim) {
-                    switch (k2) {
-                        case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4, 1, false>{g8, slm}); break;
-                        case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<5, 1, false>{g8, slm}); break;
-                        default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<8, 1, false>{g8, slm}); break;
-                    }
+                    k2_dpas(k2, [&](auto R) {
+                        constexpr int V = decltype(R)::value;
+                        if constexpr (V > 0)
+                            cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<V, 1, false>{g8, slm});
+                        else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
+                    });
                     return;
                 }
                 if (wide) {
@@ -1367,11 +1393,12 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     }
                     return;
                 }
-                switch (k2) {
-                    case 4: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<4, 1>{g8, slm}); break;
-                    case 5: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<5, 1>{g8, slm}); break;
-                    default: cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<8, 1>{g8, slm}); break;
-                }
+                k2_dpas(k2, [&](auto R) {
+                    constexpr int V = decltype(R)::value;
+                    if constexpr (V > 0)
+                        cgh.parallel_for(sycl::nd_range<2>({g0, (size_t)nc}, {16, 1}), Gemv8<V, 1>{g8, slm});
+                    else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
+                });
             });
         }
 
@@ -1448,15 +1475,14 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const int units = (down ? nc * gb.nbk : nc * nm * gb.nbk) * gb.nsl;
         const size_t gn = (size_t)units * 128;
         launch([&](sycl::handler& cgh) {
-            switch (k2) {
-                case 4: if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4, false>{gb});
-                        else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<4, true>{gb});  break;
-                case 5: if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5, false>{gb});
-                        else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<5, true>{gb});  break;
-                case 8: if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8, false>{gb});
-                        else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<8, true>{gb});  break;
-                default: cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvFallback{gb, k2}); break;
-            }
+            k2_float(k2, [&](auto R) {
+                constexpr int V = decltype(R)::value;
+                if constexpr (V > 0) {
+                    if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<V, false>{gb});
+                    else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<V, true>{gb});
+                } else
+                    cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvFallback{gb, k2});
+            });
         });
     };
 

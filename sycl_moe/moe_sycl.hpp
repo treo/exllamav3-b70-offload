@@ -178,6 +178,19 @@ private:
 // will take.
 bool int8_pick(bool rate_ok, int rows);
 
+// THE BITRATE CONTRACT (NOTES 'bitrate contract'): EXL3/CUDA produces mul1 rates
+// K2 = 2*bits + hb in {2,3,4,5,6,7,8,10,12,14,16} - integer bits 1..8, half-bits ONLY
+// 1.5/2.5/3.5 (exl3_kernel_map.cu TORCH_CHECKs K<=3 && codebook==mul1). Rates that have
+// compile-time-specialized decoders on B70. X-macro lists are the SINGLE SOURCE for the
+// predicates here AND the runtime->template dispatchers in moe_sycl.cpp - plugin and the
+// bench/trace harnesses can never disagree about which tier/rate is specialized.
+#define MOE_FOREACH_K2_FLOAT(F) F(2) F(3) F(4) F(5) F(6) F(7) F(8) F(10) F(12) F(14) F(16)
+#define MOE_FOREACH_K2_DPAS(F)  F(2) F(3) F(4) F(5) F(6) F(7) F(8) F(10) F(12) F(14) F(16)
+#define MOE_K2P(V) case V: return true;
+inline bool moe_k2_float(int k2) { switch (k2) { MOE_FOREACH_K2_FLOAT(MOE_K2P) default: return false; } }
+inline bool moe_k2_dpas(int k2)  { switch (k2) { MOE_FOREACH_K2_DPAS(MOE_K2P)  default: return false; } }
+#undef MOE_K2P
+
 // ---- fault-attribution logging (OPEN BUG: DEVICE_LOST/pinned-CPU at large cap_rows)
 // EXL3_MOE_B70_ALLOCLOG=<file> records every USM alloc/free (site,ptr,bytes) plus one
 // geometry line per forward with all live pool/base pointers. The xe kernel driver logs
