@@ -208,8 +208,11 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
   (0.5 B/weight); installs are atomic in-place block overwrites; data pointers never move.
 - Workspace pool: process-wide, rebound on EVERY forward (`grow_p` is a pure rebind when it fits),
   grown in 64-chunk steps, excluded from the registration budget, and deliberately NOT
-  preallocated to the worst case. `cap_rows` default 128 (512 is safe post-fix in the float/h6
-  regimes; awaiting a cool-box A/B to raise it).
+  preallocated to the worst case. `cap_rows` default 128: the cool-box A/B finally ran
+  (2026-10-27, streamed regime, plugin with bucketing) - 256/512/1024 give 1925/1938-1957/1955
+  and 1920 at 512 with bucketing, i.e. FLAT against 128's 1857-1984, with no faults at any
+  setting; in the no-stream regime it does matter (128 → 512 lifts 1195 → 1411). So 128 stays
+  the default and `cap_rows` is a knob for no-PCIe deployments, not a free win.
 - Placement: default = cold/sparse experts on B70 (`SUB=auto` when oversubscribed), guard on
   (decode-weighted), stream_t auto probe. Hot experts on B70 measured WORSE (-18% prefill):
   per hot pick the 3090's streamed path is ~5x cheaper. `EXL3_MOE_CPU_SWAP_TIER=0` is the
@@ -250,9 +253,19 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
 4. **B70-side weight streaming into tier slots** (update+evict protocol) — the only way to beat
    748-era prefill *with* the decode gains; real cache-protocol work.
 5. Hardware: fix the PCIe lane bifurcation (3090 at x8) → prefill lifts directly.
-6. Small/parked: RING for slim kernels (~10 lines, rows2-4 only); split-K retune after ring;
-   K34i8+Q2 fusion (~-10 µs decode); int8 wide-row pairing; error-feedback int8 for quality
-   headroom. Full rationale: `archive/int8-dpas-tier.md`, `archive/decode-command-latency.md`.
+6. Small/parked: split-K retune after ring; K34i8+Q2 fusion (~-10 µs decode); int8 wide-row
+   pairing; error-feedback int8 for quality headroom. CLOSED today: RING for slim kernels
+   (measured negative at every all-narrow shape) and "MAXM 16/32 wide-M" (see 3). Full
+   rationale: `archive/int8-dpas-tier.md`, `archive/decode-command-latency.md`.
+7. Prefill ceiling is the LINK, not the placement: ~260 qualifying experts × ~184 us of DMA per
+   4096-token chunk per layer ≈ 2.3 s ⇒ the observed ~1900-2000 tok/s plateau with the streamed
+   tier engaged. The B70 holds the same weights at 608 GB/s but pays ~5.9 us per m8 fragment to
+   chew them, which currently loses the comparison for hot experts and wins it for sparse ones.
+   Anything that makes both legs do MORE work concurrently (rather than trading one against the
+   other) is where "balanced across the two GPUs" would actually come from: the tail job and the
+   streamed batches already overlap in `_submit_prefill_streamed`, but the parent blocks in
+   `_issue_compute` once the job ring (EXL3_MOE_CPU_SLOTS, max 8) is full, which starves the 3090
+   queue behind it - untested, and the reason st>48 falls off rather than flattening.
 
 Dead ends — do not re-litigate (evidence in `archive/kernel-microopt.md`, `archive/int8-dpas-tier.md`,
 `archive/decode-command-latency.md`): dp4a/esimd in generic kernels, `dot_acc` ext, col-major
