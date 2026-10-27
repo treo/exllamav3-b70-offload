@@ -1,6 +1,6 @@
 // t39_stream.cpp - B-operand stream-rate forensics for the int8 Gemv8 access pattern.
 //
-// Motivation (NOTES prefill roofline): forward time ~= 8-16 us per slot = per B-matrix
+// Motivation (archive/int8-dpas-tier.md, prefill roofline): forward time ~= 8-16 us per slot = per B-matrix
 // traversal; per-token DPAS work is nearly free. Implied per-slot stream rate is
 // ~100-200 GB/s against a ~570 GB/s device. This lab reads the SAME bytes with the SAME
 // unit->matrix mapping as Gemv8 but without DPAS/A-side machinery, in several access

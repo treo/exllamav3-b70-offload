@@ -20,7 +20,7 @@ exllamav3/exllamav3_ext/**/hip_*
 tests/models.local.yaml
 
 # sycl_moe build artifacts and experiment binaries (sources + README/NOTES/env.sh are tracked;
-# rebuild per README)
+# rebuild per README). archive/ = the topical working log split out of NOTES.md: docs only.
 sycl_moe/*
 !sycl_moe/*.cpp
 !sycl_moe/*.hpp
@@ -29,5 +29,8 @@ sycl_moe/*
 !sycl_moe/*.md
 !sycl_moe/*.sh
 !sycl_moe/.gitignore
+!sycl_moe/archive/
+sycl_moe/archive/*
+!sycl_moe/archive/*.md
 sycl_moe/*.bak*
 sycl_moe/bundle.bin

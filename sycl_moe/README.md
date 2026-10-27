@@ -29,17 +29,17 @@ the per-forward command floor ~33 µs binds), so auto mode keeps rows=1 forwards
 fp32 scalar-semantics pipeline; `EXL3_MOE_B70_INT8=1/0` forces either tier. End-to-end
 (2.05bpw -mcs256): prefill 2048 1456 (CPU worker) → 1711 (B70 fp32) → **1869-1880 tok/s**
 (B70 auto/int8), decode ~70-72 (fp32 tier; forced int8 measures 67.8 — float wins m=1
-in the real model too). See NOTES
-'int8 re-port' and 'SUSTAINED-CLOCK TIER A/B' for the packed-VNNI dataflow, the
-negative-splat trap, and why short benchmark windows lie about this GPU.
+in the real model too). See `archive/int8-dpas-tier.md` (packed-VNNI dataflow, the
+negative-splat trap, tier policy) and `archive/measurement-discipline.md` (why short benchmark
+windows lie about this GPU; sustained A/B tables in `archive/measurements-ledger.md`).
 
 ## Requirements
 
 - Intel Arc Pro B70 (or Xe2) GPU, `xe` kernel driver, compute-runtime ≥ 26.x
 - oneAPI Base Toolkit with `icpx` (developed on 2026.2). Builds use `-O3` (verified:
   bit-identical results, ~2.6% faster synthetic decode; an earlier '-O3 crashes icpx'
-  note turned out unreproducible — see NOTES if the compiler ever dies on these TUs,
-  fall back to `-O2` and re-file).
+  note turned out unreproducible — see `archive/platform-pitfalls.md` P10; if the compiler ever
+  dies on these TUs, fall back to `-O2` and re-file).
 - **FP flags are part of correctness**: always build with `-ffp-contract=off
   -foffload-fp32-prec-div`. Without them the device's fused mul+round and approximate
   `127/amax`-style divisions flip int8-quantization ties vs the CPU reference (visible
@@ -96,7 +96,7 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `EXL3_MOE_B70_COOP` | `0` disables the counter-fed fused DOWN kernel (float tier, `rows<=8`, compile-time-specialized rates: K5+K6 in ONE launch with CUDA-`exl3_moe_coop`-style arrival counters; `NSL_D=1` keeps the row sum in registers, no float atomics, summation order bit-stable vs the split path). Default on: ~-11us per decode forward (C-ABI 113→101 us on the xval shape). Sub-switches: `EXL3_MOE_B70_COOPDN=0` restores classic K5+K6; `EXL3_MOE_B70_COOPGU=1` opts into the parked (currently ~neutral) K2+K34 fusion. |
 | `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
 | `EXL3_MOE_B70_OVERLAP` | `0` disables prefill-size mixed-job overlap (B70 half on a borrowed thread while the CPU pool works the other half; default on for `rows>=16`, sequential for decode sizes). 0-4% prefill on 4.05bpw (noise-bound), neutral elsewhere. |
-| `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows). ALL eleven contract rates (K2∈{2,3,4,5,6,7,8,10,12,14,16}, halves only ≤3.5 — see NOTES 'bitrate contract') are compile-time specialized on both tiers; out-of-contract rates fall to the runtime float `GemvFallback`, never a fault. |
+| `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows). ALL eleven contract rates (K2∈{2,3,4,5,6,7,8,10,12,14,16}, halves only ≤3.5 — see `archive/mul1-trellis-spec.md`) are compile-time specialized on both tiers; out-of-contract rates fall to the runtime float `GemvFallback`, never a fault. |
 | `EXL3_MOE_B70_ALLOCLOG` | Path to a fault-attribution log (USM alloc/free + per-forward geometry, wall-clock stamped). Correlate with `journalctl -k` "Faulted Address" lines to attribute GPU UA faults to a specific buffer - this found the cap_rows=512 stale-pool-pointer bug. Zero cost when unset. |
 
 Works with `--moe_cpu_split` (dynamic, placement-profile driven) and `--moe_cpu_offload`.
@@ -183,9 +183,9 @@ EXL3_MOE_B70_INT8=1 ./bench_layer ... --i8trace            # int8 tier + per-sta
                                                          # (stages B..G must all print OK)
 ```
 
-Methodology note (cost us a day, see NOTES.md): **never A/B with `--v`** — SYCL
-event profiling inflates the 6-kernel pipeline ~40µs on this driver. Interleave runs of
-the binaries and take min-of-3 on the unprofiled median.
+Methodology note (cost us days, see `archive/measurement-discipline.md`): **never A/B with
+`--v`** — SYCL event profiling inflates the 6-kernel pipeline ~40µs on this driver. Interleave
+runs of the binaries and take min-of-3 on the unprofiled median.
 
 ### Plugin-ABI tools (run after ANY upload/register/change to the C ABI)
 
@@ -230,9 +230,12 @@ Notes:
   per-expert block layout (registration = one threaded host fill + one H2D copy; a dynamic-
   placement install is an atomic in-place block overwrite - no free, no repoint). VRAM budget
   + rollback on that one allocation; scratch lives in the workspace pool shared across layers
-  (rebound on every forward - never cache pool pointers per layer, see NOTES 'STALE POOL
-  POINTER').
+  (rebound on every forward - never cache pool pointers per layer, see
+  `archive/memory-and-registration.md` 'STALE POOL POINTER').
 - Hooks on the exllamav3 side: `exllamav3_ext/cpu/moe_mul1.cpp` (`B70Backend`, forward
   redirect, native-layout swizzle gate) and one `int64_t b70` field in `moe_mul1.h`.
-- `NOTES.md` — the full debug/optimization log: tile bit-layout derivation, the queue
-  ordering bugs, RNG gotchas, device-OOM governance, tuning table.
+- `NOTES.md` — the distilled must-read: current state, measurement/verification rules, platform
+  traps, standing decisions, ranked levers.
+- `archive/` — the full debug/optimization log split by topic (`archive/INDEX.md` lists files and
+  a symptom -> page lookup): tile bit-layout derivation, queue ordering bugs, the DPAS arc,
+  placement campaigns, memory forensics, lab inventory.

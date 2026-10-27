@@ -98,9 +98,10 @@ class MoeCpuTuning:
         # --- CPU worker / staging ---
         self.num_slots = int(os.environ.get("EXL3_MOE_CPU_SLOTS", 4))
         assert 1 <= self.num_slots <= 8, "EXL3_MOE_CPU_SLOTS must be 1..8 (MOE_MAX_SLOTS in moe_handoff.h)"
-        # 128 = largest value clean in every tested regime; 512 buys ~10% more prefill on
-        # 4.05/2.68 but hits an OPEN DEVICE_LOST fault under skewed (unseeded-profile) expert
-        # distributions with fat int8 jobs on the h4/DPAS tier - see sycl_moe/NOTES.md
+        # 128 = largest value clean in every tested regime. 512 buys ~10% more prefill on
+        # 4.05/2.68; the DEVICE_LOST seen there was root-caused (stale process-wide workspace
+        # pool pointer, fixed) but 512 stays unproven pending a cool-box A/B - sycl_moe/NOTES.md
+        # + sycl_moe/archive/memory-and-registration.md
         self.cap_rows = int(os.environ.get("EXL3_MOE_CPU_SLOT_ROWS", 128))
         # Physical cores kept free of pool workers for the host process, whether the pool pins
         # its workers (EXL3_MOE_CPU_PIN) or lets them float; the host is confined to them once

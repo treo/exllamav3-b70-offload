@@ -47,7 +47,8 @@ build script into `libb70moe.spv` shipped next to the .so (locate via dladdr; if
    on the same immediate list (it does when using the native queue handle); then plain
    append order suffices.
 5. Gates: `--i8trace` bit-exact battery + t32/t33/t41 + 2.05/4.05 decode A/B (paired,
-   decode deltas >=1 t/s are trustworthy per NOTES noise discipline).
+   decode deltas >=1 t/s are trustworthy per the noise floors in
+   archive/measurement-discipline.md).
 
 ## Known traps (this session's tally)
 - exec_mu already serializes warm/forward/update - keep holding it across the whole

@@ -1047,8 +1047,9 @@ int main(int argc, char** argv)
         moe_ref::forward(L, rchunks, hxB.data(), rows, refB.data());
         double worst = 0; int bad = 0;
         static const int altdup = []{ const char* e = getenv("MOE_ALTDUP"); return e ? atoi(e) : 1; }();
-        // CRITICAL (NOTES bug #8 reproduced): consecutive forwards MUST be chained through
-        // forward()'s pre_dep like b70_forward does with g_last_ev. On this stack the
+        // CRITICAL (the queue-ordering bug, archive/platform-pitfalls.md P1, reproduced here):
+        // consecutive forwards MUST be chained through forward()'s pre_dep like b70_forward
+        // does with g_last_ev. On this stack the
         // implicit in-order ordering between q.memcpy and q.submit is NOT enforced, so an
         // unchained alt loop lets forward N+1's blob H2D (which zero-inits the arrival
         // counters!) race with forward N's still-running kernels. With the GU fusion the

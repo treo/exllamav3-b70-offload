@@ -83,7 +83,8 @@ public:
     // x [rows,H] fp16 device; out [rows,H] fp32 device (written exhaustively by K6).
     // Returns the final queue event; callers doing further queue ops (e.g. D2H readback)
     // MUST depends_on it: this stack does not reliably serialize plain q->memcpy on
-    // preceding q.submit kernels within an in-order queue (root-caused, see NOTES.md).
+    // preceding q.submit kernels within an in-order queue (root-caused: NOTES, and
+    // archive/platform-pitfalls.md P1).
     sycl::event forward(const ChunkDev* chunks_host, int num_chunks, const TokenMap& tmap,
                         const uint16_t* x, float* out, int rows,
                         const sycl::event* pre_dep = nullptr);
@@ -194,7 +195,7 @@ private:
 // will take.
 bool int8_pick(bool rate_ok, int rows);
 
-// THE BITRATE CONTRACT (NOTES 'bitrate contract'): EXL3/CUDA produces mul1 rates
+// THE BITRATE CONTRACT (archive/mul1-trellis-spec.md): EXL3/CUDA produces mul1 rates
 // K2 = 2*bits + hb in {2,3,4,5,6,7,8,10,12,14,16} - integer bits 1..8, half-bits ONLY
 // 1.5/2.5/3.5 (exl3_kernel_map.cu TORCH_CHECKs K<=3 && codebook==mul1). Rates that have
 // compile-time-specialized decoders on B70. X-macro lists are the SINGLE SOURCE for the

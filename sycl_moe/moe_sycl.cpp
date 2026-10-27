@@ -4,7 +4,8 @@
 // gather.
 //
 // All control data (chunks, token CSR) travels in ONE host->device blob memcpy. Every kernel
-// is chained with explicit depends_on events (required on this L0 stack, see NOTES.md).
+// is chained with explicit depends_on events (required on this L0 stack: NOTES, and
+// archive/platform-pitfalls.md P1).
 // GEMV: work group = (chunk, matrix, 128-column block); each 16-lane sub-group owns one
 // 16x16 tile column strip; packed tile words are staged through shared memory, double
 // buffered over k.
@@ -267,8 +268,8 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     // re-prefaults up to ~335 MB; with it a run typically sees ONE grow per slot. Bounded
     // waste (<= 64 chunks ~ 120 MB across all slots), and deliberately NOT a startup
     // worst-case reservation: the naive nc bound (rows*topk under skew) is ~11 GB of pool
-    // at SLOT_ROWS=512, which would evict half the resident weights - see NOTES 'warm pool
-    // inflated under the weight set' incident, same trap smaller.
+    // at SLOT_ROWS=512, which would evict half the resident weights - see
+    // archive/memory-and-registration.md (warm-pool inflation / STALE POOL POINTER).
     const int ncg = (nc + 63) & ~63;
     grow_p(0, w_tin,   (size_t)ncg * 2 * MAXM * P.hidden);
     grow_p(1, w_tout,  (size_t)ncg * 2 * 8 * MAXM * P.interm);
@@ -775,7 +776,7 @@ struct CoopGuK
 
 // ------------------------------------------------------------------ counter-fed fused DOWN
 //
-// CUDA exl3_moe_coop doctrine (NOTES 'CUDA small-m doctrine'): at decode sizes the float
+// CUDA exl3_moe_coop doctrine (archive/decode-command-latency.md): at decode sizes the float
 // pipeline is COMMAND-bound, not math-bound, so K5+K6 fuse into ONE launch with NO barriers
 // and NO cooperative grid: every (chunk, 128-col blk, slice) WG stores its slice partial
 // exactly like GemvK, publishes with a global-space barrier, and bumps a completion counter
