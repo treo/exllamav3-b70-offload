@@ -9,11 +9,11 @@
 // 16x16 tile column strip; packed tile words are staged through shared memory, double
 // buffered over k.
 #include "moe_sycl.hpp"
-#ifdef MOE_GEMV_CACHEHINT
 #include <sycl/ext/intel/experimental/cache_control_properties.hpp>
 #include <sycl/ext/oneapi/experimental/annotated_ptr/annotated_ptr.hpp>
 namespace expe = sycl::ext::oneapi::experimental;
 namespace inte = sycl::ext::intel::experimental;
+#ifdef MOE_GEMV_CACHEHINT
 // weights are read exactly once per gemv: stream through L1/L2
 inline constexpr auto g_read_hint = inte::read_hint<inte::cache_control<
     inte::cache_mode::streaming, expe::cache_level::L1, expe::cache_level::L2>>;
@@ -96,6 +96,56 @@ inline void hadamard128(Item& it, int tid, sycl::local_ptr<float> v)
     sycl::group_barrier(it.get_group());
 }
 
+// L1-bypass scalar load for data another WORK-GROUP wrote EARLIER IN THE SAME LAUNCH.
+// Xe2 L1 is per-slice and NOT coherent: after an arrival-counter edge the data is certain
+// in L2, but a stale line in THIS slice's L1 would still be served by a normal load (the
+// counter's acquire covers ordering, not L1 freshness). ATOMIC_REF relaxed@device is the
+// form that demonstrably resolves in L2 on this stack - the annotated_ptr read_hint
+// spelling was tried FIRST and is INEFFECTIVE here: the GU+D fused pipeline reproduced a
+// byte-exact previous-forward `out` under alternating datasets (the reader slice kept the
+// earlier forward's tsw lines in L1; only the extra K34 kernel between launches in the
+// split pipeline evicted them, which is why each fusion ALONE passed). NB a static-data
+// bench CANNOT see this class of bug (stale bytes == correct bytes) - always stress with
+// --alt.
+template <typename T>
+inline T coop_load(const T* p)
+{
+    sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                     sycl::access::address_space::global_space>
+        ar(*const_cast<T*>(p));
+    return ar.load(sycl::memory_order::relaxed);
+}
+
+// Barrier-free 128-point sequentia hadamard in ONE 16-lane sub-group, strided
+// distribution v[p] = value at index 16p+lane. Widths 1,2,4,8 pair indices whose low
+// (lane) bits differ -> sub-group shuffles (xor 1,2,4,8); widths 16,32,64 pair indices
+// whose HIGH (slot) bits differ -> in-register slot xors. The level ORDER of the SLM
+// version (width 1..64 sequentially) is preserved and every pair executes the same
+// (a+b, a-b) ops on the same operands, so results are BIT-IDENTICAL to hadamard128 -
+// verified by the fused-down pipeline printing byte-identical check/rms vs the host
+// reference (1.740e-06 / 1.134e-06 at the default seed) while dropping 8 group barriers
+// per transformed row.
+static inline void had128_strided(sycl::sub_group sg, float v[8])
+{
+    const int ln = (int)sg.get_local_linear_id();
+#pragma unroll
+    for (int bit = 1; bit <= 8; bit <<= 1) {
+        float o[8];
+#pragma unroll
+        for (int p = 0; p < 8; ++p) o[p] = sycl::select_from_group(sg, v[p], ln ^ bit);
+#pragma unroll
+        for (int p = 0; p < 8; ++p) v[p] = (ln & bit) ? (o[p] - v[p]) : (v[p] + o[p]);
+    }
+#pragma unroll
+    for (int bit = 1; bit <= 4; bit <<= 1) {
+        float o[8];
+#pragma unroll
+        for (int p = 0; p < 8; ++p) o[p] = v[p ^ bit];
+#pragma unroll
+        for (int p = 0; p < 8; ++p) v[p] = (p & bit) ? (o[p] - v[p]) : (v[p] + o[p]);
+    }
+}
+
 } // namespace
 
 // ------------------------------------------------------------------ lifecycle
@@ -150,6 +200,7 @@ MoeSyclLayer::~MoeSyclLayer()
 {
     auto freep = [&](auto*& p) { if (p) { sycl::free(p, *Q); p = nullptr; } };
     freep(d_tab);
+    freep(coop_dbg_buf);
     freep(w_chunk);   // scratch buffers belong to the process-wide pool
 }
 
@@ -157,14 +208,32 @@ MoeSyclLayer::~MoeSyclLayer()
 // one set of scratch buffers (per-layer ws blew the B70 budget: 31 layers x ~600 MB).
 // Slots 0..4 float tier, 5..10 int8 tier (a8u a8d qsxu qsxd accgu accd).
 namespace {
-struct WsPool { void* buf[11] = {}; size_t cap[11] = {}; };
+struct WsPool { void* buf[12] = {}; size_t cap[12] = {}; };
 WsPool g_ws;
 }
 
 void MoeSyclLayer::ensure_ws(int nc, int rows)
 {
+    if (getenv("EXL3_MOE_WSDBG")) {
+        static bool done_once = false;
+        if (!done_once) {
+            done_once = true;
+            fprintf(stderr, "[wsdbg] caps:");
+            for (int i = 0; i < 12; ++i) fprintf(stderr, " %zu", g_ws.cap[i]);
+            fprintf(stderr, "\n[wsdbg] ptrs:\n");
+            for (int i = 0; i < 12; ++i) fprintf(stderr, "  [%d] %p\n", i, g_ws.buf[i]);
+            for (int i = 0; i < 12; ++i) for (int j = i + 1; j < 12; ++j)
+                if (g_ws.buf[i] && g_ws.buf[j]) {
+                    char* a = (char*)g_ws.buf[i]; char* b = (char*)g_ws.buf[j];
+                    size_t ba = g_ws.cap[i] * 4, bb = g_ws.cap[j] * 4;   // caps in floats? slots hold mixed types - print raw span overlap by address only
+                    if (a < b ? (a + 1 < b) : (b + 1 < a)) {} // noop
+                    (void)a; (void)b; (void)ba; (void)bb;
+                }
+        }
+    }
     auto grow_p = [&](int slot, auto*& p, size_t count) {
         using T = std::remove_pointer_t<std::remove_reference_t<decltype(p)>>;
+        if (count == 0) { p = nullptr; return; }   // zero-size job: not an OOM (malloc(0)->null)
         if (g_ws.buf[slot] && count <= g_ws.cap[slot]) { p = (T*)g_ws.buf[slot]; return; }
         if (g_ws.buf[slot]) { MOE_ALOG_FREE(g_ws.buf[slot], g_ws.cap[slot] * sizeof(T), "pool"); sycl::free(g_ws.buf[slot], *Q); g_ws_bytes -= g_ws.cap[slot] * sizeof(T); }
         T* np = sycl::malloc_device<T>(count, *Q);
@@ -206,6 +275,7 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     grow_p(2, w_h,     (size_t)ncg * MAXM * P.interm);
     grow_p(3, w_tind,  (size_t)ncg * MAXM * P.interm);
     grow_p(4, w_toutd, (size_t)ncg * 8 * MAXM * P.hidden);
+    if (coop_) grow_p(11, w_tsw, (size_t)ncg * MAXM * P.hidden);   // fused-down staging (float coop)
     if (nc > cap_nc) cap_nc = nc;
     // int8 slabs: grow_p no-ops when the existing cap already fits; sizing must happen on
     // EVERY nc/nsl combination the layer may see (warm batches use nsl=1, decode up to 8).
@@ -459,6 +529,504 @@ struct GemvFallback
         if (m > 1) dst[N + cG] = acc1 * KDQ;
         if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
         if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+    }
+};
+
+// ------------------------------------------------------------------ counter-fed fused GU
+//
+// K2 + K34 in one launch, same doctrine as CoopDownK (see its header comment): every
+// (chunk, mu, 128-col blk, slice) WG stores its tout slice exactly like GemvK, publishes,
+// and bumps ctrG[(j, blk)]; the LAST arrival of a (j, blk) unit (expected = nm x NSL_GU,
+// both projections feed one unit) runs the K34 body INLINE for that 128-column block:
+// fixed-order slice sums (coop_load) over both cats, Hadamard+svh+bias transforms,
+// activation, fused down-prep (suhd scale + Hadamard), tind store. The block is already
+// L2-hot for its owner, K34 disappears as a queue command, and the whole epilogue is
+// bit-identical to the split K34 (op order copied verbatim).
+// K1 (input prep) stays a separate command for now - folding it in means every WG
+// rotates its own x span (bounded redundancy) and constrains NSL_GU to 128-block-aligned
+// slices; measured follow-up candidate, keep the pipeline honest first.
+template <int K2V, bool MMA>
+struct CoopGuK
+{
+    GemvBase b;                    // gu conventions: tin/tout, tiles_n=I/16, nbk=I/128, nsl=NSL_GU
+    int* ctr;
+    int* dbg;                        // [0] gu epilogue fires (dbg build only, else null)
+    float* tindw;                    // writable tind (GemvBase::tind is const-in)
+    int act;
+    float lim;
+    int lab = 0;                     // EPHEMERAL ablation (EXL3_MOE_B70_COOP_LAB): 1 = arrive
+                                     // but skip the K34 epilogue, 2 = skip all coordination
+    sycl::local_accessor<float, 1> sh;    // 256: K34's g/u pair + down-prep reuse
+    sycl::local_accessor<int, 1> flg;
+
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+        return sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::sub_group_size<16>};
+    }
+
+    static constexpr int W = 4 * K2V;
+    static constexpr int KE = K2V & 1;
+    static constexpr int AD27 = (27 * K2V + KE) >> 1;
+    static constexpr int NW = (AD27 + 16 + 31 + 31) / 32 + 1;
+
+    void operator()(sycl::nd_item<1> it) const
+    {
+        // ---- gemv body: verbatim GemvK<K2V, MMA> for gate/up
+        const int unit = (int)it.get_group(0);
+        const int tid = (int)it.get_local_id(0);
+        const int sl = unit % b.nsl;
+        const int ub = unit / b.nsl;
+        const int blk = ub % b.nbk;
+        const int jmu = ub / b.nbk;
+        const int j = jmu / b.nm;
+        const int lmu = jmu % b.nm;
+        const int cat = b.gated ? lmu : CAT_UP;
+        const int mu = b.gated ? lmu : 0;
+        const int e = b.chunks[j].expert;
+        const int m = b.chunks[j].m;
+        const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[(F_TRI * 3 + cat) * b.E + e];
+        const float* src_tin = b.tin + ((size_t)(j * 2 + mu) * MAXM) * b.H;
+        const int K = b.H;
+        const int N = b.I;
+
+        const int cG = blk * 128 + tid;
+        const int tile_n = cG >> 4, cin = cG & 15;
+        const int A2 = (K2V * (32 * (cin & 7) + 4 * ((cin >> 3) & 1))) >> 1;
+        const int G = (32 - (K2V >> 1)) - A2 - AD27;
+        const int wb = G >> 5;
+        const int pre = G - (wb << 5);
+        int widx[NW];
+#pragma unroll
+        for (int i = 0; i < NW; ++i) widx[i] = ((wb + i) % W + W) % W;
+
+        float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+        float accB0 = 0, accB1 = 0, accB2 = 0, accB3 = 0;
+        const size_t row_step = (size_t)b.tiles_n * W;
+        const int tk_lo = (b.tiles_k * sl) / b.nsl;
+        const int tk_hi = (b.tiles_k * (sl + 1)) / b.nsl;
+        const uint32_t* wp = w32 + (size_t)tile_n * W + (size_t)tk_lo * row_step;
+        const float* tp = src_tin + tk_lo * 16;
+        uint32_t g[NW], gn[NW];
+#pragma unroll
+        for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step, tp += 16) {
+            if (tk + 1 < tk_hi) { const uint32_t* wpn = wp + row_step;
+#pragma unroll
+              for (int i = 0; i < NW; ++i) gn[i] = wpn[widx[i]]; }
+            uint32_t h[NW];
+            if (pre == 0) {
+#pragma unroll
+                for (int i = 0; i < NW; ++i) h[i] = g[i];
+            } else {
+#pragma unroll
+                for (int i = 0; i + 1 < NW; ++i)
+                    h[i] = (g[i] >> pre) | (g[i + 1] << (32 - pre));
+                h[NW - 1] = g[NW - 1] >> pre;
+            }
+#pragma unroll
+            for (int rk = 0; rk < 16; ++rk) {
+                const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                const int rel = AD27 - ((K2V * d + KE) >> 1);
+                const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
+                const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
+                const uint32_t xm = st16 * 0x83DCD12Du;
+                const uint32_t t1 = (xm & 0x00ff00ffu) + ((xm >> 8) & 0x00ff00ffu);
+                const uint32_t bs = (t1 & 0xffffu) + (t1 >> 16);
+                const float wcomb = (float)(int)bs - 510.0f;
+                const float* xr = tp + rk;
+                if (rk & 1) { accB0 = sycl::fma(wcomb, xr[0], accB0);
+                    if (MMA) {
+                        if (m > 1) accB1 = sycl::fma(wcomb, xr[K], accB1);
+                        if (m > 2) accB2 = sycl::fma(wcomb, xr[2 * K], accB2);
+                        if (m > 3) accB3 = sycl::fma(wcomb, xr[3 * K], accB3);
+                    }
+                } else { acc0 = sycl::fma(wcomb, xr[0], acc0);
+                    if (MMA) {
+                        if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
+                        if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
+                        if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
+                    }
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < NW; ++i) g[i] = gn[i];
+        }
+        acc0 += accB0;
+        float* dst = b.tout + ((size_t)(j * 2 + mu) * b.nsl + sl) * MAXM * N;
+        dst[cG] = acc0 * KDQ;
+        if (MMA) {
+            acc1 += accB1; acc2 += accB2; acc3 += accB3;
+            if (m > 1) dst[N + cG] = acc1 * KDQ;
+            if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
+            if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+        }
+
+        // ---- arrival: one bump per WG; the last arrival of nm x nsl runs the unit's K34.
+        // NOTE the slot stride is 2 (gate/up pair) even when gateless dispatches nm=1 -
+        // the arrival COUNT is nm, the tout STRIDE is 2 (tg/tu base split below).
+        if (lab >= 2) return;
+        it.barrier(sycl::access::fence_space::global_space);
+        const int expected = b.nm * b.nsl;
+        if (tid == 0) {
+            sycl::atomic_ref<int, sycl::memory_order::acq_rel, sycl::memory_scope::device,
+                             sycl::access::address_space::global_space>
+                ar(ctr[(size_t)j * b.nbk + blk]);
+            flg[0] = (ar.fetch_add(1, sycl::memory_order::acq_rel) == expected - 1) ? 1 : 0;
+        }
+        sycl::group_barrier(it.get_group());
+        if (!flg[0]) return;
+        if (dbg) sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                  sycl::access::address_space::global_space>(*dbg)
+                   .fetch_add(1, sycl::memory_order::relaxed);
+        if (lab == 1) return;
+
+        // ---- K34 semantics on the barrier-free strided Hadamard: same per-column op
+        // tree as the split kernel (slice sums ascending, sequentia butterfly, act, fused
+        // down-prep), but each of the 8 sub-groups transforms the full 128-column block
+        // redundantly (v[p] = column 16p+lane) - 2 SLM handoffs + 3 shuffle networks
+        // instead of ~24 group barriers, which is what made the SLM-body version cost
+        // MORE than the command it saved (tail serialized on the last arrivals).
+        const uint16_t* suhd = (const uint16_t*)b.tab[(F_SUH * 3 + CAT_DOWN) * b.E + e];
+        const uint16_t* svhu = (const uint16_t*)b.tab[(F_SVH * 3 + CAT_UP) * b.E + e];
+        const uint16_t* bu   = (const uint16_t*)b.tab[(F_BIAS * 3 + CAT_UP) * b.E + e];
+        const uint16_t* svhg = (const uint16_t*)b.tab[(F_SVH * 3 + CAT_GATE) * b.E + e];
+        const uint16_t* bg   = (const uint16_t*)b.tab[(F_BIAS * 3 + CAT_GATE) * b.E + e];
+        const int mu_up = b.gated ? 1 : 0;
+        const float* tg = b.tout + (size_t)(j * 2) * b.nsl * MAXM * N;
+        const float* tu = b.tout + (size_t)(j * 2 + mu_up) * b.nsl * MAXM * N;
+        sycl::sub_group sg16 = it.get_sub_group();
+        const int ln = (int)sg16.get_local_linear_id();
+        const int sgi = tid >> 4;                       // sub-group index in WG
+        const int cL = blk * 128 + 16 * sgi + ln;       // column this lane stores round-1->2
+        const float hu = HAD_SCALE * f16(svhu[cL]);
+        const float bj = bu ? f16(bu[cL]) : 0.0f;
+        const float sd = f16(suhd[cL]);
+        float hg = 0.f, bi = 0.f;
+        if (b.gated) {
+            hg = HAD_SCALE * f16(svhg[cL]);
+            bi = bg ? f16(bg[cL]) : 0.0f;
+        }
+        for (int r = 0; r < m; ++r) {
+            float vg[8], vu[8];
+            if (b.gated) {
+                float sg = 0.f, su = 0.f;
+                for (int qq = 0; qq < b.nsl; ++qq) {
+                    sg += coop_load(tg + ((size_t)qq * MAXM + r) * N + cG);
+                    su += coop_load(tu + ((size_t)qq * MAXM + r) * N + cG);
+                }
+                sh[tid] = sg; sh[128 + tid] = su;
+                sycl::group_barrier(it.get_group());
+#pragma unroll
+                for (int p = 0; p < 8; ++p) { vg[p] = sh[16 * p + ln]; vu[p] = sh[128 + 16 * p + ln]; }
+                had128_strided(sg16, vg);
+                had128_strided(sg16, vu);
+                float rg = 0.f, ru = 0.f;
+#pragma unroll
+                for (int q = 0; q < 8; ++q) if (sgi == q) { rg = vg[q]; ru = vu[q]; }
+                const float gv = rg * hg + bi;
+                const float uv = ru * hu + bj;
+                float av;
+                switch (act) {
+                    case 0: {
+                        const float eg = std::exp(std::min(-gv, 80.0f));
+                        av = std::min(gv / (1.0f + eg), lim) * sycl::clamp(uv, -lim, lim);
+                        break; }
+                    case 1: {
+                        const float cdf = 0.5f * (1.0f + erff(gv * 0.70710678f));
+                        av = std::min(gv * cdf, lim) * sycl::clamp(uv, -lim, lim);
+                        break; }
+                    case 3: {
+                        const float gvc = std::min(gv, lim);
+                        const float uvc = sycl::clamp(uv, -lim, lim);
+                        av = (uvc + 1.0f) * gvc / (1.0f + std::exp(std::min(-1.702f * gvc, 80.0f)));
+                        break; }
+                    default: av = gv; break;
+                }
+                sh[16 * sgi + ln] = av * sd;   // fused down-prep (scatter: distinct banks)
+            } else {
+                float su = 0.f;
+                for (int qq = 0; qq < b.nsl; ++qq)
+                    su += coop_load(tu + ((size_t)qq * MAXM + r) * N + cG);
+                sh[tid] = su;
+                sycl::group_barrier(it.get_group());
+#pragma unroll
+                for (int p = 0; p < 8; ++p) vu[p] = sh[16 * p + ln];
+                had128_strided(sg16, vu);
+                float ru = 0.f;
+#pragma unroll
+                for (int q = 0; q < 8; ++q) if (sgi == q) ru = vu[q];
+                const float uv = ru * hu + bj;
+                const float rv = uv > 0.0f ? uv : 0.0f;
+                sh[16 * sgi + ln] = rv * rv * sd;
+            }
+            sycl::group_barrier(it.get_group());
+#pragma unroll
+            for (int p = 0; p < 8; ++p) vg[p] = sh[16 * p + ln];
+            had128_strided(sg16, vg);
+            float res = 0.f;
+#pragma unroll
+            for (int q = 0; q < 8; ++q) if (sgi == q) res = vg[q];
+            tindw[(size_t)j * MAXM * N + (size_t)r * N + cL] = res * HAD_SCALE;
+            sycl::group_barrier(it.get_group());
+        }
+    }
+};
+
+// ------------------------------------------------------------------ counter-fed fused DOWN
+//
+// CUDA exl3_moe_coop doctrine (NOTES 'CUDA small-m doctrine'): at decode sizes the float
+// pipeline is COMMAND-bound, not math-bound, so K5+K6 fuse into ONE launch with NO barriers
+// and NO cooperative grid: every (chunk, 128-col blk, slice) WG stores its slice partial
+// exactly like GemvK, publishes with a global-space barrier, and bumps a completion counter
+// for EACH of its live rows' (token, blk) units. The WG that lands LAST on a unit runs that
+// unit's whole K6 epilogue inline (fixed-order slice sums + Hadamard + svh + bias + routing-
+// weight accumulation over the token's entries in ascending order). No float atomics on
+// data (counters are integers; the sums read per-slice slots in the SAME order as the old
+// K6, so outputs are bit-identical). Counters ride the control blob and are zeroed by its
+// H2D every forward (blob upload precedes both gemv WGs' parents in queue order, so
+// zero-and-reuse is race-free even with several layers sharing the queue).
+// Tail WGs (rows x nbk) own tokens with ZERO entries and write their out rows directly -
+// nothing else would (no arrivals, so no last-arriver). Early-exit cost for the non-empty
+// ones is one dispatch slot each (grid oversize is free on Xe).
+// Counter-fed fused DOWN (float tier, CUDA exl3_moe_coop doctrine). Two-level arrival
+// chain, three roles per WG:
+//   1. every (chunk, blk, slice) WG stores its slice partial (layout as GemvK/K5) and
+//      bumps ctr1[(entry, blk)]; the LAST slice-arrival for an entry-block transforms
+//      that entry's row (fixed-order slice sums + Hadamard + svh + bias, exactly the old
+//      K6 per-entry body) and writes the routing-weighted value to tsw - transformation
+//      parallelism is nc*nbk WGs, not nbk.
+//   2. the transforming WG then bumps ctr2[(token, blk)]; the last arrival there sums the
+//      token's tsw rows in ASCENDING entry order - the old K6's exact accumulation order -
+//      so OUT IS BIT-IDENTICAL to the split pipeline (single-level variant tried first:
+//      whole topk chain inside ONE last-arriver WG = +16us epilogue tail, net -2us).
+//      (c) Tail WGs (rows x nbk) own tokens with ZERO entries and write their out rows
+//      directly (no arrivals would ever happen for them). Early-exit cost for non-empty
+//      tokens is one dispatch slot each (grid oversize is free on Xe).
+// Counters ride the control blob and are zeroed by its H2D every forward (blob upload
+// precedes the kernel in queue order, so zero-and-reuse is race-free even with several
+// layers sharing the queue).
+template <int K2V, bool MMA, bool NSL1>
+struct CoopDownK
+{
+    GemvBase b;                  // down=1: toutd/tind/tiles/nsl/nbk per GemvK conventions
+    int* ctr1;                   // nent * nbkH entry-level counters (blob-zeroed)
+    int* ctr2;                   // rows * nbkH token-level counters (blob-zeroed)
+    float* tsw;                  // (nc x MAXM x H) transformed x weight staging
+    int* dbg;                    // [1] D level-2 fires (lab build only, else null)
+    const int* tokb;
+    const int* toke;
+    float* out;
+    int nUnits;                  // nc * nbk * nsl gemv WGs; beyond them live the owners
+    int rows;
+    int lab = 0;                 // EPHEMERAL ablation (EXL3_MOE_B70_COOP_LAB): 1 = skip
+                                 // transform+level2 (arrival/fence cost only), 2 = skip ALL
+                                 // post-gemv coordination. Gates are OUTSIDE the gemv loop.
+    // NSL1 (the DEFAULT for coop): one slice covers the whole k range, so the row's full
+    // sum is already in REGISTERS at gemv exit - toutd never goes to global, the level-1
+    // counter disappears, and only the tsw publish (one fence + one ctr2 atomic per
+    // (entry, blk)) remains. Measured: this is what turns the fusion from break-even
+    // into the ~-10us win (nsl=1 also beat nsl=2 for the plain K5 at decode shapes).
+    sycl::local_accessor<float, 1> sh;
+    sycl::local_accessor<int, 1> flg;
+
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const
+    {
+        return sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::sub_group_size<16>};
+    }
+
+    static constexpr int W = 4 * K2V;
+    static constexpr int KE = K2V & 1;
+    static constexpr int AD27 = (27 * K2V + KE) >> 1;
+    static constexpr int NW = (AD27 + 16 + 31 + 31) / 32 + 1;
+
+    void operator()(sycl::nd_item<1> it) const
+    {
+        const int unit = (int)it.get_group(0);
+        const int tid = (int)it.get_local_id(0);
+        if (unit >= nUnits) {
+            // owner WG for (token, blk): only tokens WITHOUT entries do work - a token with
+            // entries has its out rows written by its last-arrivers. Cheap re-check keeps
+            // the grid simple (no host-side empty-token list needed).
+            const int q = unit - nUnits;
+            const int t = q / b.nbk;
+            if (t >= rows) return;
+            const int cG = (q % b.nbk) * 128 + tid;
+            if (tokb[t] == tokb[t + 1]) out[(size_t)t * b.H + cG] = 0.f;
+            return;
+        }
+        // ---- gemv body: verbatim GemvK<K2V, MMA> for one down-slice (kept as a separate
+        // instantiation on purpose: hot-loop branches poison the schedule, NOTES frag1 saga)
+        const int sl = unit % b.nsl;
+        const int ub = unit / b.nsl;
+        const int blk = ub % b.nbk;
+        const int j = ub / b.nbk;
+        const int e = b.chunks[j].expert;
+        const int m = b.chunks[j].m;
+        const uint32_t* w32 = (const uint32_t*)(uintptr_t)b.tab[((F_TRI * 3 + CAT_DOWN) * b.E) + e];
+        const float* src_tin = b.tind + (size_t)j * MAXM * b.I;
+        const int K = b.I;
+        const int N = b.H;
+
+        const int cG = blk * 128 + tid;
+        const int tile_n = cG >> 4, cin = cG & 15;
+        const int A2 = (K2V * (32 * (cin & 7) + 4 * ((cin >> 3) & 1))) >> 1;
+        const int G = (32 - (K2V >> 1)) - A2 - AD27;
+        const int wb = G >> 5;
+        const int pre = G - (wb << 5);
+        int widx[NW];
+#pragma unroll
+        for (int i = 0; i < NW; ++i) widx[i] = ((wb + i) % W + W) % W;
+
+        float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+        float accB0 = 0, accB1 = 0, accB2 = 0, accB3 = 0;
+        const size_t row_step = (size_t)b.tiles_n * W;
+        const int tk_lo = (b.tiles_k * sl) / b.nsl;
+        const int tk_hi = (b.tiles_k * (sl + 1)) / b.nsl;
+        const uint32_t* wp = w32 + (size_t)tile_n * W + (size_t)tk_lo * row_step;
+        const float* tp = src_tin + tk_lo * 16;
+        uint32_t g[NW], gn[NW];
+#pragma unroll
+        for (int i = 0; i < NW; ++i) g[i] = wp[widx[i]];
+        for (int tk = tk_lo; tk < tk_hi; ++tk, wp += row_step, tp += 16) {
+            if (tk + 1 < tk_hi) { const uint32_t* wpn = wp + row_step;
+#pragma unroll
+              for (int i = 0; i < NW; ++i) gn[i] = wpn[widx[i]]; }
+            uint32_t h[NW];
+            if (pre == 0) {
+#pragma unroll
+                for (int i = 0; i < NW; ++i) h[i] = g[i];
+            } else {
+#pragma unroll
+                for (int i = 0; i + 1 < NW; ++i)
+                    h[i] = (g[i] >> pre) | (g[i + 1] << (32 - pre));
+                h[NW - 1] = g[NW - 1] >> pre;
+            }
+#pragma unroll
+            for (int rk = 0; rk < 16; ++rk) {
+                const int d = 8 * ((rk >> 1) & 3) + (rk & 1) + 2 * ((rk >> 3) & 1);
+                const int rel = AD27 - ((K2V * d + KE) >> 1);
+                const uint32_t lo4 = h[rel >> 5], hi4 = h[(rel >> 5) + 1];
+                const uint32_t st16 = ((lo4 >> (rel & 31)) | ((hi4 << 1) << (31u - (rel & 31)))) & 0xffffu;
+                const uint32_t xm = st16 * 0x83DCD12Du;
+                const uint32_t t1 = (xm & 0x00ff00ffu) + ((xm >> 8) & 0x00ff00ffu);
+                const uint32_t bs = (t1 & 0xffffu) + (t1 >> 16);
+                const float wcomb = (float)(int)bs - 510.0f;
+                const float* xr = tp + rk;
+                if (rk & 1) { accB0 = sycl::fma(wcomb, xr[0], accB0);
+                    if (MMA) {
+                        if (m > 1) accB1 = sycl::fma(wcomb, xr[K], accB1);
+                        if (m > 2) accB2 = sycl::fma(wcomb, xr[2 * K], accB2);
+                        if (m > 3) accB3 = sycl::fma(wcomb, xr[3 * K], accB3);
+                    }
+                } else { acc0 = sycl::fma(wcomb, xr[0], acc0);
+                    if (MMA) {
+                        if (m > 1) acc1 = sycl::fma(wcomb, xr[K], acc1);
+                        if (m > 2) acc2 = sycl::fma(wcomb, xr[2 * K], acc2);
+                        if (m > 3) acc3 = sycl::fma(wcomb, xr[3 * K], acc3);
+                    }
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < NW; ++i) g[i] = gn[i];
+        }
+        acc0 += accB0;
+        if (MMA) { acc1 += accB1; acc2 += accB2; acc3 += accB3; }
+        if (!NSL1) {
+            float* dst = b.toutd + ((size_t)j * b.nsl + sl) * MAXM * N;
+            dst[cG] = acc0 * KDQ;
+            if (MMA) {
+                if (m > 1) dst[N + cG] = acc1 * KDQ;
+                if (m > 2) dst[2 * N + cG] = acc2 * KDQ;
+                if (m > 3) dst[3 * N + cG] = acc3 * KDQ;
+            }
+        }
+
+        // ---- arrival
+        if (lab >= 2) return;
+        if (!NSL1) it.barrier(sycl::access::fence_space::global_space);
+        const int nbkH = b.nbk;
+        for (int r = 0; r < m; ++r) {
+            const int t = b.chunks[j].token[r];
+            const int eb = tokb[t], ee = tokb[t + 1];
+            bool transform;
+            if (NSL1) {
+                transform = true;                 // this WG owns the ENTIRE k sum for row r
+            } else {
+                const int want = j * MOE_MAXM + r;
+                int pos = eb;
+                while (pos < ee && toke[pos] != want) ++pos;   // WG-uniform scan (topk <= 32)
+                if (tid == 0) {
+                    flg[1] = 0;
+                    sycl::atomic_ref<int, sycl::memory_order::acq_rel, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space>
+                        ar(ctr1[(size_t)pos * nbkH + blk]);
+                    flg[0] = (ar.fetch_add(1, sycl::memory_order::acq_rel) == b.nsl - 1) ? 1 : 0;
+                }
+                sycl::group_barrier(it.get_group());
+                transform = flg[0];
+            }
+            if (transform) {
+                // ---- the old K6 per-entry transform (fixed-order sums, svh/bias/weight),
+                // Hadamard on the barrier-free sub-group network: each of the 8 subgroups
+                // transforms the full 128-column block redundantly (strided v[p] = column
+                // 16p+lane, bit-identical op tree to hadamard128) and publishes its own 16
+                // columns - ~90 ALU/shuffle instead of 8 group barriers.
+                const int je = j, s = r;   // the transforming WG is always a slice WG of
+                                            // THIS chunk/row (ctr1 unit = (entry, blk))
+                const int ed = b.chunks[je].expert;
+                const float wgt = b.chunks[je].weight[s];
+                const uint16_t* svhe = (const uint16_t*)b.tab[(F_SVH * 3 + CAT_DOWN) * b.E + ed];
+                const uint16_t* be = (const uint16_t*)b.tab[(F_BIAS * 3 + CAT_DOWN) * b.E + ed];
+                float sv;
+                if (NSL1) {
+                    const float raw = (r == 0) ? acc0 : (r == 1) ? acc1 : (r == 2) ? acc2 : acc3;
+                    sv = raw * KDQ;
+                } else {
+                    sv = 0.f;
+                    for (int qq = 0; qq < b.nsl; ++qq)
+                        sv += coop_load(b.toutd + (((size_t)(j * b.nsl + qq) * MAXM + r) * b.H) + cG);
+                }
+                sh[tid] = sv;
+                sycl::group_barrier(it.get_group());
+                sycl::sub_group sg = it.get_sub_group();
+                const int ln = (int)sg.get_local_linear_id();
+                const int sgi = tid >> 4;                       // sub-group index in WG
+                float v8[8];
+#pragma unroll
+                for (int p = 0; p < 8; ++p) v8[p] = sh[16 * p + ln];
+                had128_strided(sg, v8);
+                float res = 0.f;
+#pragma unroll
+                for (int q = 0; q < 8; ++q) if (sgi == q) res = v8[q];   // column 16q+lane
+                const int cLoc = blk * 128 + 16 * sgi + ln;
+                float val = res * (HAD_SCALE * f16(svhe[cLoc]));
+                if (be) val += f16(be[cLoc]);
+                tsw[((size_t)je * MAXM + s) * b.H + cLoc] = wgt * val;
+                // publish the tsw row device-wide, then arrive at the token's unit
+                it.barrier(sycl::access::fence_space::global_space);
+                if (tid == 0) {
+                    sycl::atomic_ref<int, sycl::memory_order::acq_rel, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space>
+                        ar2(ctr2[(size_t)t * nbkH + blk]);
+                    flg[1] = (ar2.fetch_add(1, sycl::memory_order::acq_rel) == (ee - eb) - 1) ? 1 : 0;
+                }
+            }
+            sycl::group_barrier(it.get_group());
+            // ---- level 2: last entry of (token, blk) sums the tsw rows in ASCENDING
+            // entry order - the old K6's exact accumulation order - and writes out
+            if (flg[1]) {
+                if (dbg && tid == 0) sycl::atomic_ref<int, sycl::memory_order::relaxed,
+                        sycl::memory_scope::device, sycl::access::address_space::global_space>(dbg[1])
+                        .fetch_add(1, sycl::memory_order::relaxed);
+                float aacc = 0.f;
+                for (int p = eb; p < ee; ++p)
+                    aacc += coop_load(tsw + (size_t)toke[p] * b.H + cG);
+                out[(size_t)t * b.H + cG] = aacc;
+            }
+            sycl::group_barrier(it.get_group());       // sh/flg WAR before next row
+        }
     }
 };
 
@@ -1041,6 +1609,63 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         if (env_d  >= 1 && env_d  <= 8) nsl8_d  = env_d;
     }
     nsl8_gu_ = nsl8_gu; nsl8_d_ = nsl8_d;
+    // Counter-fed fused down (float tier, decode shapes) eligibility + counter layout.
+    // Set BEFORE ensure_ws (tsw slot) and before NSL_D (coop defaults to nsl=1).
+    static const int coop_env = []{
+        const char* e = std::getenv("EXL3_MOE_B70_COOP");
+        return !e || e[0] != '0';
+    }();
+    static const int coop_dn_env = []{
+        const char* e = std::getenv("EXL3_MOE_B70_COOPDN");   // =0: classic K5+K6 (lab/debug)
+        return !e || e[0] != '0';
+    }();
+    const bool coopBase = coop_env && !use8_ && moe_k2_float(k2) && rows <= 8;
+    const bool coopD = coopBase && coop_dn_env;
+    // GU-side fusion (K2+K34): OPT-IN lab (EXL3_MOE_B70_COOPGU=1). Measured on the C-ABI
+    // decode shape: D-fused 102, D+GU-fused(auto NSL) 109, D+GU(NSLG=2) 100.6 vs
+    // D-fused(NSLG=2) 98.9 - removing the K34 command is paid for by the arrival chain on
+    // 700 WGs and the fused kernel's tail; it is at best a wash, and the K2-kernel arrival
+    // tax scales with NSL_GU (NSLG=3 wave-cliff). Kept instantiated + env-gated for a
+    // future retune; default OFF.
+    static const int coop_gu_env = []{
+        const char* e = std::getenv("EXL3_MOE_B70_COOPGU");
+        return e && e[0] == '1';
+    }();
+    const bool coopGU = coopBase && coop_gu_env;
+    coop_ = coopD;
+    static const int coop_dbg_env = []{
+        const char* e = std::getenv("EXL3_MOE_B70_CTRDBG");
+        return e && e[0] == '1';
+    }();
+    coop_dbg = coop_dbg_env;
+    const int nc = num_chunks;
+    int maxm_rows = 1, maxm_nm = 1;
+    for (int j = 0; j < nc; ++j) maxm_rows = std::max(maxm_rows, (int)chunks_host[j].m);
+    maxm_nm = maxm_rows;   // (kept separate for future per-class relaxation)
+    const int NSL_GU = [&]{
+        int base = nc * nm * (I / 128), w = nsl;
+        // auto up to 8: real-model decode (few rows, latency-bound) wants the extra
+        // parallelism; synthetic E=12 benches disagreed, the model won the argument.
+        if (w == 0) { w = 1; while (w < 8 && base * w * 128 < 80000) ++w;
+                      if (maxm_rows > 1 && w > 4) w = 4; }   // multi-row: slice-sum traffic dominates
+        static const int env_g = []{ const char* e = getenv("EXL3_MOE_NSLG"); return e ? atoi(e) : 0; }();
+        if (env_g >= 1 && env_g <= 8) w = env_g;
+        return w;
+    }();
+    const int NSL_D = [&]{
+        int base = nc * (H / 128), w = nsl;
+        if (w == 0) {
+            // coop default is nsl=1: the single slice keeps the row sum in REGISTERS at
+            // gemv exit - no toutd round-trip, no level-1 counters (see CoopDownK).
+            if (coopD) w = 1;
+            else { w = 1; while (w < 8 && base * w * 128 < 80000) ++w; if (w > 2) w = 2; }
+        }
+        // float-tier per-kernel overrides (mirror of the int8 EXL3_MOE_I8NSLU/NSLD)
+        static const int env_d = []{ const char* e = getenv("EXL3_MOE_NSLD"); return e ? atoi(e) : 0; }();
+        if (env_d >= 1 && env_d <= 8) w = env_d;
+        return w;
+    }();
+    nslgu_dbg = NSL_GU; nsld_dbg = NSL_D;
     sycl::queue& q = *Q;
     ensure_ws(num_chunks, rows);
     if (alog()) {
@@ -1060,12 +1685,23 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                  g_ws.cap[5]*4, g_ws.cap[6]*4, g_ws.cap[7]*4, g_ws.cap[8]*4, g_ws.cap[9]*4, g_ws.cap[10]*4);
     }
 
-    // one H2D blob: [chunks][pad64][tokb][pad64][toke]
-    const int nc = num_chunks;
+    // one H2D blob: [chunks][pad64][tokb][pad64][toke][pad64][ctr1|ctr2 (coop)]
     const size_t off_chunk = 0;
     const size_t off_tokb = ((size_t)nc * sizeof(ChunkDev) + 63) & ~(size_t)63;
     const size_t off_toke = (off_tokb + ((size_t)rows + 1) * sizeof(int) + 63) & ~(size_t)63;
-    const size_t blob_sz = off_toke + tmap.entry.size() * sizeof(int);
+    // completion counters ride the blob, so the SAME H2D that uploads the chunks zeroes
+    // them (race-free reset, no extra command; see CoopDownK). Layout: [ctrG nc*nbkI]
+    // [ctr1 nent*nbkH] [ctr2 rows*nbkH] (GU zones only when coopGU; D zones when coopD).
+    const size_t off_ctr = (off_toke + tmap.entry.size() * sizeof(int) + 63) & ~(size_t)63;
+    const size_t ctrG_n = coopGU ? (size_t)nc * (I / 128) : 0;   // one per (chunk, 128-col block of I)
+    const size_t ctr1_n = coopD && NSL_D != 1 ? tmap.entry.size() * (H / 128) : 0;
+    const size_t ctr2_n = coopD ? (size_t)rows * (H / 128) : 0;
+    const size_t ctr_bytes = (coopD || coopGU) ? (ctrG_n + ctr1_n + ctr2_n) * sizeof(int) : 0;
+    static const int ctrdbg = []{ const char* e = getenv("EXL3_MOE_B70_CTRDBG"); return e && e[0] == '1'; }();
+    ctr_bytes_dbg = ctrdbg ? ctr_bytes : 0;
+    ctr_off_logged = coopD ? off_ctr : 0;
+    const size_t blob_sz = (coopD || coopGU) ? off_ctr + ctr_bytes
+                                 : off_toke + tmap.entry.size() * sizeof(int);
     if (blob_sz > cap_blob) {
         if (h_blob) { MOE_ALOG_FREE(h_blob, cap_blob, "h_blob"); sycl::free(h_blob, q); }
         if (h_blob2) { MOE_ALOG_FREE(h_blob2, cap_blob, "h_blob2"); sycl::free(h_blob2, q); }
@@ -1088,6 +1724,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     std::memcpy(hb + off_chunk, chunks_host, nc * sizeof(ChunkDev));
     std::memcpy(hb + off_tokb, tmap.begin.data(), tmap.begin.size() * sizeof(int));
     std::memcpy(hb + off_toke, tmap.entry.data(), tmap.entry.size() * sizeof(int));
+    if (coopD || coopGU) std::memset(hb + off_ctr, 0, ctr_bytes);
 
     // NOTE: implicit in-order ordering between chained submits/memcpys is NOT enforced on
     // this stack (oneAPI 2026.2 + L0 + Xe2); explicit depends_on chains are required.
@@ -1099,22 +1736,6 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         if (prof) pev.push_back(dep);
     };
 
-    int maxm_rows = 1, maxm_nm = 1;
-    for (int j = 0; j < nc; ++j) maxm_rows = std::max(maxm_rows, (int)chunks_host[j].m);
-    maxm_nm = maxm_rows;   // (kept separate for future per-class relaxation)
-    const int NSL_GU = [&]{
-        int base = nc * nm * (I / 128), w = nsl;
-        // auto up to 8: real-model decode (few rows, latency-bound) wants the extra
-        // parallelism; synthetic E=12 benches disagreed, the model won the argument.
-        if (w == 0) { w = 1; while (w < 8 && base * w * 128 < 80000) ++w;
-                      if (maxm_rows > 1 && w > 4) w = 4; }   // multi-row: slice-sum traffic dominates
-        return w;
-    }();
-    const int NSL_D = [&]{
-        int base = nc * (H / 128), w = nsl;
-        if (w == 0) { w = 1; while (w < 8 && base * w * 128 < 80000) ++w; if (w > 2) w = 2; }
-        return w;
-    }();
     const uintptr_t* tab = d_tab;
     const ChunkDev* chunks = w_chunk;
     const int* d_tokb = (const int*)((const char*)w_chunk + off_tokb);
@@ -1135,13 +1756,30 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     i8_fuse_ = fuse_k1 ? 1 : 0;
     if (!fuse_k1) {
         const int nbk = H / 128;
+        // coop float path: K1 ALSO resets the arrival counters - render-engine stores,
+        // so the cells enter the same cache domain that the epilogue atomics RMW later.
+        // Zeroing them only in the blob H2D (copy engine) proved NOT visible to the first
+        // render-side fetch_add under the GU fusion (stale prior-forward values: the
+        // epilogue never fired and `out` stayed byte-exact from the previous forward);
+        // the host-side blob zeroing remains as belt-and-braces for the very first use.
+        int* const ctr_zone = coopD || coopGU ? (int*)((char*)w_chunk + off_ctr) : nullptr;
+        const int ctr_cells = coopD || coopGU
+            ? (int)(ctrG_n + ctr1_n + ctr2_n) : 0;
+        const int clr_rows = ctr_cells ? (ctr_cells + nbk * 128 - 1) / (nbk * 128) : 0;
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({128}, cgh);
-            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)(nc * nm)}, {128, 1}),
+            cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)(nc * nm + clr_rows)}, {128, 1}),
                 [=](sycl::nd_item<2> it) {
                 const int blk = (int)it.get_group(0);
                 const int unit = (int)it.get_group(1);
                 const int tid = (int)it.get_local_id(0);
+                if (unit >= nc * nm) {
+                    const int cid = (unit - nc * nm) * nbk + blk;
+                    const int ncid = clr_rows * nbk;
+                    for (int i = cid * 128 + tid; i < ctr_cells; i += ncid * 128)
+                        ctr_zone[i] = 0;
+                    return;
+                }
                 const int j = unit / nm, lmu = unit % nm;
                 const int cat = gated ? lmu : CAT_UP;
                 const int mu = gated ? lmu : 0;
@@ -1486,13 +2124,45 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         });
     };
 
-    gemv(false);
+    int* d_dbg = nullptr;
+    static const int coop_lab = []{ const char* e = getenv("EXL3_MOE_B70_COOP_LAB"); return e ? atoi(e) : 0; }();
+    if (coop_dbg && (coopGU || coopD)) {
+        if (!coop_dbg_buf) { coop_dbg_buf = sycl::malloc_device<int>(8, q); q.memset(coop_dbg_buf, 0, 32); q.wait(); }
+        dep = q.memset(coop_dbg_buf, 0, 32, {dep});   // lab-only extra memset, chained
+        d_dbg = coop_dbg_buf;
+    }
+    if (coopGU) {
+        // K1 stays; K2 + K34 fuse via ctrG[(j, blkI)] arrivals (see CoopGuK)
+        gb.tiles_n = I / 16; gb.tiles_k = H / 16; gb.nbk = I / 128;
+        gb.down = 0; gb.nsl = NSL_GU;
+        const int units = nc * nm * gb.nbk * NSL_GU;
+        const size_t gn = (size_t)units * 128;
+        int* d_ctrG = (int*)((char*)w_chunk + off_ctr);
+        const int a_ = P.activation;
+        const float l_ = lim;
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> sh({256}, cgh);
+            sycl::local_accessor<int, 1> flg({2}, cgh);
+            k2_float(k2, [&](auto R) {
+                constexpr int V = decltype(R)::value;
+                if constexpr (V > 0) {
+                    if (maxm_nm == 1)
+                        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}),
+                            CoopGuK<V, false>{gb, d_ctrG, d_dbg, w_tind, a_, l_, coop_lab, sh, flg});
+                    else
+                        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}),
+                            CoopGuK<V, true>{gb, d_ctrG, d_dbg, w_tind, a_, l_, coop_lab, sh, flg});
+                }
+            });
+        });
+    } else {
+        gemv(false);
 
-    // ---- K3+K4 fused: out transform (hadamard + svh + bias) + activation + down-prep
-    // (activation h never leaves the workgroup: down-side suh/Hadamard run on the same
-    // 128-column tile while it is in SLM; saves a global roundtrip and a submit)
-    {
-        const int nbk = I / 128;
+        // ---- K3+K4 fused: out transform (hadamard + svh + bias) + activation + down-prep
+        // (activation h never leaves the workgroup: down-side suh/Hadamard run on the same
+        // 128-column tile while it is in SLM; saves a global roundtrip and a submit)
+        {
+            const int nbk = I / 128;
         launch([&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({256}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
@@ -1570,6 +2240,49 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                 }
             });
         });
+    }
+    }   // !coopGU
+
+    // ---- K5+K6 fused (coop float tier) or classic gemv + owner-gather K6
+    if (coopD) {
+        gb.tiles_n = H / 16; gb.tiles_k = I / 16; gb.nbk = H / 128;
+        gb.down = 1; gb.nsl = NSL_D;
+        const int units = nc * gb.nbk * NSL_D;
+        const size_t gn = (size_t)(units + rows * gb.nbk) * 128;
+        int* d_ctr1 = (int*)((char*)w_chunk + off_ctr) + ctrG_n;
+        int* d_ctr2 = d_ctr1 + (NSL_D == 1 ? 0 : (int)tmap.entry.size() * gb.nbk);
+        float* d_tsw = w_tsw;
+        static const int coop_lab = []{ const char* e = getenv("EXL3_MOE_B70_COOP_LAB"); return e ? atoi(e) : 0; }();
+        const bool nsl1 = (NSL_D == 1);
+        launch([&](sycl::handler& cgh) {
+            sycl::local_accessor<float, 1> sh({128}, cgh);
+            sycl::local_accessor<int, 1> flg({2}, cgh);
+            k2_float(k2, [&](auto R) {
+                constexpr int V = decltype(R)::value;
+                if constexpr (V > 0) {
+                    if (maxm_rows == 1) {
+                        if (nsl1) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}),
+                            CoopDownK<V, false, true>{.b = gb, .ctr1 = d_ctr1, .ctr2 = d_ctr2, .tsw = d_tsw, .dbg = d_dbg,
+                                .tokb = d_tokb, .toke = d_toke, .out = out, .nUnits = units,
+                                .rows = rows, .lab = coop_lab, .sh = sh, .flg = flg});
+                        else cgh.parallel_for(sycl::nd_range<1>({gn}, {128}),
+                            CoopDownK<V, false, false>{.b = gb, .ctr1 = d_ctr1, .ctr2 = d_ctr2, .tsw = d_tsw, .dbg = d_dbg,
+                                .tokb = d_tokb, .toke = d_toke, .out = out, .nUnits = units,
+                                .rows = rows, .lab = coop_lab, .sh = sh, .flg = flg});
+                    } else {
+                        if (nsl1) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}),
+                            CoopDownK<V, true, true>{.b = gb, .ctr1 = d_ctr1, .ctr2 = d_ctr2, .tsw = d_tsw, .dbg = d_dbg,
+                                .tokb = d_tokb, .toke = d_toke, .out = out, .nUnits = units,
+                                .rows = rows, .lab = coop_lab, .sh = sh, .flg = flg});
+                        else cgh.parallel_for(sycl::nd_range<1>({gn}, {128}),
+                            CoopDownK<V, true, false>{.b = gb, .ctr1 = d_ctr1, .ctr2 = d_ctr2, .tsw = d_tsw, .dbg = d_dbg,
+                                .tokb = d_tokb, .toke = d_toke, .out = out, .nUnits = units,
+                                .rows = rows, .lab = coop_lab, .sh = sh, .flg = flg});
+                    }
+                }   // k2_float(V==-1) cannot reach here: coopD requires moe_k2_float(k2)
+            });
+        });
+        return dep;
     }
 
     gemv(true);

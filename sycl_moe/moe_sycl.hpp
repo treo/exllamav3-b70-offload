@@ -100,6 +100,15 @@ public:
 
     // debug access to workspaces (device pointers)
     float* ws(int i) { return i == 0 ? w_tin : i == 1 ? w_tout : i == 2 ? w_h : i == 3 ? w_tind : w_toutd; }
+    // control blob base + ctr zone offset (external counter readback, bench --ctrdbg)
+    const void* blob() const { return (const void*)w_chunk; }
+    size_t ctr_offset() const { return ctr_off_logged; }
+    void read_dbg(int out[2])
+    {
+        if (!coop_dbg_buf) { out[0] = out[1] = -1; return; }
+        peek(out, coop_dbg_buf, 8);
+    }
+    size_t ctr_bytes_dbg = 0;   // set by forward() when EXL3_MOE_B70_CTRDBG=1
 
     // ---- external stage-trace support (bench --i8trace): read-only device->host copy,
     // fully synchronized; touches nothing in the pipeline. i8buf() stays null-safe so the
@@ -124,6 +133,8 @@ public:
     int i8nsl(int which) const { return which ? nsl8_d_ : nsl8_gu_; }   // 0 gu, 1 down
     int i8slim() const { return i8_slim_; }   // 1 = fat dual-fragment kernel ran
     int i8fuse() const { return i8_fuse_; }    // 1 = fused PrepQuantI8 consumed x directly
+    int coop_active() const { return coop_ ? 1 : 0; }  // 1 = float forward ran fused K5+K6
+    int nslgu_dbg = 0, nsld_dbg = 0;   // set by forward() for stage-probe readbacks
 
     // Tier choice for a forward of `rows` token rows (EXL3_MOE_B70_INT8 override, auto =
     // rows >= 2, stream-layout only). The HOST CHUNKER must call this BEFORE grouping:
@@ -135,6 +146,7 @@ private:
     sycl::queue* Q = nullptr;
     LayerParams P;
     int cap_nc = 0, cap_rows = 0;
+    size_t ctr_off_logged = 0;   // blob offset of the ctr zone (for bench --ctrdbg)
     int cap_nc8 = 0;             // separate growth mark for the int8 slabs
     int nsl = 4;               // split-K slices in the GEMV kernels
     std::vector<sycl::event> pev;
@@ -150,6 +162,7 @@ private:
     float *w_h = nullptr;            // nc x 4 x I
     float *w_tind = nullptr;         // nc x 4 x I
     float *w_toutd = nullptr;        // nc x 8(nsl) x 4 x H
+    float *w_tsw = nullptr;          // nc x MAXM x H: fused-down (coop) per-entry transformed x weight
     // int8 / XMX DPAS tier (mirrors CPU VNNI semantics): operand slabs + i32 accumulators.
     // a8 layout [slot][k/8][16 rows][8 i32] (128 words per k/8 block: two m8 fragments,
     // row r = 2*token + part (always-wide vh/vl pair), word = x8*0x01010101 with (x8&0xff)
@@ -160,8 +173,11 @@ private:
     float *w_qsxd = nullptr;         // nc x 16 x {A,B}
     int32_t *w_accgu = nullptr;      // (nc*nm) x nsl8 x 16 x I  raw i32
     int32_t *w_accd = nullptr;       // nc x nsl8 x 16 x H
-    bool int8_ok = false;            // rate/geometry supports the DPAS tier
+    int coop_dbg = 0;                 // EXL3_MOE_B70_CTRDBG: fire-counter scratch
+    int* coop_dbg_buf = nullptr;      // 4 ints: [gu_fires, d_fires, reserved, reserved]
+    bool int8_ok = false;             // rate/geometry supports the DPAS tier
     bool use8_ = false;              // tier resolved for the last forward (read by ensure_ws)
+    bool coop_ = false;              // last float forward used the counter-fed fused down
     int nm_ws_ = 1;                  // gated ? 2 : 1, cached for ensure_ws sizing
     int nsl8_gu_ = 1, nsl8_d_ = 1;   // int8 split-K degrees of the last forward
     int i8_slim_ = 1;                // 1 = fat kernel (frag1 live); 0 = slim decode pass
