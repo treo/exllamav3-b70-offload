@@ -97,6 +97,8 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `EXL3_MOE_B70_STREAM_HOT` | Read by the PARENT (python, `moe_cpu_host.py`): let the streamed-prefill tier take HOT picks even when their expert slot is B70-resident. Default ON. The classic `-mcpa` anti-theft rule (stream only CPU-tier slots) made a fully registered layer stream nothing at all, which cost 37% prefill vs the CPU worker on 2.05bpw: the B70 re-reads an expert's weights once per 8-pick chunk per `cap_rows` job, while a streamed expert pays one PCIe DMA for the whole prefill chunk. This is not theft - the arena copy stays resident (decode unaffected, streaming is gated to rows >= stream_min_rows) and masked picks (`sel=-1`) leave the worker job. `=0` restores the classic rule. |
 | `EXL3_MOE_B70_BUCKET` | `0` disables int8 fragment bucketing (default on). The chunker puts every chunk one m8 fragment can cover (`m <= I8_TOK_PER_FRAG`) at the front of the chunk list and forward() runs those as a separate NF=1 launch instead of padding every chunk to `I8_FRAGS` fragments - the CUDA tier's m-tile ladder (`exl3_moe_kernel.cuh`: 64 -> 32 -> 16). E260 int8 rows32/64/128: 1919->1648, 2630->2260, 3121->2867 us. |
 | `EXL3_MOE_I8SLIMRING` | `1` opts the ALL-narrow (slim, decode-shaped) int8 kernel into SLM A staging too. Measured NEGATIVE at every all-narrow shape (E260: rows1 197.6->225.3, rows4 411->487, rows8 714->793 us) so it stays off; the mixed-job narrow bucket is unaffected (it shares the wide launch's ring decision, where staging IS worth it). |
+| `EXL3_MOE_STREAM_T_DEV` | Read by the PARENT (`moe_cpu_host.py`): break-even pick count for streaming when the layer's tail runs on the **B70** (default 24, scaled by `B70_STREAM_T_BW(13.4) / probed_GBs`; used iff `layer_b70n[layer] > 0`). The streamed leg pays ~92 us of link per streamed expert whatever its pick count, and the B70 already holds those weights, so the crossover is an absolute count (~24 here) and is the same at 1024/2048/4096 rows. Measured +7% prefill @1024/2048, +3% @4096, decode neutral. `EXL3_MOE_STREAM_T` still governs CPU-tail layers, so the CPU-only path is unchanged. |
+| `EXL3_MOE_CPU_SLOT_ROWS_DEV` | Parent-side rows per worker job for **device-tier** layers (default 1024; `EXL3_MOE_CPU_SLOT_ROWS`=128 stays the CPU-tier value). A DPAS fragment is charged per (expert × job), so 128-row jobs pay whole fragments for 1-2 picks: all-worker-work-on-B70 measures 1411 (128) vs 1568 (1024) tok/s. The handoff segment is sized by the max of the two caps and clamped to `EXL3_MOE_CPU_SLOT_BYTES` (default 256 MiB) so a small `/dev/shm` still loads. |
 | `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
 | `EXL3_MOE_B70_OVERLAP` | `0` disables prefill-size mixed-job overlap (B70 half on a borrowed thread while the CPU pool works the other half; default on for `rows>=16`, sequential for decode sizes). 0-4% prefill on 4.05bpw (noise-bound), neutral elsewhere. |
 | `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows). ALL eleven contract rates (K2∈{2,3,4,5,6,7,8,10,12,14,16}, halves only ≤3.5 — see `archive/mul1-trellis-spec.md`) are compile-time specialized on both tiers; out-of-contract rates fall to the runtime float `GemvFallback`, never a fault. |
@@ -162,7 +164,7 @@ Measured, this machine (Arc Pro B70 + RTX 3090, one model each):
 
 | model | config | CPU worker | + B70 |
 |---|---|---|---|
-| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256 -mcpa` (hot-pick streaming, default) | 1180/1616/1840 pre @1024/2048/4096, ~64 dec | **1230/1604/1969 pre, ~67 dec** |
+| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256 -mcpa` (device-tier split, default) | 1180/1616/1840 pre @1024/2048/4096, ~64 dec | **1343/1816/2005 pre, 67.7 dec** (previous policy, same box same hour: 1256/1695/1943, 67.6) |
 | Qwen3.8-Flash-Next-2.05bpw | `-mcs 256` (no pinned arena) | ~1456-1511 pre, 68-70 dec | **1850-1886 pre (+25%), 70-72 dec** |
 | Qwen3.8-Flash-Next-2.68bpw | `-mcs 448` | 40.2 t/s dec | **56.2 t/s (+40%)** |
 | Qwen3.8-Flash-Next-4.05bpw | `-mcs 448` | 25.0 t/s dec | **51.0 t/s (+104%)** |
@@ -172,35 +174,68 @@ Measured, this machine (Arc Pro B70 + RTX 3090, one model each):
 The win is proportional to how much of the model the 3090 can't hold: at `-mcs 256` on
 2.05bpw decode is not MoE-CPU-bound, at `-mcs 448` on 4.05bpw it completely is.
 
-### Prefill economics (measured 2026-10-27, 2.05bpw `-mcs 256 -mcpa`)
+### Prefill economics (measured 2026-10-28, 2.05bpw `-mcs 256 -mcpa`)
 
-Three numbers decide everything, all measured at the model's own shape (E=260, H=2560,
-I=640, K2=8, topk 10, ~5 worker picks per token):
+Four numbers decide everything, all measured at the model's own shape (E=260 worker experts of the
+512 per layer, H=2560, I=640, K2=8, `expert_bytes` = 1 228 800 B, topk 10, ~5 worker picks/token
+before placement converges and ~1.3-1.7 after promote-on-miss):
 
-* one streamed expert onto the 3090 = its 2.46 MB over the Gen4 x8 link ≈ **184 us** of link
-  time (`_ensure_stream_state` probes the real bandwidth; ~260 experts qualify per 4096-token
-  chunk) → the streamed leg of a 4096-token prefill ≈ 2.3 s, i.e. ~1800 tok/s wall;
-* one DPAS **chunk** on the B70 costs ~12 us at the model shape (≈200 GB/s of 608) and its cost
-  splits into a fragment term (~6.5 us per m8 fragment - dominant) and a traversal term: the
-  MAXM sweep in `moe_layout.hpp` shows MAXM=16 (1.7x fewer traversals, 1.2-2x the fragments) is
-  20-95% SLOWER and MAXM=4 (2x the traversals, same fragments) 12-22% slower, and that the
-  padding fragment is the part we can remove - `EXL3_MOE_B70_BUCKET` (default on) runs narrow
-  chunks as a single fragment: rows32/64/128 = 1919→1648 / 2630→2260 / 3121→2867 us;
-* so the two legs cross at roughly "stream an expert only if it is picked by more rows than the
-  B70 can chew through in one DMA" - which is what the auto `stream_t` (probe-scaled, ≈11 here)
-  approximates. Sweeping 4/11/16/24/32/48/64/96 is FLAT from 11 to 48 (±3.5%) and worse at 4,
-  64 and 96: the balance point is broad, and the B70 leg hides under the link leg.
+* one streamed expert onto the 3090 = its 1.17 MB over the Gen4 x8 link ≈ **92 us** of link time
+  (`_ensure_stream_state` probes the real bandwidth, 13.4 GB/s here) - and the link is NOT the
+  constraint: during a 4096-row prefill it carries 3.2 GB/s mean while the 3090's compute stream is
+  81% busy and the union of its two streams is 91%;
+* one DPAS **chunk** on the B70 costs ~11.8 us at the model shape for up to 8 *same-expert* token
+  slots (two m8 fragments at ~5.9 us, ≈200 GB/s of 608) **whether or not those slots are used**,
+  and chunks are built per (expert × job): the MAXM sweep in `moe_layout.hpp` shows MAXM=16 is
+  20-95% SLOWER and MAXM=4 12-22% slower, and `EXL3_MOE_B70_BUCKET` (default on) runs narrow
+  chunks as one fragment: rows32/64/128 = 1919→1648 / 2630→2260 / 3121→2867 us. The consequence of
+  the per-(expert, job) charging is `cap_rows`: with the whole worker tier on the B70, 128-row jobs
+  give 1411 tok/s and 1024-row jobs 1568 (+11%);
+* so the legs cross at an **absolute** pick count, not a fraction of rows: ~24 picks here (below
+  that, the 3090 pays 92 us of link + a batch/launch for 1-2 picks; above it, the B70 pays full
+  fragments for half-empty chunks). That is `EXL3_MOE_STREAM_T_DEV`, and it is right at 1024,
+  2048 and 4096 rows alike, while `EXL3_MOE_STREAM_T` (probe-scaled ≈11) still governs layers
+  whose tail runs on CPU cores. Sweeping either knob while the other sits at its old value
+  measures nothing - at `cap_rows` 128 the whole `stream_t` axis looks flat-to-worse, which is
+  how it was previously recorded;
+* the 3090's non-MoE kernels (attention/GDN/dense/`gr_*`/resident experts) are ~1.05 s of a 2.0 s
+  4096-row pass. That, not the link, is the floor under the current ~2000 tok/s.
 
-Consequence: `-mcpa` prefill on a model that fits both GPUs is **link-bound**, and the B70 adds
-most of its value in decode (+5-8% here). Getting prefill materially above ~2000 tok/s needs the
-B70's per-fragment cost down (esimd `xmx::dpas`, t40 spike; an int8 m16 accumulator does not
-exist on this device, so fragments cannot be widened) - not a different placement of the same
-work. `EXL3_MOE_B70_STREAM_HOT=0` measures the no-link regime (≈1400 tok/s with big jobs).
+Consequence: prefill on a model that fits both GPUs is **main-GPU-bound**, and the B70 earns its
+keep by taking the picks the 3090 pays most for (the cold experts), as few large jobs. With both
+knobs at their new defaults: 624/915/1343/1816/2005 tok/s at 256/512/1024/2048/4096 vs
+567/837/1256/1695/1943 for the previous policy, decode 67.7 vs 67.6 (interleaved `perfab.sh`,
+best of 2 rounds). Getting materially above ~2000 needs the B70's per-fragment cost down (esimd
+`xmx::dpas`, t40 spike; an int8 m16 accumulator does not exist on this device, so fragments cannot
+be widened) or the 3090's streamed leg cheaper - see `NOTES.md` lever 7.
+`EXL3_MOE_B70_STREAM_HOT=0` measures the all-B70 regime (≈1400-1570 tok/s, decode untouched).
 
 Quality gate for that regime (eval/ppl.py scores one row per forward, so it CANNOT exercise the
 streamed tier at all): `python qa_stream.py -m <model> -mcs 256 -mcpa -ngr -mct 15 -cs 12288
--tok 8192 -chunk 1024`, 8192 tokens of chunked prefill - CPU 2.316795, B70+hot-pick 2.320494
-(+0.16%), B70 anti-theft 2.317882 (+0.05%); the recorded int8-tier budget is ≤0.25%.
+-tok 8192 -chunk 1024`, 8192 tokens of chunked prefill - CPU 2.318407, B70 + device-tier split
+2.321975 (+0.15%), B70 + hot-pick streaming (previous policy) 2.320494 (+0.16%), B70 anti-theft
+2.317882-2.325729 across builds; the recorded int8-tier budget is ≤0.25%. Cross-arm ppl at the
+0.1-0.3% level tracks *which tier each pick lands in* (the CPU worker here runs the AVX2/int8 tier,
+~1.4% off scalar), so treat a single arm's absolute delta with suspicion and always include the
+CPU arm in the same sitting.
+
+### Where the time actually goes (timeline tools, all in `sycl_moe/`)
+
+```bash
+python3 pb.py -m <model> -mcs 256 -ngr -mct 15 -mcpa -lens 1024,2048,4096 -reps 3
+        # loads ONCE and times repeated prefill forwards (3 s/rep instead of 75 s per process);
+        # -prof adds a kineto pass and exports /tmp/pb_prof_<tag>.json. Steady-state numbers,
+        # NOT interchangeable with perf.py (past_len 0, repeated lengths).
+python3 tl_analyze.py /tmp/pb_prof_<tag>.json --min-gap 300
+        # per-stream busy time, UNION busy/idle (the number that says who is the constraint),
+        # biggest gaps with the kernels around them, top device activities.
+python3 mon.py /tmp/mon_run 60 &      # 3090 dmon rxpci/txpci MB/s + B70 xpu-smi W/util/mem-BW
+bash ab.sh <tag> "<ENV1>" "<ENV2>"   # interleaved pb.py arms, min-of-reps summary (fast sweeps)
+bash perfab.sh <tag> "<ENV1>" ...    # same but with the official eval/perf.py metric
+python3 split_report.py /tmp/arms_<tag>.log
+        # per-forward workload split from EXL3_MOE_STREAM_DEBUG lines: which tier got how many
+        # experts/picks/rows (the placement converges - never analyse the first forward)
+```
 
 ### Layer microbenchmark (standalone, no exllamav3 needed)
 

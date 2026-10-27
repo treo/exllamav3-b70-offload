@@ -18,6 +18,36 @@ noted, "VOID" = invalidated by a confounder listed in `measurement-discipline.md
 | per-command host cost | SYCL submit ~3.7 µs; raw ze append ~2 µs (12-15 µs for a 6-kernel chain) |
 | per-command GPU cost at decode | ~8-15 µs per chained queue op; `--bare` barrier round trip 33 µs |
 
+## 2026-10-28 (night): device-tier prefill split, 2.05bpw — the shipped default
+
+`perfab.sh policy` = `perf.py -mcs 256 -ngr -mct 15 -mcpa --max_length 4096 -dr 5`, 2 arms x 2
+rounds, **interleaved** (one process per arm per round), best of rounds. This is the only
+comparison of the two policies taken on the same box in the same hour with the official metric;
+single runs on different evenings moved ±3-5% and inverted the sign.
+
+| arm | pre 256 | 512 | 1024 | 2048 | 4096 | dec mean |
+|---|---|---|---|---|---|---|
+| previous policy (`STREAM_T_DEV=11`, `SLOT_ROWS_DEV=128` = the old behaviour) | 567 | 837 | 1256 | 1695 | 1943 | 67.6 |
+| **device-tier split (`STREAM_T_DEV` 24, `SLOT_ROWS_DEV` 1024) = new default** | **624** | **915** | **1343** | **1816** | **2005** | **67.7** |
+| gain | +10% | +9% | +7% | +7% | +3% | neutral |
+
+Supporting measurements (in-process `pb.py`, min-of-3, 2 rounds interleaved; NOT interchangeable
+with perf.py numbers, but same sign and bigger - the steady state favours the new policy more):
+
+| arm | pre 1024 | 2048 | 4096 |
+|---|---|---|---|
+| previous policy | 1258 | 1577 | 1923 |
+| device-tier split | 1322 | 1739 | 2074 |
+| all worker work on B70, `cap_rows` 128 (`STREAM_T=100000`) | — | — | 1411 (1344-1475) |
+| └ same, `cap_rows` 1024 | — | — | **1568** (1508-1645) — the chunk-fullness lever, +11% |
+
+Timeline of the default arm at 4096 rows (kineto + dmon + xpu-smi): 3090 compute stream 81% busy,
+union of both 3090 streams 91%, link 3.2 GB/s mean of 12.8 usable, B70 21-28% util / 70 W of
+275 W. `expert_bytes` = **1 228 800 B** (one streamed expert = ~92 us of link, not the 184 us the
+earlier plateau note assumed). Quality (`qa_stream.py`, 8192 tok): CPU 2.318407, new default
+2.321975 (+0.15%, budget ≤0.25%; the arm it replaces was +0.16%). Method + tools:
+`sycl_moe/SESSION_20261028.md`.
+
 ## 2026-10-27 (evening): prefill policy + plugin A/Bs, 2.05bpw
 
 `perf.py -mcs 256 -ngr -mct 15 -mcpa --max_length 4096` (prefill tok/s at the stated context

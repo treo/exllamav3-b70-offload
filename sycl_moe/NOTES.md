@@ -6,7 +6,7 @@ Code map: `README.md` "Design map". Everything else — the derivation log, evid
 inventory — lives in [`archive/`](archive/INDEX.md). This file is only what you must know before
 editing: current state, standing rules, traps, decisions, levers.**
 
-## State (2026-10-27, evening)
+## State (2026-10-28, night)
 
 Shipped and gated: fp32 scalar-semantics tier (`GemvK`, all 11 contract rates compile-time
 specialized) + int8/XMX DPAS tier (auto for rows≥2) + per-layer weight ARENA with threaded upload
@@ -16,22 +16,47 @@ staging + MAXM=8 chunks + **fragment bucketing** (`BUCKET`, CUDA m-tile-ladder d
 + slim decode kernel + fused prep/quant + owner-gather K6 + counter-fed
 fused DOWN (`COOP`, default on) + poison-latch fault containment + full-rate specialization
 + **n-major arena tile order** + all chunk/fragment geometry derived from one header
-(`moe_layout.hpp`).
+(`moe_layout.hpp`) + **device-tier prefill split** (`STREAM_T_DEV`/`SLOT_ROWS_DEV`: the B70 takes
+the cold experts as few large jobs while the 3090 streams the hot ones).
 
 2.05bpw prefill, same box, same flags (`-mcs 256 -ngr -mct 15 -mcpa`, `perf.py --max_length 4096`),
 reps in `archive/measurements-ledger.md`:
 
-| arm | prefill 1024 / 2048 / 4096 | decode |
+| arm | prefill 256 / 512 / 1024 / 2048 / 4096 | decode |
 |---|---|---|
-| CPU worker (the bar to beat) | 1179-1180 / 1559-1616 / 1840-1960 | 64 |
-| B70, classic anti-theft (fully registered ⇒ nothing streams) | 971-986 / 1102-1114 / 1197-1202 | 67 |
-| **B70, hot-pick streaming + n-major + bucketing (default now)** | **1230-1247 / 1604-1605 / 1969-1984** | **67** |
+| CPU worker (the bar to beat) | – / – / 1179-1180 / 1559-1616 / 1840-1960 | 64 |
+| B70, classic anti-theft (fully registered ⇒ nothing streams) | – / – / 971-986 / 1102-1114 / 1197-1202 | 67 |
+| B70, hot-pick streaming + n-major + bucketing | – / – / 1230-1247 / 1604-1605 / 1969-2014 | 67 |
+| **B70, + device-tier split (`STREAM_T_DEV` 24 / `SLOT_ROWS_DEV` 1024) — default now** | **624 / 915 / 1343 / 1816 / 2005** | **67.7** |
+| └ same box, previous policy re-measured interleaved (`perfab.sh policy`, best of 2 rounds) | 567 / 837 / 1256 / 1695 / 1943 | 67.6 |
 
 i.e. the -mcpa prefill regression (B70 37% BEHIND the CPU worker) is fixed and the B70's decode
 edge survives, because streaming hot picks on the 3090 and leaving the sparse tail on the B70 is
-cooperation, not theft: the arena copy stays resident, so decode is untouched. Same plugin,
-same flags, `EXL3_MOE_B70_BUCKET=0` → 1195 prefill @4096 in the no-stream regime vs 1253 with
-bucketing; the streamed regime is where prefill actually lives (≈1970), see the plateau note.
+cooperation, not theft: the arena copy stays resident, so decode is untouched. The last row is the
+only comparison run *interleaved* against the arm it replaces (`sycl_moe/perfab.sh policy`, 2 arms
+x 2 rounds, one process each): +10/+9/+7/+7/+3% prefill, decode 67.7 vs 67.6 (neutral). Comparing
+different days' single `perf.py` runs (2014 vs 1968) moved more than the effect in the wrong
+direction - box drift is ±3-5% and both metrics are one-shot per length.
+
+### What actually bounds prefill (measured 2026-10-28, `sycl_moe/SESSION_20261028.md`)
+
+**The main GPU, not the link, and not the B70.** One 4096-row prefill at the default policy,
+kineto + `dmon` + `xpu-smi` (tools: `pb.py -prof`, `tl_analyze.py`, `mon.py`):
+
+| resource | used |
+|---|---|
+| 3090 compute stream | 1649 ms busy of a 2159 ms span (81%); union of both streams **91%** |
+| 3090 copy stream (weight DMA) | 475 ms = 22%; link mean **3.2 GB/s** of 12.8 measured capacity |
+| 3090 non-MoE kernels (attention/GDN/dense/resident experts) | ~1.05 s — the floor no offload knob can move |
+| 3090 streamed-MoE kernels | ~0.6 s (`exl3_moe_kernel` mt64/32/16 + reconstruct + gather) |
+| B70 | 592 ms/rep of plugin time for ~16 k tail picks at **21-28% compute util, 70 W of 275 W** |
+
+The earlier 'Gen4 x8 link ceiling ⇒ ~2000 tok/s plateau' inference is superseded: it was computed
+from `2.46 MB` per expert (real `expert_bytes` on this model is **1 228 800 B**, so one DMA is
+~92 us not ~184 us) and from a first-forward workload (before promote-on-miss converges, the
+worker tier holds ~20.8 k picks/layer; converged it holds ~5-7 k). The prefill knobs that matter
+are (a) which picks each leg computes and (b) how full each leg's tiles/fragments are - and the
+B70 has ~3x more capacity than the old policy used.
 
 | model | config | CPU worker | B70 |
 |---|---|---|---|
@@ -44,14 +69,9 @@ Accuracy: float tier xval **6.04e-7** rms vs the real CPU scalar ext (6.53e-7 wi
 int8 tier **1.36e-3**, ppl Δ ≤ 0.25% on all three models (`archive/measurements-ledger.md`).
 Decode is not MoE-bound on 2.05: the whole b70 path is ~10% of the 14.2 ms/token budget.
 
-Plateau: prefill is bounded by the **Gen4 x8 link (13.4 GB/s measured, both cards)** and the
-3090's streamed reconstruct; decode by 3090 graph-replay overhead. Both halves of that sentence
-are now measured rather than inferred: the streamed leg costs one DMA per streamed expert
-(~184 us of link at 2.46 MB) and the B70 leg costs ~12 us per DPAS *chunk* (≈6 us per m8
-fragment) regardless of how many of its 8 token slots are live — which is why the prefill
-curve flattens near 2000 tok/s whichever way the split is drawn, and why "just let the B70 own
-the whole offloaded set" is 37% SLOWER (see Standing decisions and `archive/int8-dpas-tier.md`).
-Software knobs (mcs, stream_t, WSLOTS, guards, overlap) are all at measured optima — see
+Plateau: with the split tuned, prefill at 4096 rows is bounded by the 3090's own queue (its
+non-MoE work is ~1.05 s of a ~2.0 s pass and it is 91% busy overall). Software knobs (mcs,
+stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measured optima — see
 `archive/placement-policy.md` before proposing a new one.
 
 ## Environment
@@ -82,6 +102,14 @@ Software knobs (mcs, stream_t, WSLOTS, guards, overlap) are all at measured opti
 7. Noise floors: decode ±3% (≥1 t/s is real), prefill ±3.5% (needs 3 reps), synthetic <10 µs = air.
 8. Never trust a piped build rc or a log you did not confirm exists; two "results" came from
    stale binaries, one campaign narrated a sweep that had not run.
+9. **Sweep interacting knobs together.** `stream_t` × `cap_rows` (2026-10-28): each looked 'flat'
+   when swept alone inside the other's dead zone, and the pair is worth +8-10%. Before believing a
+   recorded 'knob is flat', ask what regime the *other* knobs pinned it in.
+10. **Measure the converged placement, not the first forward.** Promote-on-miss moves hot experts
+    out of the worker tier as forwards proceed (2.05bpw: 20.8 k worker picks/layer on the first
+    pass, 5-7 k afterwards; streamed experts 260 → ~70-110, tail rows 0 → ~300-770). Every
+    policy/threshold experiment run on cold state measures a different workload. `pb.py`'s reps
+    (or perf.py run 2) are the steady state; `split_report.py` shows the split per forward.
 
 ## Verification rules
 
@@ -197,8 +225,14 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
   1202 → 1975. It is cooperation, not theft: masked picks leave the job (`sel=-1`, both tier
   chunkers skip them), the arena copy stays resident, and streaming is gated to
   rows ≥ stream_min_rows so decode never uses it (dec measured unchanged 65-68).
-  Threshold stays AUTO (probe-scaled ≈11 at this link): 16/24/32/48 are all within noise of
-  each other (±3.5%) and 4/64/96 are clearly worse.
+  Threshold: **split by tier**. With a CPU tail the break-even is the old probe-scaled ≈11
+  (`EXL3_MOE_STREAM_T`). With a DEVICE tail the streamed leg amortises a whole 1.17 MB expert DMA
+  per streamed expert while the B70 already holds the weights, so the break-even is an absolute
+  ~24 picks here: `EXL3_MOE_STREAM_T_DEV` (default 24, scaled by 13.4/probed_GBs, used whenever
+  `layer_b70n[L] > 0`). 16/24/32 were within a few % of each other at 24 +/- but 24 took every
+  round; below it the 3090 pays a DMA+launch per 1-2-pick expert, above it the B70 pays full
+  fragments for half-empty chunks. Both legs' fixed costs are per *expert*, which is why the
+  optimum is a count and not a fraction of rows (24 is right at 1024, 2048 and 4096 rows alike).
 - Tier auto: **int8 iff rows ≥ 2**, float at rows=1 (float ~9% ahead at m=1: Xe2 DPAS min m=8,
   15/16 rows wasted, and joint_matrix fetches all 8 A rows regardless). Do not "fix" m=1 int8.
 - Fat int8 kernel always runs BOTH m8 fragments and always zero-fills 16 rows — a branch/peel to
@@ -208,11 +242,16 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
   (0.5 B/weight); installs are atomic in-place block overwrites; data pointers never move.
 - Workspace pool: process-wide, rebound on EVERY forward (`grow_p` is a pure rebind when it fits),
   grown in 64-chunk steps, excluded from the registration budget, and deliberately NOT
-  preallocated to the worst case. `cap_rows` default 128: the cool-box A/B finally ran
-  (2026-10-27, streamed regime, plugin with bucketing) - 256/512/1024 give 1925/1938-1957/1955
+  preallocated to the worst case. `cap_rows` default 128 for CPU-compute layers: the cool-box A/B
+  ran (2026-10-27, streamed regime, plugin with bucketing) - 256/512/1024 give 1925/1938-1957/1955
   and 1920 at 512 with bucketing, i.e. FLAT against 128's 1857-1984, with no faults at any
-  setting; in the no-stream regime it does matter (128 → 512 lifts 1195 → 1411). So 128 stays
-  the default and `cap_rows` is a knob for no-PCIe deployments, not a free win.
+  setting. **That 'flat' was an artifact of measuring a regime with no tail at all.** For a
+  DEVICE-tier layer the job IS the chunking unit - a DPAS fragment costs ~5.9 us whether or not
+  its 4 token slots are used - so 128-row jobs re-pay whole fragments for every job an expert's
+  picks touch, and `SLOT_ROWS_DEV=1024` is worth +11% on the all-B70 arm (1411 → 1568) and part
+  of the +8% shipped split. Device-tier layers therefore use `EXL3_MOE_CPU_SLOT_ROWS_DEV`
+  (default 1024, clamped by `EXL3_MOE_CPU_SLOT_BYTES`=256 MiB of pinned handoff segment);
+  CPU-tier layers keep 128, where small jobs pipeline better with the pool.
 - Placement: default = cold/sparse experts on B70 (`SUB=auto` when oversubscribed), guard on
   (decode-weighted), stream_t auto probe. Hot experts on B70 measured WORSE (-18% prefill):
   per hot pick the 3090's streamed path is ~5x cheaper. `EXL3_MOE_CPU_SWAP_TIER=0` is the
@@ -257,15 +296,33 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
    pairing; error-feedback int8 for quality headroom. CLOSED today: RING for slim kernels
    (measured negative at every all-narrow shape) and "MAXM 16/32 wide-M" (see 3). Full
    rationale: `archive/int8-dpas-tier.md`, `archive/decode-command-latency.md`.
-7. Prefill ceiling is the LINK, not the placement: ~260 qualifying experts × ~184 us of DMA per
-   4096-token chunk per layer ≈ 2.3 s ⇒ the observed ~1900-2000 tok/s plateau with the streamed
-   tier engaged. The B70 holds the same weights at 608 GB/s but pays ~5.9 us per m8 fragment to
-   chew them, which currently loses the comparison for hot experts and wins it for sparse ones.
-   Anything that makes both legs do MORE work concurrently (rather than trading one against the
-   other) is where "balanced across the two GPUs" would actually come from: the tail job and the
-   streamed batches already overlap in `_submit_prefill_streamed`, but the parent blocks in
-   `_issue_compute` once the job ring (EXL3_MOE_CPU_SLOTS, max 8) is full, which starves the 3090
-   queue behind it - untested, and the reason st>48 falls off rather than flattening.
+7. **Prefill balance (open, and the biggest one left).** The link is NOT the ceiling - it runs at
+   a quarter of its rate while the 3090's compute stream is 81% busy and its two streams are 91%
+   busy union (measured, `SESSION_20261028.md`). Floors: 3090 non-MoE work ~1.05 s of a ~2.0 s
+   4096-row pass; the streamed leg is ~1.7 us/pick on the 3090 (kernel) + ~92 us/expert of link,
+   vs ~1.5 us/pick best case (full chunks) and ~8-26 us/pick as the tail is actually shaped today.
+   Next moves, in rough order of payoff:
+   (a) make the B70 tail cheap - it is ~592 ms/rep to chew ~16 k picks (3% of the workload) at
+       21-28% util; a narrow-chunk path that costs ~one weight traversal instead of two m8
+       fragments, or simply better weight bandwidth on 1-2-token chunks (~50-100 GB/s effective
+       today vs 608), directly buys back leg balance; the `b70_lib.forward_impl` double copy
+       (x → g_stage → d_x, d_out → g_stage → slot) is ~15 KB/row of PCIe+memcpy per tail row and
+       is pure overhead;
+   (b) stop paying per-batch host costs on the streamed leg: ~1 k pageable HtoD copies per prefill
+       (`host_to_device(torch.tensor(...))` for the fused-tier descriptor + expert counts, 33-42 ms
+       of device time plus a pageable-copy stall each) could be one pinned upload per layer;
+   (c) the parent still blocks in `_issue_compute`/`_collect_compute` per layer once the job ring
+       (EXL3_MOE_CPU_SLOTS, max 8) is full - with big jobs there are few of them, but deeper
+       ring/lookahead is untested;
+   (d) the 3090 streamed fused kernel charges ~2 ms per mt64 launch for ~24 experts of ~60-80
+       picks each (padding to the 64-row tile is ~1.5x, and the tier ladder only offers 16/32/64).
+
+7. **Coupled-knob sweeps only.** `stream_t` and `cap_rows` interact multiplicatively (measured:
+   `stream_t` 11→24 gains nothing at `cap_rows` 128, +8% at 1024; `cap_rows` 128→1024 gains
+   nothing at `stream_t` 11, +8-10% at 24). Sweeping one inside the dead zone of the other is how
+   both got recorded as 'flat'. Related: measure the **converged** placement (pb.py reps 2+, or
+   perf.py's second run) - on the first forward the worker tier still holds the hot experts, which
+   inverts the streamed/tail split (20.8 k picks/layer vs 5-7 k converged).
 
 Dead ends — do not re-litigate (evidence in `archive/kernel-microopt.md`, `archive/int8-dpas-tier.md`,
 `archive/decode-command-latency.md`): dp4a/esimd in generic kernels, `dot_acc` ext, col-major
