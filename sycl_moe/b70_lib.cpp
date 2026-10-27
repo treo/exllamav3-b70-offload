@@ -582,22 +582,37 @@ static void forward_impl
     // thread holding exec_mu (parent would spin on the job's done flag forever).
     // sycl::event has no timed wait in DPC++ - poll with a deadline.
     {
-        const auto t0 = std::chrono::steady_clock::now();
-        const auto dl = t0 + std::chrono::milliseconds(15000);
-        while (e_rd.get_info<sycl::info::event::command_execution_status>()
-               != sycl::info::event_command_status::complete)
-        {
-            if (std::chrono::steady_clock::now() > dl)
+        static const int wait_mode = []{
+            const char* e = getenv("EXL3_MOE_B70_WAIT");   // =1: event .wait() instead of poll (lab)
+            return e && e[0] == '1';
+        }();
+        if (!wait_mode) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto dl = t0 + std::chrono::milliseconds(15000);
+            while (e_rd.get_info<sycl::info::event::command_execution_status>()
+                   != sycl::info::event_command_status::complete)
             {
-                g.poison.store(true);
-                throw std::runtime_error("b70 forward completion timeout (device wedged)");
+                if (std::chrono::steady_clock::now() > dl)
+                {
+                    g.poison.store(true);
+                    throw std::runtime_error("b70 forward completion timeout (device wedged)");
+                }
+                // Bounded, but WAKE-FIRST: pure sleep-polling cost ~70us per decode job
+                // on this box (measured: median 183 vs 108 with event .wait() - the status
+                // query can lag completion by a whole sleep quantum and EVERY layer job
+                // pays it). Busy-yield for the first ~1 ms (the worker thread has nothing
+                // else to do while a decode-shape job runs), then sleep so huge prefill
+                // jobs do not burn a core. Deadline/poison semantics unchanged.
+                const auto age = std::chrono::steady_clock::now() - t0;
+                if (age < std::chrono::milliseconds(1))
+                    std::this_thread::yield();
+                else if (age < std::chrono::milliseconds(5))
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                else
+                    std::this_thread::sleep_for(std::chrono::microseconds(500));
             }
-            // fine grain first (decode jobs finish in ~0.2 ms; a 500us poll quantum would
-            // add it to EVERY layer job), coarse after 5 ms where the wait is no longer
-            // on any critical path we care about
-            const bool early = (std::chrono::steady_clock::now() - t0) < std::chrono::milliseconds(5);
-            std::this_thread::sleep_for(early ? std::chrono::microseconds(20)
-                                              : std::chrono::microseconds(500));
+        } else {
+            e_rd.wait();
         }
     }
     memcpy(out, g_stage.stage, (size_t)rows * H * 4);

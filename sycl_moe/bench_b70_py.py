@@ -30,11 +30,20 @@ wp = ctypes.cast(w.ctypes.data, ctypes.c_void_p)
 sp = sel.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
 op = out.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 rows, topk = int(meta['rows']), int(meta['topk'])
-lib.b70_forward(h, xp, sp, wp, op, rows, topk)
-print('rms_rel vs ref', float(np.sqrt(((out - ref) ** 2).sum() / max((ref ** 2).sum(), 1e-30))))
+lib.b70_forward.argtypes = [ctypes.c_longlong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32),
+                            ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int]
+rc0 = lib.b70_forward(h, xp, sp, wp, op, rows, topk)
+out0 = out.copy(); out[:] = 0.0
+print('rms_rel vs ref', float(np.sqrt(((out0 - ref) ** 2).sum() / max((ref ** 2).sum(), 1e-30))), 'rc', rc0)
 N = 300
-t0 = time.perf_counter()
+times = []
 for _ in range(N):
-    lib.b70_forward(h, xp, sp, wp, op, rows, topk)
-t1 = time.perf_counter()
-print(f'steady {rows}-row forward: {(t1 - t0) / N * 1e6:.1f} us/call')
+    t0 = time.perf_counter()
+    rc = lib.b70_forward(h, xp, sp, wp, op, rows, topk)
+    times.append((time.perf_counter() - t0) * 1e6)
+    assert rc == 0, f'forward failed rc={rc} at {len(times)}'
+times.sort()
+print(f'steady {rows}-row forward: {times[N // 2]:.1f} us/call  (min {times[0]:.1f}, p90 {times[int(0.9 * N)]:.1f})')
+out[:] = 0.0
+lib.b70_forward(h, xp, sp, wp, op, rows, topk)
+print('rms after loop', float(np.sqrt(((out - ref) ** 2).sum() / max((ref ** 2).sum(), 1e-30))))
