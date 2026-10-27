@@ -973,3 +973,16 @@ Every model on every axis this session (best measured, pre/dec):
   2.05: 1886 / 72.6   (pure defaults, self-tuned full tier)
   2.68: 748 / 60.0    (TIER=0 era max prefill | guard+st2/HOTMULT=2 for decode-first 556/60)
   4.05: 599 / 57.9    (SUB=0.5+st4 prefill | default guarded for 494/57.9, +165%/+54% vs no-B70)
+
+## Deliberately parked (with reasons), candidates ordered
+1. Native-L0 decode submission chain -> PLAN_L0.md (biggest remaining decode lever,
+   scoped + all feasibility probes already done; fatigue-appropriate for a fresh session).
+2. RING for the slim kernels: implemented only in the F1(fat) branch; slim+j ring needs
+   ~10 lines (same ring, fk-only offsets) - affects rows2-4 int8 only, niche.
+3. Split-K retune under ring: NSLU=2 wins ~5% at r32-class but loses at r2/r128; the
+   rows-dependent rule isn't worth the config risk now (auto caps already route r128
+   correctly). Revisit AFTER any kernel-side change (ring shifted the whole landscape once).
+4. B70-side weight streaming for hot CPU-tier experts (stream INTO tier slots via
+   update+evict protocol): the only way to beat 748-era prefill WITH the decode gains;
+   real cache-protocol work, next-tier effort.
+5. MAXM 16/32 wide prefill tier: still valid, orthogonal, separate instantiations only.
