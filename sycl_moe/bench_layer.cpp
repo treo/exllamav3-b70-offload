@@ -49,34 +49,34 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
 
     // tin is laid out by K1 at ts = (j*2+mu) slots EVEN for gateless (mu=0, ts=2j): the
     // readback must cover all 2*nc ts-slots, not just the 'slots' the quant tier uses.
-    std::vector<float> tin((size_t)nc * 2 * 8 * H);
+    std::vector<float> tin((size_t)nc * 2 * MOE_MAXM * H);
     layer.peek(tin.data(), layer.ws(0), tin.size() * 4);
-    std::vector<int32_t> a8u((size_t)slots * (H / 8) * 128);
+    std::vector<int32_t> a8u((size_t)slots * (H / I8_A8W) * I8_A8BLK);
     layer.peek(a8u.data(), layer.i8buf(0), a8u.size() * 4);
-    std::vector<float> qsxu((size_t)slots * 16 * 2);
+    std::vector<float> qsxu((size_t)slots * I8R * 2);
     layer.peek(qsxu.data(), layer.i8buf(2), qsxu.size() * 4);
-    std::vector<int32_t> accgu((size_t)slots * layer.i8nsl(0) * 16 * I);
+    std::vector<int32_t> accgu((size_t)slots * layer.i8nsl(0) * I8R * I);
     layer.peek(accgu.data(), layer.i8buf(4), accgu.size() * 4);
-    std::vector<float> tind((size_t)nc * 8 * I);
+    std::vector<float> tind((size_t)nc * MOE_MAXM * I);
     layer.peek(tind.data(), layer.ws(3), tind.size() * 4);
-    std::vector<int32_t> a8d((size_t)nc * (I / 8) * 128);
+    std::vector<int32_t> a8d((size_t)nc * (I / I8_A8W) * I8_A8BLK);
     layer.peek(a8d.data(), layer.i8buf(1), a8d.size() * 4);
-    std::vector<float> qsxd((size_t)nc * 16 * 2);
+    std::vector<float> qsxd((size_t)nc * I8R * 2);
     layer.peek(qsxd.data(), layer.i8buf(3), qsxd.size() * 4);
-    std::vector<int32_t> accd((size_t)nc * layer.i8nsl(1) * 16 * H);
+    std::vector<int32_t> accd((size_t)nc * layer.i8nsl(1) * I8R * H);
     layer.peek(accd.data(), layer.i8buf(5), accd.size() * 4);
 
-    // accgu/accd arrive as [slot][nsl][16][N] split-K slices; collapse to [slot][16][N] with
+    // accgu/accd arrive as [slot][nsl][I8R][N] split-K slices; collapse to [slot][I8R][N] with
     // the SAME i32 add semantics the consumers use (values are far from int overflow).
     auto collapse = [](std::vector<int32_t>& a, int nslots, int nsl, int N) {
         if (nsl == 1) return;
-        std::vector<int32_t> out((size_t)nslots * 16 * N, 0);
+        std::vector<int32_t> out((size_t)nslots * I8R * N, 0);
         for (int slot = 0; slot < nslots; ++slot)
             for (int q = 0; q < nsl; ++q)
-                for (int r = 0; r < 16; ++r)
+                for (int r = 0; r < I8R; ++r)
                     for (int n = 0; n < N; ++n)
-                        out[((size_t)slot * 16 + r) * N + n] +=
-                            a[((size_t)slot * nsl + q) * 16 * N + (size_t)r * N + n];
+                        out[((size_t)slot * I8R + r) * N + n] +=
+                            a[((size_t)slot * nsl + q) * I8R * N + (size_t)r * N + n];
         a = std::move(out);
     };
     collapse(accgu, slots, layer.i8nsl(0), I);
@@ -92,7 +92,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
     auto x8row = [&](const std::vector<int32_t>& a8, int slot, int r, int k, int K) {
         const int kf = K / 8;
         return (int)(signed char)((unsigned int)
-            a8[((size_t)slot * kf + (k >> 3)) * 128 + r * 8 + (k & 7)] & 0xffu);
+            a8[((size_t)slot * kf + (k >> I8_A8W_SHIFT)) * I8_A8BLK + r * I8_A8W + (k & (I8_A8W - 1))] & 0xffu);
     };
 
     // ---- stage B: quantization gu (input = tin readback, or host-prepped from x when
@@ -113,14 +113,14 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 moe_ref::prep_row(xf.data(), Mx.suh.data(), H, tin_f.data());
                 xr = tin_f.data();
             } else {
-                xr = &tin[((size_t)ts * 8 + t) * H];
+                xr = &tin[((size_t)ts * MOE_MAXM + t) * H];
             }
             float am = 0.f;
             for (int k = 0; k < H; ++k) am = std::max(am, std::fabs(xr[k]));
             const float qw = am > 0.f ? am * (1.0f / 8192.0f) : 1.0f;
             const float rq = am > 0.f ? 8192.0f / am : 1.0f;
             for (int part = 0; part < 2 && !fails; ++part) {
-                const int r = (t >> 2) * 8 + 2 * (t & 3) + part;   // 16-row slot layout
+                const int r = i8_row_of(t) + part;                 // token+part -> I8R-row slot row
                 long sacc = 0;
                 for (int k = 0; k < H && !fails; ++k) {
                     const float vf = xr[k] * rq;
@@ -133,15 +133,15 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     // replicate NEGATIVE values (-1 -> 0xFEFEFEFF); masking first is required.
                     const int32_t want = (int32_t)((x8 & 0xff) * 0x01010101);
                     const int kf = H / 8;
-                    const int32_t gotw = a8u[((size_t)slot * kf + (k >> 3)) * 128 + r * 8 + (k & 7)];
+                    const int32_t gotw = a8u[((size_t)slot * kf + (k >> I8_A8W_SHIFT)) * I8_A8BLK + r * I8_A8W + (k & (I8_A8W - 1))];
                     if (gotw != want) {
                         printf("B slot%d tok%d part%d k%d: got %08x want %08x\n",
                                slot, t, part, k, (unsigned)gotw, (unsigned)want);
                         // forensic: per-row fingerprints of a8 + the tin row it came from
-                        for (int rr = 0; rr < 16; ++rr) {
+                        for (int rr = 0; rr < I8R; ++rr) {
                             long rs = 0;
                             for (int kk = 0; kk < H; kk += 8)
-                                rs += (int)(signed char)((unsigned)a8u[((size_t)slot * (H / 8) + kk / 8) * 128 + rr * 8 + (kk & 7)] & 0xffu);
+                                rs += (int)(signed char)((unsigned)a8u[((size_t)slot * (H / I8_A8W) + kk / I8_A8W) * I8_A8BLK + rr * I8_A8W + (kk & (I8_A8W - 1))] & 0xffu);
                             float tsum = 0.f, tam = 0.f;
                             for (int kk = 0; kk < H; ++kk) {
                                 tsum += xr[kk];
@@ -155,8 +155,8 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 }
                 const float A = KDQ * (part ? qw : qw * 128.0f);
                 const float B = -510.0f * A * (float)sacc;
-                const float gA = qsxu[(size_t)slot * 32 + r * 2];
-                const float gB = qsxu[(size_t)slot * 32 + r * 2 + 1];
+                const float gA = qsxu[((size_t)slot * I8R + r) * 2];
+                const float gB = qsxu[((size_t)slot * I8R + r) * 2 + 1];
                 if (!fails && (!closef(gA, A) || !closef(gB, B))) {
                     printf("B affine slot%d r%d: got {%g,%g} want {%g,%g}\n", slot, r, gA, gB, A, B);
                     ++fails;
@@ -197,13 +197,13 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 }
             }
             std::vector<long> wantv, gotv;
-            for (int r = 0; r < 16 && !fails; ++r) {
-                const int t = (r >> 3) * 4 + ((r >> 1) & 3);   // 16-row slot layout
+            for (int r = 0; r < I8R && !fails; ++r) {
+                const int t = (r / I8_ROWS_PER_FRAG) * I8_TOK_PER_FRAG + ((r >> 1) % I8_TOK_PER_FRAG);
                 if (t >= m) {
                     // slim pass: frag1 (rows 8..15) is neither written nor read - stale
-                    if (!layer.i8slim() && r >= 8) continue;
+                    if (!layer.i8slim() && r >= I8_ROWS_PER_FRAG) continue;
                     for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
-                        const int32_t g = accgu[((size_t)slot * 16 + r) * I + cols[ci]];
+                        const int32_t g = accgu[((size_t)slot * I8R + r) * I + cols[ci]];
                         if (g != 0) { printf("C pad slot%d r%d n%d got %d\n", slot, r, cols[ci], g); ++fails; }
                     }
                     continue;
@@ -213,7 +213,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     long acc = 0;
                     for (int k = 0; k < H; ++k)
                         acc += (long)x8row(a8u, slot, r, k, H) * bs[(size_t)k * NC + ci];
-                    const int32_t g = accgu[((size_t)slot * 16 + r) * I + n];
+                    const int32_t g = accgu[((size_t)slot * I8R + r) * I + n];
                     wantv.push_back(acc); gotv.push_back(g);
                     if (g != (int32_t)acc) ++fails;
                 }
@@ -248,28 +248,28 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
         const uint16_t* svhg = gated ? L.gates[e].svh.data() : nullptr;
         const uint16_t* suhd = L.downs[e].suh.data();
         for (int r0 = 0; r0 < m && !fails; ++r0) {
-            const int rr = (r0 >> 2) * 8 + 2 * (r0 & 3);   // token -> 16-row slot rows
+            const int rr = i8_row_of(r0);                   // token -> I8R-row slot rows
             for (int blk = 0; blk < I / 128 && !fails; ++blk) {
                 std::vector<float> gv(128), uv(128);
                 float gb = 0.f, ub = 0.f;
                 for (int i = 0; i < 128; ++i) {
                     const int c = blk * 128 + i;
                     if (gated) {
-                        const float* q0 = &qsxu[((size_t)slotg * 16 + rr) * 2];
-                        const float* q1 = &qsxu[((size_t)slotg * 16 + rr + 1) * 2];
-                        const int32_t* a0 = &accgu[((size_t)slotg * 16 + rr) * I];
-                        const int32_t* a1 = &accgu[((size_t)slotg * 16 + rr + 1) * I];
+                        const float* q0 = &qsxu[((size_t)slotg * I8R + rr) * 2];
+                        const float* q1 = &qsxu[((size_t)slotg * I8R + rr + 1) * 2];
+                        const int32_t* a0 = &accgu[((size_t)slotg * I8R + rr) * I];
+                        const int32_t* a1 = &accgu[((size_t)slotg * I8R + rr + 1) * I];
                         gv[i] = q0[0] * (float)a0[c] + q1[0] * (float)a1[c];
-                        const float* p0 = &qsxu[((size_t)slotu * 16 + rr) * 2];
-                        const float* p1 = &qsxu[((size_t)slotu * 16 + rr + 1) * 2];
-                        const int32_t* b0 = &accgu[((size_t)slotu * 16 + rr) * I];
-                        const int32_t* b1 = &accgu[((size_t)slotu * 16 + rr + 1) * I];
+                        const float* p0 = &qsxu[((size_t)slotu * I8R + rr) * 2];
+                        const float* p1 = &qsxu[((size_t)slotu * I8R + rr + 1) * 2];
+                        const int32_t* b0 = &accgu[((size_t)slotu * I8R + rr) * I];
+                        const int32_t* b1 = &accgu[((size_t)slotu * I8R + rr + 1) * I];
                         uv[i] = p0[0] * (float)b0[c] + p1[0] * (float)b1[c];
                     } else {
-                        const float* q0 = &qsxu[((size_t)slotu * 16 + rr) * 2];
-                        const float* q1 = &qsxu[((size_t)slotu * 16 + rr + 1) * 2];
-                        const int32_t* a0 = &accgu[((size_t)slotu * 16 + rr) * I];
-                        const int32_t* a1 = &accgu[((size_t)slotu * 16 + rr + 1) * I];
+                        const float* q0 = &qsxu[((size_t)slotu * I8R + rr) * 2];
+                        const float* q1 = &qsxu[((size_t)slotu * I8R + rr + 1) * 2];
+                        const int32_t* a0 = &accgu[((size_t)slotu * I8R + rr) * I];
+                        const int32_t* a1 = &accgu[((size_t)slotu * I8R + rr + 1) * I];
                         uv[i] = q0[0] * (float)a0[c] + q1[0] * (float)a1[c];
                     }
                 }
@@ -278,15 +278,15 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 // per iteration), which cancellation-amplified columns (|gv| ~ 1e-4) expose
                 // as a 4th-digit stage-D mismatch. Fold it the kernel's way.
                 if (gated) {
-                    const float* q0 = &qsxu[((size_t)slotg * 16 + rr) * 2];
-                    const float* q1 = &qsxu[((size_t)slotg * 16 + rr + 1) * 2];
-                    const float* p0 = &qsxu[((size_t)slotu * 16 + rr) * 2];
-                    const float* p1 = &qsxu[((size_t)slotu * 16 + rr + 1) * 2];
+                    const float* q0 = &qsxu[((size_t)slotg * I8R + rr) * 2];
+                    const float* q1 = &qsxu[((size_t)slotg * I8R + rr + 1) * 2];
+                    const float* p0 = &qsxu[((size_t)slotu * I8R + rr) * 2];
+                    const float* p1 = &qsxu[((size_t)slotu * I8R + rr + 1) * 2];
                     gb = 128.0f * (q0[1] + q1[1]);
                     ub = 128.0f * (p0[1] + p1[1]);
                 } else {
-                    const float* q0 = &qsxu[((size_t)slotu * 16 + rr) * 2];
-                    const float* q1 = &qsxu[((size_t)slotu * 16 + rr + 1) * 2];
+                    const float* q0 = &qsxu[((size_t)slotu * I8R + rr) * 2];
+                    const float* q1 = &qsxu[((size_t)slotu * I8R + rr + 1) * 2];
                     ub = 128.0f * (q0[1] + q1[1]);
                 }
                 // kernel order: sh = A*acc; hadamard; sh[0] += 128*B; transform; act; *sd;
@@ -333,7 +333,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 moe_ref::hadamard_128(hv.data());
                 for (int i = 0; i < 128; ++i) {
                     const float want = hv[i] * HS;
-                    const float g = tind[((size_t)j * 8 + r0) * I + blk * 128 + i];
+                    const float g = tind[((size_t)j * MOE_MAXM + r0) * I + blk * 128 + i];
                     if (!closef(g, want)) {
                         printf("D MISMATCH j%d m%d r%d rr%d c%d: got %.7g want %.7g\n",
                                j, m, r0, rr, blk * 128 + i, g, want);
@@ -351,13 +351,13 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
     for (int j = 0; j < nc && !fails; ++j) {
         const int m = chunks[j].m;
         for (int t = 0; t < m && !fails; ++t) {
-            const float* xr = &tind[((size_t)j * 8 + t) * I];
+            const float* xr = &tind[((size_t)j * MOE_MAXM + t) * I];
             float am = 0.f;
             for (int k = 0; k < I; ++k) am = std::max(am, std::fabs(xr[k]));
             const float qw = am > 0.f ? am * (1.0f / 8192.0f) : 1.0f;
             const float rq = am > 0.f ? 8192.0f / am : 1.0f;
             for (int part = 0; part < 2 && !fails; ++part) {
-                const int r = (t >> 2) * 8 + 2 * (t & 3) + part;   // 16-row slot layout
+                const int r = i8_row_of(t) + part;                 // token+part -> I8R-row slot row
                 long sacc = 0;
                 for (int k = 0; k < I && !fails; ++k) {
                     const float vf = xr[k] * rq;
@@ -368,7 +368,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     sacc += x8;
                     const int32_t want = (int32_t)((x8 & 0xff) * 0x01010101);   // uchar splat (stage B note)
                     const int kf = I / 8;
-                    const int32_t gotw = a8d[((size_t)j * kf + (k >> 3)) * 128 + r * 8 + (k & 7)];
+                    const int32_t gotw = a8d[((size_t)j * kf + (k >> I8_A8W_SHIFT)) * I8_A8BLK + r * I8_A8W + (k & (I8_A8W - 1))];
                     if (gotw != want) {
                         printf("E slot%d tok%d part%d k%d: got %08x want %08x\n",
                                j, t, part, k, (unsigned)gotw, (unsigned)want);
@@ -377,8 +377,8 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 }
                 const float A = KDQ * (part ? qw : qw * 128.0f);
                 const float B = -510.0f * A * (float)sacc;
-                const float gA = qsxd[(size_t)j * 32 + r * 2];
-                const float gB = qsxd[(size_t)j * 32 + r * 2 + 1];
+                const float gA = qsxd[((size_t)j * I8R + r) * 2];
+                const float gB = qsxd[((size_t)j * I8R + r) * 2 + 1];
                 if (!fails && (!closef(gA, A) || !closef(gB, B))) {
                     printf("E affine j%d r%d: got {%g,%g} want {%g,%g}\n", j, r, gA, gB, A, B);
                     ++fails;
@@ -415,12 +415,12 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     }
                 }
             }
-            for (int r = 0; r < 16 && !fails; ++r) {
-                const int t = (r >> 3) * 4 + ((r >> 1) & 3);   // 16-row slot layout
+            for (int r = 0; r < I8R && !fails; ++r) {
+                const int t = (r / I8_ROWS_PER_FRAG) * I8_TOK_PER_FRAG + ((r >> 1) % I8_TOK_PER_FRAG);
                 if (t >= m) {
-                    if (!layer.i8slim() && r >= 8) continue;   // slim: frag1 stale
+                    if (!layer.i8slim() && r >= I8_ROWS_PER_FRAG) continue;   // slim: frag1 stale
                     for (size_t ci = 0; ci < cols.size() && !fails; ++ci) {
-                        const int32_t g = accd[((size_t)j * 16 + r) * H + cols[ci]];
+                        const int32_t g = accd[((size_t)j * I8R + r) * H + cols[ci]];
                         if (g != 0) { printf("F pad j%d r%d n%d got %d\n", j, r, cols[ci], g); ++fails; }
                     }
                     continue;
@@ -430,7 +430,7 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                     long acc = 0;
                     for (int k = 0; k < I; ++k)
                         acc += (long)x8row(a8d, j, r, k, I) * bs[(size_t)k * NC + ci];
-                    const int32_t g = accd[((size_t)j * 16 + r) * H + n];
+                    const int32_t g = accd[((size_t)j * I8R + r) * H + n];
                     if (g != (int32_t)acc) {
                         printf("F MISMATCH j%d r%d n%d: got %d want %ld (ratio %.4f)\n",
                                j, r, n, g, acc, (double)g / (double)acc);
@@ -459,24 +459,24 @@ static void i8_trace(MoeSyclLayer& layer, const moe_ref::Layer& L,
                 std::vector<float> sum(128, 0.f);
                 for (int p = tmap.begin[tk]; p < tmap.begin[tk + 1]; ++p) {
                     const int ent = tmap.entry[p];
-                    const int j = ent >> 3, s = ent & 7;
+                    const int j = ent >> MOE_MAXM_SHIFT, s = ent & (MOE_MAXM - 1);
                     const int e = chunks[j].expert;
                     const float wgt = chunks[j].weight[s];
                     const uint16_t* svhd = L.downs[e].svh.data();
                     std::vector<float> v(128);
                     float bb = 0.f;
-                    const int rs = (s >> 2) * 8 + 2 * (s & 3);   // token -> 16-row slot rows
+                    const int rs = i8_row_of(s);   // token -> I8R-row slot rows
                     for (int i = 0; i < 128; ++i) {
                         const int c = blk * 128 + i;
-                        const float* q0 = &qsxd[((size_t)j * 16 + rs) * 2];
-                        const float* q1 = &qsxd[((size_t)j * 16 + rs + 1) * 2];
-                        const int32_t* a0 = &accd[((size_t)j * 16 + rs) * H];
-                        const int32_t* a1 = &accd[((size_t)j * 16 + rs + 1) * H];
+                        const float* q0 = &qsxd[((size_t)j * I8R + rs) * 2];
+                        const float* q1 = &qsxd[((size_t)j * I8R + rs + 1) * 2];
+                        const int32_t* a0 = &accd[((size_t)j * I8R + rs) * H];
+                        const int32_t* a1 = &accd[((size_t)j * I8R + rs + 1) * H];
                         v[i] = q0[0] * (float)a0[c] + q1[0] * (float)a1[c];
                     }
                     {
-                        const float* q0 = &qsxd[((size_t)j * 16 + rs) * 2];
-                        const float* q1 = &qsxd[((size_t)j * 16 + rs + 1) * 2];
+                        const float* q0 = &qsxd[((size_t)j * I8R + rs) * 2];
+                        const float* q1 = &qsxd[((size_t)j * I8R + rs + 1) * 2];
                         bb = 128.0f * (q0[1] + q1[1]);   // the kernel's one-multiply fold
                     }
                     moe_ref::hadamard_128(v.data());
@@ -560,13 +560,14 @@ int main(int argc, char** argv)
         std::vector<MatrixSrc> gs(E), us(E), ds(E);
         std::vector<std::vector<uint16_t*> > keepers;
         const int K2load = 2 * a.bits + a.hb;
-        auto up16 = [&](const std::vector<uint16_t>& v, bool trellis = false) {
+        auto up16 = [&](const std::vector<uint16_t>& v, bool trellis = false, size_t tiles_k = 0) {
             std::vector<uint32_t> rp;
             const void* datap = v.data();
             if (trellis) {
                 rp.resize(v.size() / 2);
                 moe_sycl::repack_native_to_stream_words(rp.data(), (const uint32_t*)v.data(),
-                                                        v.size() / (2 * 4 * (size_t)K2load), K2load);
+                                                        v.size() / (2 * 4 * (size_t)K2load), K2load,
+                                                        tiles_k);
                 datap = rp.data();
             }
             uint16_t* p = sycl::malloc_device<uint16_t>(v.size(), q);
@@ -580,7 +581,7 @@ int main(int argc, char** argv)
                 auto tr = load_vec(std::string(pre) + "_tr_" + std::to_string(e), (size_t)(k/16)*(n/16)*pu2);
                 auto suh = load_vec(std::string(pre) + "_suh_" + std::to_string(e), k);
                 auto svh = load_vec(std::string(pre) + "_svh_" + std::to_string(e), n);
-                d.trellis = up16(tr, true); d.suh = up16(suh); d.svh = up16(svh); d.bias = nullptr;
+                d.trellis = up16(tr, true, (size_t)k / 16); d.suh = up16(suh); d.svh = up16(svh); d.bias = nullptr;
                 m.trellis = std::move(tr); m.suh = std::move(suh); m.svh = std::move(svh);
             };
             if (a.gated) { fill(gs[e], "gate", H, I); L2.gates.push_back(m); }
@@ -618,7 +619,8 @@ int main(int argc, char** argv)
                 chunks.push_back(ch);
             }
         }
-        TokenMap tmap;
+        moe_sycl::moe_bucket_chunks(chunks);   // MUST mirror the plugin chunker (order is in
+        TokenMap tmap;                         // the token-map entry encoding)
         {
             std::vector<std::vector<int>> tok(rows);
             for (size_t j = 0; j < chunks.size(); ++j)
@@ -776,10 +778,17 @@ int main(int argc, char** argv)
                 ch.weight[r] = lst[i + r].second;
             }
             chunks.push_back(ch);
-            rchunks.push_back(moe_ref::RefChunk{});
-            static_assert(sizeof(ChunkDev) == sizeof(moe_ref::RefChunk), "layout");
-            std::memcpy(static_cast<void*>(&rchunks.back()), &ch, sizeof(ch));
         }
+    }
+    // MUST mirror the plugin chunker: narrow chunks first (moe_bucket_chunks), because the
+    // device splits its gemv launches at that boundary AND the token-map entries carry the
+    // chunk index. rchunks (host reference) is rebuilt from the bucketed list.
+    moe_sycl::moe_bucket_chunks(chunks);
+    static_assert(sizeof(ChunkDev) == sizeof(moe_ref::RefChunk), "layout");
+    rchunks.clear();
+    for (const ChunkDev& ch : chunks) {
+        rchunks.push_back(moe_ref::RefChunk{});
+        std::memcpy(static_cast<void*>(&rchunks.back()), &ch, sizeof(ch));
     }
     // token CSR
     TokenMap tmap;
@@ -799,14 +808,16 @@ int main(int argc, char** argv)
     // ---------------------------------------------------- upload weights, run device
     std::vector<std::vector<uint16_t*>> keep(3);
     const int K2cur = 2 * a.bits + a.hb;
-    auto upload = [&](std::vector<uint16_t*>& dst, const std::vector<uint16_t>& src, bool trellis = false) {
+    auto upload = [&](std::vector<uint16_t*>& dst, const std::vector<uint16_t>& src, bool trellis = false,
+                      size_t tiles_k = 0) {
         std::vector<uint32_t> rp;
         const void* datap = src.data();
         size_t bytes = src.size() * 2;
         if (trellis) {
             rp.resize(src.size() / 2);
             moe_sycl::repack_native_to_stream_words(rp.data(), (const uint32_t*)src.data(),
-                                                    src.size() / (2 * 4 * (size_t)K2cur), K2cur);
+                                                    src.size() / (2 * 4 * (size_t)K2cur), K2cur,
+                                                    tiles_k);
             datap = rp.data();
         }
         dst.push_back(sycl::malloc_device<uint16_t>(bytes / 2, q));
@@ -816,7 +827,9 @@ int main(int argc, char** argv)
     std::vector<MatrixSrc> gs(a.E), us(a.E), ds(a.E);
     for (int e = 0; e < a.E; ++e) {
         auto fill = [&](MatrixSrc& d, const moe_ref::Matrix& m) {
-            d.trellis = upload(keep[0], m.trellis, true);
+            d.trellis = upload(keep[0], m.trellis, true,
+                               m.k > 0 ? (size_t)m.k / 16
+                                       : m.trellis.size() / (8 * (size_t)K2cur) / ((size_t)m.n / 16));
             d.suh = upload(keep[1], m.suh);
             d.svh = upload(keep[1], m.svh);
             d.bias = nullptr;
@@ -1094,11 +1107,11 @@ int main(int argc, char** argv)
                 const int nq = layer.nslgu_dbg;
                 std::vector<float> tgsum(I, 0.f), tusum(I, 0.f), devTind(I), tmp(I);
                 for (int qq = 0; qq < nq; ++qq) {   // gate slot j=0, mu=0
-                    q.memcpy(tmp.data(), layer.ws(1) + (size_t)qq * 8 * I, I * 4).wait();
+                    q.memcpy(tmp.data(), layer.ws(1) + (size_t)qq * MOE_MAXM * I, I * 4).wait();
                     for (int k = 0; k < I; ++k) tgsum[k] += tmp[k];
                 }
                 for (int qq = 0; qq < nq; ++qq) {   // up slot = gemv slot index 1 (j*2+mu, j=0 mu=1)
-                    q.memcpy(tmp.data(), layer.ws(1) + (size_t)(nq + qq) * 8 * I, I * 4).wait();
+                    q.memcpy(tmp.data(), layer.ws(1) + (size_t)(nq + qq) * MOE_MAXM * I, I * 4).wait();
                     for (int k = 0; k < I; ++k) tusum[k] += tmp[k];
                 }
                 q.memcpy(devTind.data(), layer.ws(3), I * 4).wait();

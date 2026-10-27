@@ -4,9 +4,15 @@
 
 | file | role |
 |---|---|
-| `moe_sycl.hpp` / `moe_sycl.cpp` | pipeline kernels + host-side `MoeSyclLayer` (forward, `ensure_ws`, repack, X-macro rate lists, `int8_pick`) |
+| `moe_sycl.hpp` / `moe_sycl.cpp` | pipeline kernels + host-side `MoeSyclLayer` (forward, `ensure_ws`, repack, X-macro rate lists, `int8_pick`, the per-bucket `Gemv8` launches) |
+| `moe_layout.hpp` | chunk/fragment geometry as ONE source of truth (`MOE_WIDEM_MAXM`, `I8R`, `I8_A8BLK`, shift forms, `i8_row_of`, static_asserts) - included by the device code, `moe_host_ref.hpp` and `bench_layer.cpp`; the wide-M sweep lives in its header comment |
 | `b70_lib.cpp` | the C ABI the worker dlopens: `b70_init/_register_layer_n/_forward/_warm/_free_layer/_update_expert`, VRAM budget, arena, poison latch, alloc log |
 | `libb70moe.so` | build product (see README build line); `env.sh` exports its path |
+| `pre_cfg.sh` / `sum.sh` | model-level A/B driver and log summariser: `./pre_cfg.sh <tag> "<ENV=v ...>" "<perf.py args>"` writes `/tmp/cfg_<tag>.log`, `./sum.sh "cfg_*.log"` prints one line per log (prefill @256..4096, decode means, error count). Interleaving several tags is the standard A/B shape. |
+| `fwd_stats.py` | aggregates an `EXL3_MOE_B70_ALLOCLOG` run by job row count: jobs, chunks, µs/job, µs/row and the implied weight-stream GB/s (`--eb`, default 2.46 MB/expert at K2=8). This is how the streaming-policy attribution (3361 GB → 202 GB) was produced. |
+| `qa_stream.py` | quality gate that actually ENGAGES the streamed-prefill tier (≥32 MoE rows per forward, which `eval/ppl.py` never produces): chunked prefill over a wikitext span, prints ppl + a mean-|logit| fingerprint. `qa_gate.sh` runs the three arms. |
+| `t47_layout.cpp` | pure-read probe over arena-sized slabs: production `[tk][nf]` order vs n-major vs sequential, with the launch geometry of a gemv reader. Watch the `nd_range` group math (P6) and DCE - it fooled this session twice. |
+| `lab_jm9_m16.cpp` | m8-vs-m16 int8 `joint_matrix` probe: correctness against a scalar integer reference plus interleaved timing. Outcome: m16 accumulators are REJECTED by the device at launch. |
 | Hooks upstream | `exllamav3_ext/cpu/moe_mul1.cpp` (`B70Backend`, forward redirect, native-layout swizzle gate) + one `int64_t b70` field in `moe_mul1.h` |
 | `exl3_ref.h`, `exl3ref_dup.h` | host transcription of the mul1 tile decoder (`decode_state_scalar`, `make_tc_perm`, fixed splitmix `exl3ref::Rng`) |
 | `moe_host_ref.hpp` | fp32 transcription of the CPU scalar LAYER forward — the spec the device is judged against |

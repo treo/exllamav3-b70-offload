@@ -9,6 +9,7 @@
 #include <limits>
 #include <vector>
 #include "exl3_ref.h"
+#include "moe_layout.hpp"   // chunk width must match the device (RefChunk <-> ChunkDev)
 
 namespace moe_ref {
 
@@ -33,8 +34,8 @@ struct RefChunk
 {
     int expert;
     int m;
-    int token[8];
-    float weight[8];
+    int token[moe_layout::MOE_MAXM];
+    float weight[moe_layout::MOE_MAXM];
 };
 
 inline void hadamard_128(float* v)
@@ -67,7 +68,7 @@ inline void gemv_raw(const Layer& L, const Matrix& m, const float* tin, int rows
     const int tiles_k = k / 16, tiles_n = n / 16;
     const int pu = exl3ref::tile_u16(L.bits, L.hb);
     for (int tn = 0; tn < tiles_n; ++tn) {
-        float acc[8][16] = {};
+        float acc[moe_layout::MOE_MAXM][16] = {};
         for (int tk = 0; tk < tiles_k; ++tk) {
             float tile[256];
             exl3ref::decode_tile(&m.trellis[((size_t)tk * tiles_n + tn) * pu], L.bits, L.hb, tile);
@@ -144,7 +145,9 @@ inline void forward(const Layer& L, const std::vector<RefChunk>& chunks,
 {
     const int H = L.hidden, I = L.interm;
     std::memset(out, 0, (size_t)rows * H * sizeof(float));
-    std::vector<float> tin(std::max(H, I) * 8), tg(I * 8), tu(I * 8), td(H * 8), hd(I * 8);
+    std::vector<float> tin(std::max(H, I) * moe_layout::MOE_MAXM), tg(I * moe_layout::MOE_MAXM),
+                           tu(I * moe_layout::MOE_MAXM), td(H * moe_layout::MOE_MAXM),
+                           hd(I * moe_layout::MOE_MAXM);
     std::vector<float> xr(H);
     for (const auto& ch : chunks) {
         const Matrix& up = L.ups[ch.expert];

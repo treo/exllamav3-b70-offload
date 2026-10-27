@@ -5,8 +5,14 @@
 #include <sycl/sycl.hpp>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
+#include "moe_layout.hpp"
 
 namespace moe_sycl {
+
+// All chunk/fragment geometry constants (see moe_layout.hpp) are visible unqualified
+// inside this namespace, and as moe_sycl::<name> through this directive.
+using namespace moe_layout;
 
 extern size_t g_alloc_bytes;
 extern size_t g_ws_bytes;   // shared workspace pool (ensure_ws): physical VRAM, but NOT
@@ -17,12 +23,46 @@ extern size_t g_ws_bytes;   // shared workspace pool (ensure_ws): physical VRAM,
 // into the GPU "stream" layout: state t's 16-bit window lives at bit
 // P0 - ((K2*t + (K2&1)) >> 1) of a plain ascending bitstream whose k-th word is the native
 // ring's (-k mod W)-th u32 word. The conversion itself is just a per-tile u32 word reversal.
-inline void repack_native_to_stream_words(uint32_t* dst, const uint32_t* src, size_t ntiles, int K2)
+// ------------------------------------------------------------------ arena tile order
+// Native (checkpoint) tile order is k-major: tile (tk, tn) of a matrix with tiles_n column
+// tiles sits at (tk*tiles_n + tn). Every gemv reader owns ONE column tile and walks tk, so in
+// that order each k step strides tiles_n*W bytes while consuming only W*4 = 128 B. The pure
+// read probe t47 measured that pattern at 305 GB/s against 781 GB/s for a sequential walk of
+// the same 1.7 GB footprint (P3 = 781 GB/s, i.e. the stride, not the byte count, was the cap).
+// Storing the arena n-major - tile (tk, tn) at (tn*tiles_k + tk) - makes each reader's k walk
+// sequential. It is a PERMUTATION OF TILES ONLY; the per-tile u32 word reversal (and hence
+// every bit law in archive/mul1-trellis-spec.md) is unchanged, so only the tile index
+// function moves. MOE_STREAM_NMAJOR=0 rebuilds the classic layout (labs t27..t31 assume it).
+// Measured on the shipped build (bit-exact: xval 6.530e-07, i8trace B..G OK, arena T1-T3):
+// E260/rows128 int8 3320 -> 3092 us (-6.9%), E260/rows1 float 179 -> 165 us (-7.8%),
+// E260/rows512 8934 -> 8531 (-4.5%). The kernel is far more issue-bound than this pattern's
+// share, which is why 2.6x of read headroom bought 7% of run time - see archive/int8-dpas-tier.md.
+#ifndef MOE_STREAM_NMAJOR
+#define MOE_STREAM_NMAJOR 1
+#endif
+
+// words to advance per k tile inside one column tile
+constexpr inline size_t moe_stream_row_step(size_t W, size_t tiles_n)
+{ return MOE_STREAM_NMAJOR ? W : tiles_n * W; }
+// words spanned by one column tile (the base offset multiplier)
+constexpr inline size_t moe_stream_col_span(size_t W, size_t tiles_k)
+{ return MOE_STREAM_NMAJOR ? tiles_k * W : W; }
+
+// tiles_k = k tiles of THIS matrix ((K/16): hidden/16 for gate/up, interm/16 for down).
+// It is only used for the permutation, but it is MANDATORY: the stream layout is undefined
+// without it, and a caller that forgets it would silently write the wrong order.
+inline void repack_native_to_stream_words(uint32_t* dst, const uint32_t* src, size_t ntiles, int K2,
+                                          size_t tiles_k)
 {
-    const int W = 4 * K2;
+    const size_t W = 4 * (size_t)K2;
+    const size_t tiles_n = tiles_k ? ntiles / tiles_k : 1;
     for (size_t i = 0; i < ntiles; ++i)
-        for (int k = 0; k < W; ++k)
-            dst[i * W + k] = src[i * W + ((W - k) % W)];
+    {
+        const size_t d = (!MOE_STREAM_NMAJOR || !tiles_k) ? i
+                         : (i % tiles_n) * tiles_k + (i / tiles_n);
+        for (size_t k = 0; k < W; ++k)
+            dst[d * W + k] = src[i * W + ((W - k) % W)];
+    }
 }
 
 // One expert matrix's packed weights + scales, already resident on the device.
@@ -46,20 +86,40 @@ struct LayerParams
     bool gated = true;
 };
 
-// Chunk = up to 8 token rows routed to one expert (int8/DPAS tier; the fp32 tier caps at
-// 4 rows host-side because GemvK carries exactly 4 accumulator chains). MAXM is the layout
-// stride EVERYWHERE (tin/tout/tind/toutd row blocks, TokenMap entry encoding j*MOE_MAXM+r),
-// so readers must never assume a chunk actually uses all 8.
+// Chunk = up to MOE_MAXM token rows routed to one expert (int8/DPAS tier; the fp32 tier caps
+// at MOE_MAXM_F rows host-side because GemvK carries exactly 4 accumulator chains). MOE_MAXM
+// is the layout stride EVERYWHERE (tin/tout/tind/toutd row blocks, TokenMap entry encoding
+// j*MOE_MAXM+r, the int8 a8/acc/qsx row stride I8R), so readers must never assume a chunk
+// actually fills it - and the geometry constants live in moe_layout.hpp, shared with the host
+// reference, so a wide-M build is a one-line (-DMOE_WIDEM_MAXM=16) experiment.
 struct ChunkDev
 {
     int expert;
     int m;
-    int token[8];
-    float weight[8];
+    int token[MOE_MAXM];
+    float weight[MOE_MAXM];
 };
 
-inline constexpr int MOE_MAXM   = 8;   // chunk width cap, int8/DPAS tier (= 2 m8 fragments)
-inline constexpr int MOE_MAXM_F = 4;   // chunk width cap, fp32 scalar tier
+// Stable partition of a chunk list so every NARROW chunk (m <= I8_TOK_PER_FRAG, i.e. one m8
+// fragment covers it) precedes every WIDE chunk; returns the narrow count. The DPAS cost
+// tracks the NUMBER OF FRAGMENTS RUN, not the tokens used: an m16 build measured 1.20x the
+// m8 time at rows=1024 exactly matching its 1.2x fragment count, and 1.95x at rows=128 where
+// half-empty 16-token chunks still ran four fragments. So instead of padding every chunk to
+// I8_FRAGS fragments, forward() splits the launch at this boundary - the CUDA tier's m-tile
+// ladder doctrine (exl3_moe_kernel.cuh: 64 -> 32 -> 16, "the largest smaller tile that
+// covers it").
+//
+// BOTH host chunkers (the plugin's b70_lib fill and bench_layer's i8trace/reference) must
+// call this before building the TokenMap, because the entry encoding carries the chunk index:
+// a chunk list that is ordered on one side and not the other silently verifies a different
+// schedule than the device ran.
+template <typename Vec>
+inline int moe_bucket_chunks(Vec& chunks)
+{
+    return (int)(std::stable_partition(chunks.begin(), chunks.end(),
+                                       [](const ChunkDev& c) { return c.m <= I8_TOK_PER_FRAG; })
+                 - chunks.begin());
+}
 
 // CSR of active chunk-slots per token row (for the final weighted gather)
 struct TokenMap

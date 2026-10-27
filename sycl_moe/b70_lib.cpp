@@ -47,6 +47,7 @@ struct Upload
     size_t  sz[3][4] = {};
     int     gated = 1;
     int     n_sub = 0;             // B70-tier expert count; e >= n_sub alias block 0
+    size_t  tiles_k[3] = {};       // k tiles per cat (stream layout permutation): gu H/16, down I/16
 };
 
 struct Global
@@ -195,6 +196,8 @@ static void upload_layout(Upload& u, int H, int I, int k2, int gated)
     }
     u.block = cb;
     u.gated = gated;
+    u.tiles_k[0] = u.tiles_k[1] = (size_t)H / 16;   // gate/up contract: K = hidden
+    u.tiles_k[2] = (size_t)I / 16;                  // down contract:      K = interm
 }
 
 // one cat's source arrays (expert-indexed pointer arrays into the worker's arena)
@@ -210,7 +213,8 @@ static bool fill_block(char* dst, const Upload& u, const CatSrc src[3], size_t e
         if (!src[c].tr || !src[c].tr[e_idx] || !src[c].suh[e_idx] || !src[c].svh[e_idx]) return false;
         moe_sycl::repack_native_to_stream_words(
             (uint32_t*)(dst + u.off[c][0]), (const uint32_t*)src[c].tr[e_idx],
-            u.sz[c][0] / (16 * (size_t)k2), k2);          // tile = 8*K2 u16 = 16*K2 bytes
+            u.sz[c][0] / (16 * (size_t)k2), k2,
+            u.tiles_k[c]);                             // tile = 8*K2 u16 = 16*K2 bytes
         memcpy(dst + u.off[c][1], (const void*)src[c].suh[e_idx], u.sz[c][1]);
         memcpy(dst + u.off[c][2], (const void*)src[c].svh[e_idx], u.sz[c][2]);
         if (src[c].bias && src[c].bias[e_idx]) memcpy(dst + u.off[c][3], (const void*)src[c].bias[e_idx], u.sz[c][3]);
@@ -540,9 +544,10 @@ static void forward_impl
     std::vector<ChunkDev> chunks;
     TokenMap tmap;
     std::vector<std::vector<int>> tokentries(rows);
+    const bool int8 = layer->pick_int8(rows);
     // width cap follows the tier the forward will take: the fp32 GemvK has exactly 4
-    // accumulator chains, the DPAS tier carries 8 tokens in two m8 fragments
-    const int mcap = moe_sycl::int8_mcap_pick(layer->pick_int8(rows), rows, rows * topk, E);
+    // accumulator chains, the DPAS tier carries MOE_MAXM tokens in I8_FRAGS m8 fragments
+    const int mcap = moe_sycl::int8_mcap_pick(int8, rows, rows * topk, E);
     for (int e = 0; e < E; ++e) {
         auto& lst = per_expert[e];
         for (size_t i = 0; i < lst.size(); i += mcap) {
@@ -555,11 +560,17 @@ static void forward_impl
                 _Float16 h;
                 std::memcpy(&h, &wv, 2);
                 ch.weight[r] = (float)h;
-                tokentries[ch.token[r]].push_back((int)chunks.size() * moe_sycl::MOE_MAXM + r);
             }
             chunks.push_back(ch);
         }
     }
+    // Bucket by fragment fill BEFORE the token map is built: the entry encoding carries the
+    // chunk index, so the order the device sees is part of the contract (see
+    // moe_bucket_chunks). float-tier chunks are all narrow, so this is int8-only by nature.
+    if (int8) moe_sycl::moe_bucket_chunks(chunks);
+    for (int j = 0; j < (int)chunks.size(); ++j)
+        for (int r = 0; r < chunks[j].m; ++r)
+            tokentries[chunks[j].token[r]].push_back(j * moe_sycl::MOE_MAXM + r);
     tmap.begin.assign(rows + 1, 0);
     for (int t = 0; t < rows; ++t) {
         tmap.begin[t] = (int)tmap.entry.size();

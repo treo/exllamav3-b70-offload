@@ -217,6 +217,48 @@ x 41 KB panels = 62 ns/unit, on par with the fixed SIMT pattern. ESIMD's prize i
 gather AND the SLM-ring barriers in one move, likely together with MAXM 16/32 wide-row
 instantiation (CUDA m32/m64-style).
 
+## Cost model, fragment bucketing and the wide-M negative (2026-10-27)
+
+The prefill gap was being reasoned about as "~12 µs per CHUNK, therefore widen chunks". Sweeping
+`MOE_WIDEM_MAXM` (one -D, all three sides of the layout move together - see `moe_layout.hpp`) at
+the model's own shape (E=260, H=2560, I=640, K2=8, topk 10) says otherwise; the full table with
+the MCAP caveats lives in that header. Reading of it:
+
+- cost ≈ (fragments run) × ~6.5 µs + (weight traversals) × ~1.4 µs. MAXM=16 removes 1.7x of
+  traversals and adds 1.2-2x of fragments: 20% slower at rows=1024, 95% slower at rows=128 where
+  chunks of 5 tokens pay four fragments. MAXM=4 is the mirror experiment (same fragments, 2x the
+  traversals): 12-22% slower. MAXM=8 with the padding removed sits at the minimum.
+- the fragment count per expert is already the minimum `ceil(n_e / I8_TOK_PER_FRAG)` once
+  bucketing removes per-chunk padding, and it cannot go below that: BMG-G31 refuses an int8
+  `joint_matrix` accumulator with Rows=16 (`lab_jm9_m16.cpp`: throws at launch - and note stdout
+  was buffered away with it, so tee/flush labs before trusting their absence of output). 8 rows
+  per fragment ÷ (vh,vl) = 4 tokens is the hardware floor.
+- **bucketing** (`EXL3_MOE_B70_BUCKET=1`, default) is the CUDA tier's m-tile ladder
+  (`exl3_moe_kernel.cuh`: finish with "the largest smaller tile that covers it, 64 → 32 → 16")
+  transcribed to our chunker: `moe_bucket_chunks` stably partitions the chunk list so chunks one
+  fragment can cover come first, and `forward()` issues ONE NF=1 launch for that prefix plus ONE
+  full-width launch for the rest (`Gemv8Base::slot_base` keeps every downstream index - a8, acc,
+  qsx, token map - on the global slot number). rows32 1919→1648, rows64 2630→2260, rows128
+  3121→2867, rows512 8604→8379 µs; all-narrow jobs still take the single slim launch, so decode
+  is untouched. The narrow bucket MUST share the wide bucket's ring: an identical split launched
+  in the 16-lane no-ring slim geometry gave the whole saving back (rows128 3138 vs 3105
+  unbucketed) - the per-lane global A gather is still ~2.8x the kernel.
+- **slim + ring is a separate, negative answer** (parked lever 6 closed): with the ALL-narrow
+  decode-shaped kernel staged through SLM (`EXL3_MOE_I8SLIMRING=1`) rows1/2/4/8 go
+  197.6→225.3, 266→316, 411→487, 714→793 µs. One fragment does not amortise the staging.
+- **n-major arena** (`moe_sycl.hpp`): readers own a column tile, so the k-major tile order made
+  every k step a 128 B pickup on a 5 KB stride (t47 pure-read probe: 305 vs 781 GB/s). Permuting
+  the tiles at upload - bit laws untouched - is bit-exact (xval 6.530e-07 unchanged, i8trace B..G
+  OK, arena T1-T3 PASS) and buys 6.9% of the fat gemv / 7.8% of the float decode kernel. That is
+  all it buys: the kernel is nowhere near DRAM-bound, so pattern fixes are worth single digits
+  here and the remaining 3-4x to the read bound lives in the fragment path (esimd, t40).
+- Harness lesson (three false "device is broken" rounds): the i8trace harness carried its own
+  copies of the layout arithmetic - `qsxu[(size_t)slot * 32 + r * 2]` (float stride of
+  `slot*I8R + r`), a split-K `collapse` that summed 16 rows, and `ent >> 3` for the token map.
+  All are now expressed through `moe_layout.hpp`; a verifier with private literals verifies
+  nothing about a geometry change.
+
+
 ## Known real gaps vs the CPU int8 tier
 
 Wide-row 2-slot quantization: the ORIGINAL v1 plan fell back to plain int8 for rows needing it
