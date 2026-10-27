@@ -56,7 +56,7 @@ negative-splat trap, and why short benchmark windows lie about this GPU.
   Measured ≤ 0 everywhere (weight-stream latency, not thread occupancy, binds); kept
   as documentation of the negative result. (Superseded for the fat path by `I8RING`,
   which uses the wide geometry plus SLM-staged A and is a large win — see below.)
-- `EXL3_MOE_I8RING=1` — cooperative A staging for the fat int8 gemvs (gu+down, prefill
+- `EXL3_MOE_I8RING` (`default 1`; `=0` opts out) — cooperative A staging for the fat int8 gemvs (gu+down, prefill
   shapes; slim decode unaffected). The `joint_matrix` global A load lowers to a per-lane
   byte gather costing ~2.8x the kernel (labs t39 st4 vs st18); wide WGs + a 4 KB contiguous
   copy per k-group into 4 rotating SLM regions + local fragment loads recover the no-A-cost

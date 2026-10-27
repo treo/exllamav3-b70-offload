@@ -1105,7 +1105,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             }();
             static const int ring_ok = []{
                 const char* e = std::getenv("EXL3_MOE_I8RING");
-                return e && e[0] == '1';
+                return !e || e[0] != '0';   // default ON since -21..-43% prefill bit-exact; =0 opts out
             }();
             const bool wide = wide_ok && (I / 16) % 8 == 0;
             const bool ring = ring_ok && !slim && (I / 16) % 8 == 0;
@@ -1258,7 +1258,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             }();
             static const int ring_ok_d = []{
                 const char* e = std::getenv("EXL3_MOE_I8RING");
-                return e && e[0] == '1';
+                return !e || e[0] != '0';   // default ON (see gu launcher)
             }();
             const bool wide = wide_ok_d && (H / 16) % 8 == 0;
             const bool ring = ring_ok_d && !slim && (H / 16) % 8 == 0;
