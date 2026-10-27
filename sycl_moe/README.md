@@ -95,7 +95,7 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `MOE_NSL=0..8` | Override the split-K degree of the GEMV kernels (default: auto per matrix class). Tuning knob for experiments. |
 | `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
 | `EXL3_MOE_B70_OVERLAP` | `0` disables prefill-size mixed-job overlap (B70 half on a borrowed thread while the CPU pool works the other half; default on for `rows>=16`, sequential for decode sizes). 0-4% prefill on 4.05bpw (noise-bound), neutral elsewhere. |
-| `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows and the layer is stream-layout). |
+| `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows and the rate is DPAS-specialized: K2∈{4,5,8}; forcing an unstated rate falls back to float, not a fault). The full EXL3 rate contract is K2∈{2,3,4,5,6,7,8,10,12,14,16} (halves only ≤3.5) - see NOTES 'bitrate contract'. |
 | `EXL3_MOE_B70_ALLOCLOG` | Path to a fault-attribution log (USM alloc/free + per-forward geometry, wall-clock stamped). Correlate with `journalctl -k` "Faulted Address" lines to attribute GPU UA faults to a specific buffer - this found the cap_rows=512 stale-pool-pointer bug. Zero cost when unset. |
 
 Works with `--moe_cpu_split` (dynamic, placement-profile driven) and `--moe_cpu_offload`.

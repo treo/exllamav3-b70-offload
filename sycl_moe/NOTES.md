@@ -1205,3 +1205,27 @@ ONE-OFF ODDITY (foreign, monitoring only): one bcs(blitter)-engine UA fault at 1
 same VA in two ASIDs, AFTER the 2.05 gate process had exited and outside any forward
 window; no compute-engine (ccs) faults all session. Not ours by every indicator; if a
 future run pins with ccs faults at teardown, revisit.
+
+## THE bitrate contract (from the CUDA tier) and our coverage map
+exllamav3_ext/quant/bits_k.cuh + exl3_kernel_map.cu get_gemm_kernel_ptr define the universe
+of EXL3 mul1 rates the platform can ever produce: integer K = bits 1..8 for every codebook;
+HALF-integer rates ONLY 1.5/2.5/3.5 (TORCH_CHECK K<=3 && cb==mul1). No 4.5+, nothing above
+8 bit. Required K2 = 2*bits+hb set: {2,3,4,5,6,7,8,10,12,14,16} - eleven values (the old
+README '4.5bpw family' comment == K2 14 == plain 7-bit, naming drift).
+Coverage today (verified full-contract battery 2026-10-27, all 11 rates PASS: float rates
+~1e-6 vs host ref, DPAS rates 1.3-1.6e-3 auto tier; EXL3_MOE_B70_INT8=1 on non-DPAS rates
+falls back SAFELY, ~1.2e-6):
+  * GemvK compile-time specialized + int8/DPAS: {4,5,8} only (the shipped 2.05/2.68/4.05);
+  * everything else: correct but slow runtime paths (float GemvFallback apack; no DPAS -
+    the Gemv8 launch switches have no instantiation). Real bite today: the 4.18bpw h6
+    HYBRID's K2=10 layers (bits-5 in the CUDA table) run GemvFallback - seen in the J-line
+    log at model scale (70887 k2-8 forwards vs 3300 k2-10); K2=6 (3-bit quants) next.
+SPECIALIZATION COST MODEL (why not just instantiate all 11): the int8 product-word identity
+IS rate-agnostic (state=16 bits at every rate, 4 bytes = 4 hw-k slots, k32 frag = 8 states);
+the stream window was validated for K2 2..17 (t29). What is rate-SPECIFIC is the
+performance: K2V as a template param buys the compile-time shifts/pair-decode that made the
+gemv fast (lesson 6). Each new rate costs {slim,fat-ring,fat-wide}x{gu,down} Gemv8
+instantiations + a full --i8trace family + a sustained A/B (the tier must EARN its
+overhead - at high K2 the weight bytes per weight grow, DPAS's margin shrinks; measure, do
+not assume). Order of work if/when: 10 (real model now), 6 (common retail quant), 3/7
+(retail 1.5/3.5), then 12/14/16 float-specialize only unless an A/B says otherwise.
