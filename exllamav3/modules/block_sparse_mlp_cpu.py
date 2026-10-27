@@ -1079,6 +1079,20 @@ class BlockSparseMLP_CPU:
                 if self._split_swap_experts(r_hot_gpu, r_cold_w, mp):
                     nswaps += 1
         else:
+            # Three-tier anti-theft: the base sweep must not promote B70-tier experts
+            # into GPU slots - the periodic twin of decode promote-on-miss stealing. A
+            # B70 hit is now a local device read (ring kernel), while pulling it to the
+            # 3090 pays a slot swap + an arena upload AND dilutes the tier's hotness for
+            # every later token. CPU-tier slots only. EXL3_MOE_CPU_SWAP_TIER=0 restores
+            # the old all-worker-slice behaviour (lab knob).
+            if os.environ.get("EXL3_MOE_CPU_SWAP_TIER", "1") != "0":
+                host = self.cpu_host
+                hn = host.layer_b70n[self.cpu_layer_idx] \
+                    if self.cpu_layer_idx is not None and self.cpu_layer_idx < len(host.layer_b70n) else 0
+                if hn:
+                    filt = [tr for tr in tail if int(mp[tr[1]]) >= first + hn]
+                    if filt:
+                        tail = filt
             head.sort()
             tail.sort(reverse = True)
             for (c_cold, r_cold), (c_hot, r_hot) in zip(head, tail):

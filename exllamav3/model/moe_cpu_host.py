@@ -1082,6 +1082,7 @@ class MoeCpuHost:
             elif msg[0] == "b70n":
                 # auto-sized B70 tiers (deferred registration): replaces the per-layer acks
                 self.layer_b70n = list(msg[1])
+                self._b70n_seen = True
             return True
         if not self.proc.is_alive():
             raise RuntimeError("CPU MoE worker process died")
@@ -1337,6 +1338,14 @@ class MoeCpuHost:
                     f"CPU MoE worker startup timeout ({timeout:.0f} s; EXL3_MOE_CPU_START_TIMEOUT overrides)")
             time.sleep(0.005)
         self.started = True
+        # Deferred (auto/default) B70 registration publishes tier sizes on the pipe right
+        # after the child starts; the parent's streaming / promote / sweep anti-theft masks
+        # read layer_b70n, so wait briefly for it BEFORE any forward can use a stale 0.
+        # Timeout only costs the old steal-prone behaviour for pinned runs, never correctness.
+        if not getattr(self, "_b70n_seen", False):
+            t1 = time.time()
+            while not getattr(self, "_b70n_seen", False) and time.time() - t1 < 30.0:
+                self._pump(0.25)
         self._flags_u32 = u32
         self._start_watchdog()
         kern = "avx512-vbmi" if ext.exl3_moe_cpu_has_avx512_vbmi() else \

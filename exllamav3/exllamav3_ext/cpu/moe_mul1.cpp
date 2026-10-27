@@ -3824,7 +3824,13 @@ int64_t exl3_moe_cpu_make_layer
         // shape, spread across all layers instead of whole layers.
         int n_sub = (int)E2;
         const char* sb = getenv("EXL3_MOE_B70_SUB");
-        const bool defer = sb && !strcmp(sb, "auto") && b70().register_layer_n && b70().budget_left && b70().expert_bytes;
+        const bool have_n = b70().register_layer_n && b70().budget_left && b70().expert_bytes;
+        // With a subset-capable plugin ALL registrations defer to worker start, where the
+        // true layer count is known: full layers when the budget covers everything (the
+        // classic shape for fitting models), fair-share tiers when it does not (the
+        // three-tier shape) - self-tuning, no env needed. An explicit SUB (count or
+        // fraction) overrides the auto policy at start; "auto" pins fair-share.
+        const bool defer = have_n;
         if (defer)
         {
             // Auto three-tier: defer to worker start, where the true pending-layer count
@@ -3832,7 +3838,7 @@ int64_t exl3_moe_cpu_make_layer
             const int E_ = (int)E2, hs = layer->hidden_size, is = layer->interm_size;
             const int bits_ = layer->ups[0].bits, hb_ = layer->ups[0].hb, act_ = layer->activation;
             const float lim_ = layer->act_limit, gat_ = gated2 ? 1 : 0;
-            layer->b70_reg = [E_, hs, is, bits_, hb_, act_, lim_, gat_,
+            layer->b70_reg = [E_, hs, is, bits_, hb_, act_, lim_, gat_, sub = std::string(sb ? sb : ""),
                               gt = std::move(gt), gs = std::move(gs), gv = std::move(gv), gb2 = std::move(gb2),
                               ut = std::move(ut), us = std::move(us), uv = std::move(uv), ub = std::move(ub),
                               dt = std::move(dt), ds2 = std::move(ds2), dv = std::move(dv), db = std::move(db),
@@ -3840,7 +3846,22 @@ int64_t exl3_moe_cpu_make_layer
             {
                 const long eb = (long)b70().expert_bytes(hs, is, bits_, hb_, (int)gat_);
                 const long left = (long)b70().budget_left();
-                int n = (eb > 0 && rem > 0) ? (int)(left / eb / rem) : E_;
+                int n;
+                if (!sub.empty() && sub != "auto")
+                {
+                    double v = atof(sub.c_str());
+                    n = (v > 0.0 && v < 1.0) ? (int)(v * E_) : (int)v;
+                }
+                else if (sub == "auto")
+                    n = (eb > 0 && rem > 0) ? (int)(left / eb / rem) : E_;
+                else
+                {
+                    // default policy: full when the remaining budget covers this AND a
+                    // fair floor of the pending layers' full slices, else fair share
+                    const long need_all = eb * (long)E_ * (rem > 0 ? rem : 1);
+                    n = (eb > 0 && left < need_all && rem > 0)
+                            ? (int)(left / eb / rem) : E_;
+                }
                 n = std::max(1, std::min(E_, n));
                 const int64_t h = b70().register_layer_n(
                     E_, hs, is, bits_, hb_, act_, lim_, (int)gat_,
