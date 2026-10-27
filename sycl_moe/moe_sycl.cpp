@@ -20,13 +20,45 @@ inline constexpr auto g_read_hint = inte::read_hint<inte::cache_control<
 using AP_W = expe::annotated_ptr<const uint32_t, decltype(expe::properties{g_read_hint})>;
 #endif
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
+#include <sys/time.h>
 
 namespace moe_sycl {
 
 size_t g_alloc_bytes = 0;
 size_t g_ws_bytes = 0;   // see moe_sycl.hpp: pool bytes are physical but not budget-bearing
+
+// ---- fault-attribution log (see hpp): USM map + per-forward geometry for the
+// DEVICE_LOST-at-large-cap_rows investigation. All records wall-clock stamped so they
+// bracket the xe driver "Faulted Address" lines from journalctl -k.
+FILE* alog()
+{
+    static FILE* f = []{
+        const char* p = std::getenv("EXL3_MOE_B70_ALLOCLOG");
+        if (!p || !*p) return (FILE*)nullptr;
+        FILE* r = fopen(p, "ae");
+        if (!r) fprintf(stderr, "[b70moe] alloclog: cannot open %s\n", p);
+        return r;
+    }();
+    return f;
+}
+
+void alog_msg(const char* fmt, ...)
+{
+    FILE* f = alog();
+    if (!f) return;
+    struct timeval tv; gettimeofday(&tv, nullptr);
+    fprintf(f, "%ld.%03ld %d ", (long)tv.tv_sec, (long)tv.tv_usec / 1000, (int)getpid());
+    va_list ap; va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fflush(f);
+}
 
 namespace {
 
@@ -93,6 +125,7 @@ void MoeSyclLayer::init(sycl::queue* q, const LayerParams& p,
               && (p.hidden % 8 == 0) && (p.interm % 8 == 0);
     nm_ws_ = p.gated ? 2 : 1;
     d_tab = sycl::malloc_device<uintptr_t>(tab.size(), *q);
+    MOE_ALOG_ALLOC(d_tab, tab.size() * sizeof(uintptr_t), "d_tab");
     q->memcpy(d_tab, tab.data(), tab.size() * sizeof(uintptr_t)).wait();
 }
 
@@ -129,8 +162,10 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     auto grow_p = [&](int slot, auto*& p, size_t count) {
         using T = std::remove_pointer_t<std::remove_reference_t<decltype(p)>>;
         if (g_ws.buf[slot] && count <= g_ws.cap[slot]) { p = (T*)g_ws.buf[slot]; return; }
-        if (g_ws.buf[slot]) { sycl::free(g_ws.buf[slot], *Q); g_ws_bytes -= g_ws.cap[slot] * sizeof(T); }
+        if (g_ws.buf[slot]) { MOE_ALOG_FREE(g_ws.buf[slot], g_ws.cap[slot] * sizeof(T), "pool"); sycl::free(g_ws.buf[slot], *Q); g_ws_bytes -= g_ws.cap[slot] * sizeof(T); }
         T* np = sycl::malloc_device<T>(count, *Q);
+        MOE_ALOG_ALLOC(np, count * sizeof(T), "pool");
+        alog_msg("   pool-slot %d count %zu x %zu B", slot, count, sizeof(T));
         if (!np)
         {
             fprintf(stderr, "[b70moe] OOM workspace alloc %zu x %zu\n", count, sizeof(T));
@@ -145,23 +180,38 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
         Q->memset(p, 0, count * sizeof(T));
         Q->wait();
     };
-    if (nc > cap_nc) {
-        grow_p(0, w_tin,   (size_t)nc * 2 * MAXM * P.hidden);
-        grow_p(1, w_tout,  (size_t)nc * 2 * 8 * MAXM * P.interm);
-        grow_p(2, w_h,     (size_t)nc * MAXM * P.interm);
-        grow_p(3, w_tind,  (size_t)nc * MAXM * P.interm);
-        grow_p(4, w_toutd, (size_t)nc * 8 * MAXM * P.hidden);
-        cap_nc = nc;
-    }
+    // ⚠ ALWAYS call grow_p for EVERY slot on EVERY forward - never gate on this layer's
+    // cap_nc. THE POOL IS PROCESS-WIDE: another layer growing a slot FREES the buffer this
+    // layer's member pointers point at, so a skipped rebind leaves them DANGLING and the
+    // next (smaller!) job reads/writes freed device memory. Root cause of the
+    // "DEVICE_LOST / forward failed; layer pinned to CPU" bug at EXL3_MOE_CPU_SLOT_ROWS=512
+    // (fault forensics 2026-10-27: kernels walked the first 400KB of a freed 335MB toutd
+    // 10s after a 521-chunk job of ANOTHER layer grew the pool). grow_p with count<=cap is
+    // a pure pointer rebind - exactly what staleness needs. The int8 slots below were
+    // always uncondional, which is why only float-tier jobs faulted.
+    // Step the growth: size for nc rounded up to 64 chunks. Pool sizes are LINEAR in nc,
+    // so without this every new nc high-water mark (341 -> 405 -> 417 -> 521 ...) frees and
+    // re-prefaults up to ~335 MB; with it a run typically sees ONE grow per slot. Bounded
+    // waste (<= 64 chunks ~ 120 MB across all slots), and deliberately NOT a startup
+    // worst-case reservation: the naive nc bound (rows*topk under skew) is ~11 GB of pool
+    // at SLOT_ROWS=512, which would evict half the resident weights - see NOTES 'warm pool
+    // inflated under the weight set' incident, same trap smaller.
+    const int ncg = (nc + 63) & ~63;
+    grow_p(0, w_tin,   (size_t)ncg * 2 * MAXM * P.hidden);
+    grow_p(1, w_tout,  (size_t)ncg * 2 * 8 * MAXM * P.interm);
+    grow_p(2, w_h,     (size_t)ncg * MAXM * P.interm);
+    grow_p(3, w_tind,  (size_t)ncg * MAXM * P.interm);
+    grow_p(4, w_toutd, (size_t)ncg * 8 * MAXM * P.hidden);
+    if (nc > cap_nc) cap_nc = nc;
     // int8 slabs: grow_p no-ops when the existing cap already fits; sizing must happen on
     // EVERY nc/nsl combination the layer may see (warm batches use nsl=1, decode up to 8).
     if (use8_) {
-        grow_p(5, w_a8u,   (size_t)nc * nm_ws_ * (P.hidden / 8) * 128);
-        grow_p(6, w_a8d,   (size_t)nc * (P.interm / 8) * 128);
-        grow_p(7, w_qsxu,  (size_t)nc * nm_ws_ * I8R * 2);
-        grow_p(8, w_qsxd,  (size_t)nc * I8R * 2);
-        grow_p(9, w_accgu, (size_t)nc * nm_ws_ * I8R * P.interm * nsl8_gu_);
-        grow_p(10, w_accd, (size_t)nc * I8R * P.hidden * nsl8_d_);
+        grow_p(5, w_a8u,   (size_t)ncg * nm_ws_ * (P.hidden / 8) * 128);
+        grow_p(6, w_a8d,   (size_t)ncg * (P.interm / 8) * 128);
+        grow_p(7, w_qsxu,  (size_t)ncg * nm_ws_ * I8R * 2);
+        grow_p(8, w_qsxd,  (size_t)ncg * I8R * 2);
+        grow_p(9, w_accgu, (size_t)ncg * nm_ws_ * I8R * P.interm * nsl8_gu_);
+        grow_p(10, w_accd, (size_t)ncg * I8R * P.hidden * nsl8_d_);
         if (nc > cap_nc8) cap_nc8 = nc;
     }
     (void)rows;
@@ -972,6 +1022,22 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     nsl8_gu_ = nsl8_gu; nsl8_d_ = nsl8_d;
     sycl::queue& q = *Q;
     ensure_ws(num_chunks, rows);
+    if (alog()) {
+        static const int a_ring = []{ const char* e = getenv("EXL3_MOE_I8RING"); return !e || e[0] != '0'; }();
+        static const int a_slim = []{ const char* e = getenv("EXL3_MOE_I8SLIM"); return !e || e[0] != '0'; }();
+        static const int a_fuse = []{ const char* e = getenv("EXL3_MOE_I8FUSE"); return !e || e[0] != '0'; }();
+        alog_msg("J rows %d nc %d E %d H %d I %d k2 %d gated %d use8 %d maxm %d "
+                 "nsl8 %d/%d slim %d fuse %d ring %d | ws %p %p %p %p %p %p %p %p %p %p %p",
+                 rows, num_chunks, P.num_experts, H, I, k2, (int)P.gated, (int)use8_, maxm_scan,
+                 nsl8_gu, nsl8_d, (int)(maxm_scan <= 4 && a_slim), (int)(use8_ && a_fuse),
+                 (int)(a_ring && maxm_scan > 4),
+                 (void*)g_ws.buf[0], (void*)g_ws.buf[1], (void*)g_ws.buf[2], (void*)g_ws.buf[3],
+                 (void*)g_ws.buf[4], (void*)g_ws.buf[5], (void*)g_ws.buf[6], (void*)g_ws.buf[7],
+                 (void*)g_ws.buf[8], (void*)g_ws.buf[9], (void*)g_ws.buf[10]);
+        alog_msg("   poolcap %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu (B)",
+                 g_ws.cap[0]*4, g_ws.cap[1]*4, g_ws.cap[2]*4, g_ws.cap[3]*4, g_ws.cap[4]*4,
+                 g_ws.cap[5]*4, g_ws.cap[6]*4, g_ws.cap[7]*4, g_ws.cap[8]*4, g_ws.cap[9]*4, g_ws.cap[10]*4);
+    }
 
     // one H2D blob: [chunks][pad64][tokb][pad64][toke]
     const int nc = num_chunks;
@@ -980,12 +1046,18 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     const size_t off_toke = (off_tokb + ((size_t)rows + 1) * sizeof(int) + 63) & ~(size_t)63;
     const size_t blob_sz = off_toke + tmap.entry.size() * sizeof(int);
     if (blob_sz > cap_blob) {
-        if (h_blob) sycl::free(h_blob, q);
-        if (h_blob2) sycl::free(h_blob2, q);
+        if (h_blob) { MOE_ALOG_FREE(h_blob, cap_blob, "h_blob"); sycl::free(h_blob, q); }
+        if (h_blob2) { MOE_ALOG_FREE(h_blob2, cap_blob, "h_blob2"); sycl::free(h_blob2, q); }
         h_blob = (char*)sycl::malloc_host(blob_sz, q);
         h_blob2 = (char*)sycl::malloc_host(blob_sz, q);
-        if (w_chunk) sycl::free(w_chunk, q);
+        MOE_ALOG_ALLOC(h_blob, blob_sz, "h_blob");
+        MOE_ALOG_ALLOC(h_blob2, blob_sz, "h_blob2");
+        if (w_chunk) { MOE_ALOG_FREE(w_chunk, cap_blob, "w_chunk"); sycl::free(w_chunk, q); }
         w_chunk = (ChunkDev*)sycl::malloc_device<char>(blob_sz, q);
+        MOE_ALOG_ALLOC(w_chunk, blob_sz, "w_chunk");
+        alog_msg("   blob chunk_sz %zu tokb %zu toke %zu offs %zu/%zu/%zu",
+                 (size_t)nc * sizeof(ChunkDev), ((size_t)rows + 1) * sizeof(int),
+                 tmap.entry.size() * sizeof(int), off_chunk, off_tokb, off_toke);
         q.memset(w_chunk, 0, blob_sz);
         q.wait();
         cap_blob = blob_sz;

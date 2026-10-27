@@ -122,6 +122,8 @@ void ensure_capacity(int rows, int H)
         const int want = 2 * cap > rows ? 2 * cap : rows;
         uint16_t* nx = (uint16_t*)sycl::malloc_device<uint16_t>((size_t)want * H * 2, *g.q);
         float* no = (float*)sycl::malloc_device<float>((size_t)want * H, *g.q);   // rows x H fp32
+        MOE_ALOG_ALLOC(nx, (size_t)want * H * 2, "bounce_x");
+        MOE_ALOG_ALLOC(no, (size_t)want * H * 4, "bounce_out");
         if (!nx || !no)
         {
             if (nx) sycl::free(nx, *g.q);
@@ -131,8 +133,8 @@ void ensure_capacity(int rows, int H)
         g.q->memset(nx, 0, (size_t)want * H * 2);
         g.q->memset(no, 0, (size_t)want * H * 4);
         g.q->wait();
-        if (g_bounce.d_x) sycl::free(g_bounce.d_x, *g.q);
-        if (g_bounce.d_out) sycl::free(g_bounce.d_out, *g.q);
+        if (g_bounce.d_x) { MOE_ALOG_FREE(g_bounce.d_x, g_bounce.cap_rows * (size_t)H * 2, "bounce_x"); sycl::free(g_bounce.d_x, *g.q); }
+        if (g_bounce.d_out) { MOE_ALOG_FREE(g_bounce.d_out, g_bounce.cap_rows * (size_t)H * 4, "bounce_out"); sycl::free(g_bounce.d_out, *g.q); }
         g_bounce.d_x = nx; g_bounce.d_out = no; g_bounce.cap_rows = want;
         cap = want;
     }
@@ -142,14 +144,16 @@ void ensure_capacity(int rows, int H)
                                 ? g_stage.stage_cap * 2 : (size_t)rows * H * 4;
         void* ns = sycl::malloc_host(want, *g.q);
         void* nu = sycl::malloc_host(want / 2, *g.q);   // fp16 mirror needs rows*H*2 bytes
+        MOE_ALOG_ALLOC(ns, want, "stage");
+        MOE_ALOG_ALLOC(nu, want / 2, "stage_u16");
         if (!ns || !nu)
         {
             if (ns) sycl::free(ns, *g.q);
             if (nu) sycl::free(nu, *g.q);
             throw std::runtime_error("b70moe: pinned stage growth failed (OOM)");
         }
-        if (g_stage.stage) sycl::free(g_stage.stage, *g.q);
-        if (g_stage.stage_u16) sycl::free(g_stage.stage_u16, *g.q);
+        if (g_stage.stage) { MOE_ALOG_FREE(g_stage.stage, g_stage.stage_cap, "stage"); sycl::free(g_stage.stage, *g.q); }
+        if (g_stage.stage_u16) { MOE_ALOG_FREE(g_stage.stage_u16, g_stage.stage_cap / 2, "stage_u16"); sycl::free(g_stage.stage_u16, *g.q); }
         g_stage.stage = (float*)ns; g_stage.stage_u16 = (uint16_t*)nu; g_stage.stage_cap = want;
         memset(g_stage.stage, 0, want);
         memset(g_stage.stage_u16, 0, want / 2);
@@ -163,6 +167,7 @@ const uint16_t* upload_trellis(const uint16_t* host, size_t n_u16, int K2)
     std::vector<uint32_t> tmp(n_u16 / 2);
     moe_sycl::repack_native_to_stream_words(tmp.data(), (const uint32_t*)host, n_u16 / (2 * 4 * (size_t)K2), K2);
     uint32_t* p = sycl::malloc_device<uint32_t>(tmp.size(), *g.q);
+    MOE_ALOG_ALLOC(p, tmp.size() * 4, "trellis");
     if (!p) { fprintf(stderr, "[b70moe] OOM trellis upload %zu words\n", tmp.size()); return nullptr; }
     g.uploads.back()->keep.push_back((uint16_t*)p);   // recorded before the copy so a throwing
     g_alloc_bytes += tmp.size() * 4;                  // wait() still rolls back cleanly
@@ -192,6 +197,7 @@ const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
     if (!host) return nullptr;
     if (g.dev_full || g_alloc_bytes + n * 2 > g.budget) return nullptr;
     uint16_t* p = sycl::malloc_device<uint16_t>(n, *g.q);
+    MOE_ALOG_ALLOC(p, n * 2, "u16");
     if (!p) { fprintf(stderr, "[b70moe] OOM allocating %zu u16\n", n); return nullptr; }
     g.uploads.back()->keep.push_back(p);
     g_alloc_bytes += n * 2;
@@ -212,15 +218,18 @@ static void forward_impl(int64_t, const void*, const int32_t*, const void*, floa
 int b70_forward(int64_t handle, const void* x, const int32_t* sel, const void* w, float* out, int rows, int topk)
 {
     if (g.poison.load(std::memory_order_relaxed)) return 3;   // device dead: instant fail, never touch the queue
+    if (moe_sycl::alog()) moe_sycl::alog_msg("FWD enter h %lld rows %d topk %d", (long long)handle, rows, topk);
     try {
         forward_impl(handle, x, sel, w, out, rows, topk);
         return 0;
     } catch (const sycl::exception& e) {
         fprintf(stderr, "[b70moe] forward sycl error: %s\n", e.what());
+        moe_sycl::alog_msg("FWD THROW sycl: %s", e.what());
         g.poison.store(true);
         return 1;
     } catch (const std::exception& e) {
         fprintf(stderr, "[b70moe] forward error: %s\n", e.what());
+        moe_sycl::alog_msg("FWD THROW std: %s", e.what());
         g.poison.store(true);
         return 1;
     } catch (...) {
@@ -280,7 +289,7 @@ static int64_t register_impl
             fprintf(stderr, "[b70moe] registration out of device memory; layer stays on CPU\n");
             g.dev_full = true;
             Upload* u = g.uploads.back();
-            for (uint16_t* p : u->keep) { sycl::free(p, *g.q); }
+            for (uint16_t* p : u->keep) { MOE_ALOG_FREE(p, 0, "rollback"); sycl::free(p, *g.q); }
             g.uploads.pop_back();
             delete u;
             return -1;
@@ -519,6 +528,7 @@ static void forward_impl
     }
     memcpy(out, g_stage.stage, (size_t)rows * H * 4);
     g_last_ev = e_rd;
+    if (moe_sycl::alog()) moe_sycl::alog_msg("FWD exit h %lld rows %d nc %d", (long long)handle, rows, (int)chunks.size());
 }
 
 void b70_free_layer(int64_t handle)
@@ -580,7 +590,7 @@ int b70_update_expert
     for (int c = 0; c < 3; ++c)
     {
         std::array<uint16_t*, 4>& sl = u->slots[(size_t)e * 3 + c];
-        for (uint16_t* old : sl) if (old) sycl::free(old, *g.q);      // quiesced: safe
+        for (uint16_t* old : sl) if (old) { MOE_ALOG_FREE(old, 0, "upd_free"); sycl::free(old, *g.q); }      // quiesced: safe
         sl = { (uint16_t*)nm[c].trellis, (uint16_t*)nm[c].suh,
                (uint16_t*)nm[c].svh, (uint16_t*)nm[c].bias };
         for (uint16_t* x : sl) if (x) u->keep.push_back(x);

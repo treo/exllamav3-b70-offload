@@ -1032,7 +1032,7 @@ Default raised 64 -> 512 (not 1024: +5% prefill traded for the regime that surfa
 wedging bug; retest 1024 after the warm/OOM fixes if desired). Decode unaffected by
 construction (rows << cap); 2.68/4.05 decode measured UNCHANGED-to-better at 512.
 
-## OPEN BUG: DEVICE_LOST at cap_rows>=512 on the h4/DPAS tier under skewed worker jobs
+## OPEN BUG: DEVICE_LOST at cap_rows>=512 on the h4/DPAS tier under skewed worker jobs  [RESOLVED - see 'STALE POOL POINTER' below; the float-tier note in round 2 was the real one]
 Repro: 2.05bpw, EMPTY expert_stats dir (fresh identity placement => hot experts on the
 worker side => skewed per-expert m in every job), EXL3_MOE_CPU_SLOT_ROWS=512, default
 auto tier: first 2048-prefill pass -> every layer logs 'forward sycl error:
@@ -1062,3 +1062,58 @@ copy addressing when chunk slots per expert >> warm-case counts.
   on ANY model with warmed profiles + int8; forbidden regime today = h4 shapes, fresh
   placement, big jobs. bench_layer gained --skew <exp> (zipf selection; <0 = all-minus-1
   degenerate job probe).
+
+## STALE POOL POINTER: the cap_rows>=512 DEVICE_LOST bug, ROOT-CAUSED and FIXED (2026-10-27)
+THE BUG (one sentence): MoeSyclLayer::ensure_ws only rebound its float-tier workspace
+members (w_tin/w_tout/w_h/w_tind/w_toutd) when THIS LAYER's nc exceeded THIS LAYER's
+cap_nc memo - but the pool is PROCESS-WIDE, so when another layer grew a slot (free old +
+alloc new), every other layer kept a DANGLING member pointer, and their next SMALL job
+(nc <= own cap_nc, e.g. the first decode after a big prefill) had kernels read/write
+freed device memory => UA page fault => DEVICE_LOST/wedge => pin cascade.
+
+WHY IT LOOKED LIKE IT DID (every observation accounted):
+- cap<=128 clean: warm primes the pool at (512,512); rows<=128 jobs never produce nc>512,
+  the pool never grows mid-run, nothing dangles.
+- cap=512 + fresh placement + full-tier registration (h4/2.05): 512-row prefill jobs hit
+  nc=521 > 512 => first mid-run grow => armed. The WEDGED job was a rows=1 float decode
+  that ran right AFTER the successful 512-row int8 jobs (their exits were honest; the
+  decode's float members pointed at the freed pre-grow buffers).
+- h6 models clean at 512: SUB tiers filter jobs to tier members => per-job nc stayed <=512
+  => no grow => no staleness. Warmed profiles likewise (placement converged, smaller nc).
+- int8 tier NEVER faulted-as-culprit although the ring was prime suspect: its grow_p calls
+  are unconditional (the old ensure_ws comment literally says "sizing must happen on EVERY
+  nc/nsl combination" - the float slots lacked exactly that discipline).
+- bench --skew 3.0 could never reproduce: SINGLE layer per process; staleness requires
+  layer A growing the pool and layer B skipping the rebind. 48 layers + big jobs + later
+  small jobs is the recipe, not skew per se (skew only matters by pushing nc past 512).
+FORENSICS (the tool that found it - keep in the toolbox): the xe kernel driver logs UA
+faults with VA ("journalctl -k | grep 'Faulted Address'", FaultType 0 = GGTT miss, sign-
+extended 48-bit). Added EXL3_MOE_B70_ALLOCLOG=<file> to the plugin: every USM alloc/free
+(A/F site ptr bytes) + every forward (J line: rows/nc/tier/knobs/all pool bases), wall-
+clock stamped. One repro run: fault VAs landed at the FIRST 416KB of a FREED 0x14000000
+pool buffer (tout/toutd@nc=512, freed when another layer grew to nc=521), with group
+stride 0x14000 = NSL_D*MAXM*H*4/2 = the K6 toutd slice stride, 3 pages per group = a
+10KB row block. Freed-buffer + legible stride = stale base, not bad arithmetic. sycl_moe/attrib_faults.py
+pattern: rebuild the LIVE map at fault time from A/F records, and ALSO search the freed
+history - the bug was invisible in the live map (fault sits in a hole between pools).
+FIX (moe_sycl.cpp ensure_ws): grow_p for slots 0..4 now runs on EVERY forward (when it
+fits it is a pure `p = g_ws.buf[slot]` rebind - the int8 slots already worked that way);
+cap_nc kept only as a stat. PLUS: growth is now stepped (size for nc rounded up to 64
+chunks, ~120MB max headroom) so the observed nc staircase (341->405->417->521) costs ONE
+realloc per slot instead of five.
+REJECTED ALTERNATIVE (boss asked: preallocate the worst case at startup since cap_rows is
+known): naive nc bound is rows*topk = 5120 chunks at cap 512 => ~11 GB of pool (tout/toutd
+alone 3.4 GB each: they budget nsl=8 unconditionally) parked permanently on a card whose
+VRAM is the weight-residency currency; and warm-time pool inflation under the weight set
+is the documented registration-collapse trap. Grows are rare new-high-water events; the
+expensive part is the prefault memset, which preallocation only MOVES, not removes.
+VERIFY: same-command A/B: pre-fix binary => 1 wedge + 48 pins mid-warmup; post-fix =>
+79151 forwards incl. the nc=521 grow + thousands of decodes, ZERO kernel faults (journal),
+zero forward errors, 48/48 registered. i8trace battery (rows 2/5 gateless/8/32-2.5bit) all
+stages OK; xval 6.043e-07 unchanged. Model perf numbers from the verify run are VOID for
+the table (27GB hf download concurrent + hot B70 - both documented confounders); re-run
+gates cool and quiet before quoting.
+STATUS / NEXT: cap_rows default can go back up (512) once a clean cool-box A/B at 512
+reproduces the +28..40% prefill on oversubscribed models with zero pins; keep 128 until.
+The instrumentation stays (env-gated, zero cost when unset) - it is the fastest way to
+answer "who touched what device memory when" on this stack.

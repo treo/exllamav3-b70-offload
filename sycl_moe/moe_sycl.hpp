@@ -151,14 +151,15 @@ private:
     float *w_tind = nullptr;         // nc x 4 x I
     float *w_toutd = nullptr;        // nc x 8(nsl) x 4 x H
     // int8 / XMX DPAS tier (mirrors CPU VNNI semantics): operand slabs + i32 accumulators.
-    // a8 layout [slot][k/8][8 rows][8 i32]; row r = 2*token + part (always-wide vh/vl pair),
-    // word = x8 * 0x01010101 (one DPAS A fragment = 8 rows x 8 splat dwords, row stride 32B).
-    int32_t *w_a8u = nullptr;        // (nc*nm) x (H/8) x 64
-    int32_t *w_a8d = nullptr;        // nc x (I/8) x 64
-    float *w_qsxu = nullptr;         // (nc*nm) x 8 x {A,B} epilogue affine
-    float *w_qsxd = nullptr;         // nc x 8 x {A,B}
-    int32_t *w_accgu = nullptr;      // (nc*nm) x 8 x I   raw i32 (nsl = 1)
-    int32_t *w_accd = nullptr;       // nc x 8 x H
+    // a8 layout [slot][k/8][16 rows][8 i32] (128 words per k/8 block: two m8 fragments,
+    // row r = 2*token + part (always-wide vh/vl pair), word = x8*0x01010101 with (x8&0xff)
+    // - the negative splat trap; one DPAS A fragment = 8 rows x 8 splat dwords, stride 32B).
+    int32_t *w_a8u = nullptr;        // (nc*nm) x (H/8) x 128
+    int32_t *w_a8d = nullptr;        // nc x (I/8) x 128
+    float *w_qsxu = nullptr;         // (nc*nm) x 16 x {A,B} epilogue affine
+    float *w_qsxd = nullptr;         // nc x 16 x {A,B}
+    int32_t *w_accgu = nullptr;      // (nc*nm) x nsl8 x 16 x I  raw i32
+    int32_t *w_accd = nullptr;       // nc x nsl8 x 16 x H
     bool int8_ok = false;            // rate/geometry supports the DPAS tier
     bool use8_ = false;              // tier resolved for the last forward (read by ensure_ws)
     int nm_ws_ = 1;                  // gated ? 2 : 1, cached for ensure_ws sizing
@@ -176,6 +177,19 @@ private:
 // chunk width cap (MOE_MAXM vs MOE_MAXM_F), so it MUST agree with the tier forward()
 // will take.
 bool int8_pick(bool rate_ok, int rows);
+
+// ---- fault-attribution logging (OPEN BUG: DEVICE_LOST/pinned-CPU at large cap_rows)
+// EXL3_MOE_B70_ALLOCLOG=<file> records every USM alloc/free (site,ptr,bytes) plus one
+// geometry line per forward with all live pool/base pointers. The xe kernel driver logs
+// faulting GPU VAs on UA faults (journalctl -k); a fault address is then attributed to
+// the buffer whose [ptr,ptr+bytes) contains - or sits just below - it, telling us WHICH
+// layout walks off the end. Null/no-op when the env var is unset (zero hot-path cost).
+FILE* alog();
+void alog_msg(const char* fmt, ...);   // no-ops when alog() is null
+#define MOE_ALOG_ALLOC(p, bytes, site) \
+    do { if (moe_sycl::alog()) moe_sycl::alog_msg("A %s %p %zu", site, (const void*)(p), (size_t)(bytes)); } while (0)
+#define MOE_ALOG_FREE(p, bytes, site) \
+    do { if (moe_sycl::alog()) moe_sycl::alog_msg("F %s %p %zu", site, (const void*)(p), (size_t)(bytes)); } while (0)
 
 // Chunk width cap for the HOST CHUNKER (see moe_sycl.cpp for the measured policy and
 // the EXL3_MOE_B70_MCAP lab override). int8_selected must come from int8_pick/pick_int8.
