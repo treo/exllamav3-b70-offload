@@ -79,7 +79,7 @@ def harness(monkeypatch):
         dst.copy_(src)
 
     tuning = SimpleNamespace(swizzle = True, stream_fused_t = 0, stream_t_explicit = True,
-                             stream_debug = False)
+                             stream_t_dev_explicit = True, stream_debug = False)
     monkeypatch.setattr(mch, "torch", proxy)
     monkeypatch.setattr(mch, "TUNING", tuning)
     monkeypatch.setattr(mch, "ext", SimpleNamespace(
@@ -100,6 +100,10 @@ def harness(monkeypatch):
         h.specs, h._dev_bufs, h.sstate = specs, {}, {}
         h.num_wslots, h.wslot_size = 2, 4096
         h.cap_rows, h.stream_min_rows, h.stream_t, h.batch_experts = 64, 1, 1, 24
+        # Device-tier knobs (see MoeCpuHost._job_cap / _ensure_stream_state): same as the CPU cap
+        # here, so the stub exercises one slicing policy for both tiers
+        h.cap_rows_cpu, h.cap_rows_dev, h.stream_t_dev = 64, 64, 1
+        h.layer_b70n = []
         h.aux = {i: {key: [None] for key in ("suh_g", "svh_g", "suh_u", "svh_u", "suh_d", "svh_d")}
                  for i in range(len(specs))}
         h._stream_fused_t = lambda spec, aux, h: 0

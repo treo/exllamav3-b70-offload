@@ -62,6 +62,11 @@ MOE_STAGE_HEAD_OFFSET = MOE_STAGE_TAIL_OFFSET + 64
 MOE_STAGE_JOBS_OFFSET = MOE_STAGE_TAIL_OFFSET + 128
 MOE_CTRL_SIZE = MOE_STAGE_JOBS_OFFSET + MOE_STAGE_RING * MOE_JOB_BYTES
 
+# Reference pinned->device bandwidth (GB/s) at which EXL3_MOE_STREAM_T_DEV was measured on this
+# box (Gen4 x8, probed 13.4). The device-tier streaming threshold amortises one expert DMA, so
+# it is scaled by this ratio; other link rates are extrapolation, not measurement.
+B70_STREAM_T_BW = 13.4
+
 
 def _set_job_seq(job, seq: int):
     """Sequence number into a job descriptor (u32 view) as its two 32-bit halves"""
@@ -98,11 +103,19 @@ class MoeCpuTuning:
         # --- CPU worker / staging ---
         self.num_slots = int(os.environ.get("EXL3_MOE_CPU_SLOTS", 4))
         assert 1 <= self.num_slots <= 8, "EXL3_MOE_CPU_SLOTS must be 1..8 (MOE_MAX_SLOTS in moe_handoff.h)"
-        # 128 = largest value clean in every tested regime. 512 buys ~10% more prefill on
-        # 4.05/2.68; the DEVICE_LOST seen there was root-caused (stale process-wide workspace
-        # pool pointer, fixed) but 512 stays unproven pending a cool-box A/B - sycl_moe/NOTES.md
-        # + sycl_moe/archive/memory-and-registration.md
+        # 128 = largest value clean in every tested regime for the CPU compute tier. 512 buys
+        # ~10% more prefill on 4.05/2.68; the DEVICE_LOST seen there was root-caused (stale
+        # process-wide workspace pool pointer, fixed) but 512 stays unproven pending a cool-box
+        # A/B - sycl_moe/NOTES.md + sycl_moe/archive/memory-and-registration.md
         self.cap_rows = int(os.environ.get("EXL3_MOE_CPU_SLOT_ROWS", 128))
+        # Rows per job when the layer's worker tier is resident on a DEVICE tier (the B70
+        # plugin). The DPAS tier charges a whole m8 fragment (~5.9 us, 4 same-expert tokens per
+        # fragment, MOE_MAXM=8 tokens per chunk) PER (expert, job): slicing a layer's tail into
+        # 128-row shreds re-pays the fragment for every job an expert's picks touch, which costs
+        # 4-8x more per pick than one big job (2.05bpw, all-worker-work-on-B70: cap_rows 128 ->
+        # 1411 tok/s, 1024 -> 1568). Only used for layers that report a device tier, so the CPU
+        # compute tier keeps its small, better-pipelined jobs.
+        self.cap_rows_dev = int(os.environ.get("EXL3_MOE_CPU_SLOT_ROWS_DEV", 1024))
         # Physical cores kept free of pool workers for the host process, whether the pool pins
         # its workers (EXL3_MOE_CPU_PIN) or lets them float; the host is confined to them once
         # the worker has started, see moe_cpu_affinity.py. 0 disables the reservation
@@ -141,6 +154,15 @@ class MoeCpuTuning:
         # --- GPU-streaming prefill ---
         self.stream_t_explicit = "EXL3_MOE_STREAM_T" in os.environ
         self.stream_t = int(os.environ.get("EXL3_MOE_STREAM_T", 8))
+        # Break-even assignment count for streaming to the main GPU when the tail runs on the
+        # B70 instead of on CPU cores. The streamed leg pays a FIXED cost per expert (one
+        # expert_bytes DMA) plus a small per-pick term, while the B70 pays ~5.9 us per fragment
+        # of up to 4 same-expert picks; measured optimum on 2.05bpw (E=260, 1.17 MB experts,
+        # 13.4 GB/s link) is 24 - see sycl_moe/SESSION_20261028.md. Scaled linearly with the
+        # DMA cost (1/bandwidth); only that one link rate is measured, so treat other boxes as
+        # extrapolation. EXL3_MOE_STREAM_T_DEV pins it.
+        self.stream_t_dev_explicit = "EXL3_MOE_STREAM_T_DEV" in os.environ
+        self.stream_t_dev = int(os.environ.get("EXL3_MOE_STREAM_T_DEV", 24))
         self.stream_fused_t = int(os.environ.get("EXL3_MOE_STREAM_FUSED_T", 256))
         self.stream_min_rows = int(os.environ.get("EXL3_MOE_STREAM_MIN_ROWS", 32))
         self.batch_experts = max(1, min(
@@ -1002,7 +1024,11 @@ class MoeCpuHost:
         self.next_slot = 0
         self.slot_last_seq = [0] * MOE_MAX_SLOTS
         self.num_slots = TUNING.num_slots
-        self.cap_rows = TUNING.cap_rows
+        self.cap_rows_cpu = TUNING.cap_rows
+        self.cap_rows_dev = TUNING.cap_rows_dev
+        # The slot sections and the worker's slot addressing are sized by the LARGEST job either
+        # tier can issue; slicing a forward into jobs stays tier-specific (see _job_cap)
+        self.cap_rows = max(self.cap_rows_cpu, self.cap_rows_dev)
         # Per-component thread override: config.infer_params.moe_cpu_threads for the main model,
         # draft_moe_cpu_threads for anything else (MTP head / draft model); falls back to the
         # tuning default (EXL3_MOE_CPU_THREADS env, else physical cores minus EXL3_MOE_HOST_CORES)
@@ -1016,6 +1042,7 @@ class MoeCpuHost:
         self.num_wslots = TUNING.num_wslots
         self.wslot_size = TUNING.wslot_size
         self.stream_t = TUNING.stream_t
+        self.stream_t_dev = TUNING.stream_t_dev
         self.stream_min_rows = TUNING.stream_min_rows
         self.batch_experts = TUNING.batch_experts
         self.wseq = 0
@@ -1253,6 +1280,16 @@ class MoeCpuHost:
         # full-width contiguous slice
         assert all(s["hi"] == max_hi and s["ho"] == max_ho and s["topk"] == max_topk
                    for s in self.specs), "CPU MoE offload requires uniform expert dims and top-k"
+
+        # Device-tier job size, clamped so the pinned handoff segment stays inside a sane byte
+        # budget (a container with a 64 MB /dev/shm must still load: the slot region scales with
+        # num_slots x cap_rows x (hidden + output widths)). Never below the CPU cap, which is
+        # what the segment was sized for before this knob existed.
+        row_bytes = max_hi * 2 + max_topk * 6 + max_ho * 4
+        slot_budget = int(os.environ.get("EXL3_MOE_CPU_SLOT_BYTES", 256 << 20))
+        self.cap_rows_dev = max(self.cap_rows_cpu, min(self.cap_rows_dev,
+                              slot_budget // max(1, self.num_slots * row_bytes)))
+        self.cap_rows = max(self.cap_rows_cpu, self.cap_rows_dev)
 
         off_x = 0
         off_sel = _align64(off_x + self.cap_rows * max_hi * 2)
@@ -1528,6 +1565,18 @@ class MoeCpuHost:
             final_2d, slot["out_dev"], counts, slot_idx, ho,
             slot["done"], seq, slot["consumed"], self.gpu_base_ptr + 128)
 
+    def _job_cap(self, layer_idx):
+        """Rows per worker job for this layer: the device-tier cap when the layer reports a
+        B70-resident expert count (>0), else the CPU cap. The two tiers have opposite cost
+        shapes - a CPU core's cost tracks picks, so small jobs pipeline better with the pool,
+        while the B70 re-pays a whole DPAS fragment per (expert, job), so big jobs are 4-8x
+        cheaper per pick. layer_b70n arrives from the worker ('b70n'); until then every layer
+        uses the CPU cap."""
+        if self.cap_rows_dev > self.cap_rows_cpu and \
+                0 <= layer_idx < len(self.layer_b70n) and self.layer_b70n[layer_idx] > 0:
+            return self.cap_rows_dev
+        return self.cap_rows_cpu
+
     def _issue_compute(self, layer_idx, y, selected_experts, routing_weights, spec, out, h):
         """
         Stage inputs and publish one compute job per cap_rows chunk (descriptors, D2H copies
@@ -1548,13 +1597,14 @@ class MoeCpuHost:
         # Zero-pad up to the quantized input width on the GPU so every D2H below is a contiguous
         # full-width block (see the assert in ensure_started for why this matters)
         y_pad = torch.nn.functional.pad(y, (0, hi - h_)) if hi != h_ else y
-        rtmp = torch.empty((min(self.cap_rows, rows), ho), dtype = torch.float, device = y.device) \
+        rtmp = torch.empty((min(self._job_cap(layer_idx), rows), ho), dtype = torch.float, device = y.device) \
             if ho != h_ else None
+        cap = self._job_cap(layer_idx)
         jobs = []
-        for a in range(0, rows, self.cap_rows):
+        for a in range(0, rows, cap):
             if len(jobs) >= self.num_slots:
                 self._collect_one(jobs.pop(0), out, rtmp, h)
-            b = min(a + self.cap_rows, rows)
+            b = min(a + cap, rows)
             n = b - a
             slot_idx = self.next_slot
             self.next_slot = (self.next_slot + 1) % self.num_slots
@@ -1730,9 +1780,15 @@ class MoeCpuHost:
             # break-even count grows with the square root of the bandwidth deficit, not
             # linearly: the tail's CPU cost falls with the same rows the streaming gains
             st["stream_t"] = max(self.stream_t, int(round(self.stream_t * (25.0 / max(bw, 0.5)) ** 0.5)))
+        # Device-tier threshold: the fixed cost being amortised is one expert DMA, so it scales
+        # linearly with 1/bandwidth around the measured 24 at the reference rate.
+        if TUNING.stream_t_dev_explicit:
+            st["stream_t_dev"] = self.stream_t_dev
+        else:
+            st["stream_t_dev"] = max(1, int(round(self.stream_t_dev * (B70_STREAM_T_BW / max(bw, 0.5)))))
         if TUNING.stream_debug:
             print(f" -- stream state cuda:{key}: pinned->device {bw:.1f} GB/s, "
-                  f"stream_t {st['stream_t']}")
+                  f"stream_t {st['stream_t']} (device tier {st['stream_t_dev']})")
         self.sstate[key] = st
         return st
 
@@ -1967,7 +2023,11 @@ class MoeCpuHost:
             # cap_rows job; a streamed hot expert pays one PCIe DMA for the whole chunk, and
             # the B70 keeps its copy (decode unaffected), so this is cooperation, not theft.
             floor = 0 if (hn and TUNING.b70_stream_hot) else hn
-            streamed = [e for e in range(E) if counts_h[e] >= st["stream_t"] and e >= floor]
+            # A layer with a device tier streams on the device-tier threshold: below it, a cold
+            # expert costs the 3090 a whole DMA + launch per 1-2 picks, and the B70 (which
+            # already holds those weights at 608 GB/s) chews them for one fragment.
+            t_eff = st["stream_t_dev"] if hn else st["stream_t"]
+            streamed = [e for e in range(E) if counts_h[e] >= t_eff and e >= floor]
             if TUNING.stream_debug:
                 n_str = sum(counts_h[e] for e in streamed)
                 print(f" -- stream L{layer_idx}: rows {rows}, streamed experts "
