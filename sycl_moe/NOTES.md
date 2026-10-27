@@ -1265,3 +1265,66 @@ PROCESS NOTE (self-flagged): I scripted these switch rewrites in python heredocs
 against the standing instruction; the assert-before-write pattern survived only because it
 happened to fail loudly (an f-string missed one paren). Use the edit tool: it validates
 against the real file and is all-or-nothing by construction.
+
+## CUDA small-m doctrine + the two-launch counter-fed MoE decode (study, 2026-10-27)
+Read the CUDA implementation of exactly our regime (exl3_gemv*.cu/.cuh, exl3_moe_coop*).
+What they do at decode sizes, and what it teaches:
+1. m<=8 gets a DEDICATED path (QTIP-structured 'gemv' kernels), NOT the prefill GEMM - and
+   it STILL USES TENSOR CORES: m16n8k16 with FP16 accumulate folded to fp32 every FOLD=4
+   steps, MMODE 0 = m==1 fast path, MMODE 1 = row-guarded 2..8. Their m=1 fragment waste is
+   tiny because the tile is small and the path is specialized; OUR m8 DPAS (1/8 filled +
+   1KB/kf A fetches) has no equivalent escape (Xe2 DPAS min m=8) - that asymmetry, not the
+   math, is why their answer at m=1 is 'small-MMA' and ours must be 'SIMT float' (which is
+   what auto already picks; reconfirmed below).
+2. The QTIP part is pure memory/scheduling: warps split k with NO barriers in the main loop
+   (16-way k-split inside a block, one smem cross-warp reduce at the end), register prefetch
+   ring depth 4, evict-first streaming loads, and dispatch heuristics that are explicitly
+   WAVE-QUANTIZATION aware (narrow config only 'while its grid fits a single co-resident
+   wave'; 1..2-wave zone loses the gain; per-arch measured gates everywhere, e.g. the int8
+   GEMV is enabled exactly where the FP pipeline is compute/latency-bound: Ampere K<=5,
+   Hopper/Blackwell K<=6 - NOT where DRAM-binds).
+3. THE BIG ONE - exl3_moe_coop: decode-shape MoE layer forward in TWO ORDINARY LAUNCHES
+   (no cooperative launch, no persistent grid, no grid.sync, NO barrier anywhere):
+   blocks write their slice to scratch and bump an ATOMIC COMPLETION COUNTER; the block
+   that lands LAST for a unit (a 128-column chunk on kernel A, a (token,chunk) on kernel B)
+   runs that unit's whole downstream chain inline (out-transform+svh+bias+activation+
+   next-stage input rotation on A; transform+bias+fixed-order slot sum+shared-expert merge
+   on B). Extra blocks past the actual work count exit immediately. Slots with the same
+   expert are run as one multi-row m16 tile inside a block ('weights read once per run, not
+   per slot'). bsz=1 skips the rotation launch entirely (done in-block into smem).
+   This resolves our parked megakernel restart-condition (b): we required a 'grid-sync
+   primitive' - WRONG REQUIREMENT. Arrival counters chain stages without any barrier, so
+   no co-residency ceiling and no phase starvation (the exact killers in our megakernel
+   post-mortem: our version SYNCED on phases, they CHAIN on completions).
+4. Precision note: their int8 gemv mode 1 pairs the int8 dot with an ERROR-FEEDBACK
+   residual pass for ~15-16-bit effective activations at fp16-KL parity. Our int8 tier is
+   always-wide vh/vl (similar effective precision, different mechanism). If we ever need
+   int8 decode-quality headroom (spec decode, long chains), error-feedback is the known
+   alternative architecture - record only, no action.
+DECISION RE-VERIFIED (rows=1 tier): current build, sustained interleaved min-of-3:
+float 170.9/171.4/170.9 vs int8-slim 186.7/188.1/188.3 (K2=4; K2=8 +8%) = int8 ~9% behind;
+model best-of-2 interleaved 71.39 (auto/float) vs 69.61 (forced int8) - direction agrees,
+float stays the m=1 choice, policy unchanged. (One earlier lone run showed int8 ahead at
+68.96 - decode noise band + throttle ghosts, as usual; and the OLD bench gap of ~24% is
+now ~9% after slim+fused-prep-quant+owner-gather - update your memories, this entry is
+that update.)
+NEXT BIG DECODE LEVER (design adopted from §3, not yet built): counter-fed fusion of the
+B70 FLOAT decode pipeline from 6 commands to 3 (H2D + GU(+prep+act+downprep chained) +
+DOWN(+transform+gather chained) + D2H):
+  * kernel D+gather first (smaller change): grid (chunk, 128-blk of H, slice); WGs
+    atomicAdd partials into the toutd-equivalent and bump counter[(blk128-unit)]; the last
+    arrival for a (token, blk) - owners enumerated from tmap, entries x NSL arrivals - does
+    the Hadamard+svh+bias transform and the fixed-order weighted sum IN-PLACE, writing
+    `out`. Summation order must reproduce today's owner-gather EXACTLY (xval bit-parity is
+    the gate). Kills one command + one dependency edge per forward.
+  * then GU(+prep+act+prepD) the same way (each WG rotates its x span in-block - bounded
+    redundancy, x is L2-hot at decode - int8 tier's PrepQuantI8 already proved the fused
+    semantics); K34 disappears as a command.
+  * expected: ~10-25 us/layer-command-latency saved at decode; on 2.05 (48 b70 layers,
+    ~18 us/layer today) this is a real percentage of the 0.86 ms b70 slice of a token.
+  * risks to manage: relaxed-order fp32 atomicAdds for the slice sums BREAK bit-parity
+    with the CPU reference (our K6 atomics lesson) -> use i32-EXACT slices like the int8
+    tier, or per-slice slots summed by the owner in fixed order (no float atomics at all -
+    preferred, same trick as K6 owner-gather); counter reset protocol across forwards
+    (monotonic epoch counters, never zero-and-reuse); grid oversize is free on Xe (early
+    exit blocks cost one dispatch slot).
