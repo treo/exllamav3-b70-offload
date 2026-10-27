@@ -1117,3 +1117,91 @@ STATUS / NEXT: cap_rows default can go back up (512) once a clean cool-box A/B a
 reproduces the +28..40% prefill on oversubscribed models with zero pins; keep 128 until.
 The instrumentation stays (env-gated, zero cost when unset) - it is the fastest way to
 answer "who touched what device memory when" on this stack.
+
+## CUDA-tier-inspired memory management: per-layer weight ARENA + threaded fill (2026-10-27)
+Studied the CUDA side of the house for the memory-management patterns the B70 plugin never
+had: (1) the handoff segment = ONE pre-sized shm arena (ctrl + num_slots*slot_size +
+num_wslots*wslot_size), everything an offset, cudaHostRegister once, host+device views both
+carved from the base; (2) the streamed-prefill VRAM ring is carved at LOAD time and reused
+via events - no allocator in any hot path; (3) the CPU worker's thread_local ForwardArena
+"grows but never shrinks"; (4) pinned-budget yielding (arena chunks handed back, last
+first, so the thing that MUST be pinned gets in). Our upload path was the anti-pattern:
+~2.4k individual malloc_device per layer (~115k/process, all still live at once - the
+forensics run counted 110799), each with its own synchronous q->memcpy().wait(), per-tensor
+budget accounting, a fragile "uploads.back()" ownership dance during updates, and a
+free+repoint+reupload install path in b70_update_expert that could leave a half-installed
+mix of old and new weights on partial failure.
+
+NEW DESIGN (b70_lib.cpp; assumption per boss: -mcpa pinned-arena regime is ALWAYS on, so
+dynamic installs are permanent traffic): ONE device arena per layer with a REGULAR
+per-expert block layout [gate|up|down] x [trellis|suh|svh|bias], sections 64B-aligned,
+gate cat omitted for gateless. Consequences:
+  * registration = fill host staging (parallel, below) + ONE H2D memcpy + ONE wait;
+    budget/rollback account ONE size (one free on any failure - the keep[] walk is gone);
+  * b70_update_expert = refill one block in staging + ONE in-place memcpy. Data pointers
+    DO NOT CHANGE (d_tab rows keep pointing into the block); only bias presence can
+    toggle, so the table republish is idempotent. Fill-before-copy makes the install
+    ATOMIC: any host-side failure leaves the previous weights byte-intact (old path could
+    half-install). No free, no realloc, no budget motion. n_sub non-members alias block 0
+    exactly as before (stray chunks read finite weights);
+  * driver object count collapses 115k -> 48 device allocations: less bookkeeping, and
+    crucially less VA fragmentation pressure exactly where the ~300MB workspace pool likes
+    to grow late in a near-full run (the old registration-collapse family);
+  * upload staging = process-static pageable vector (grows, never shrinks). PAGEABLE ON
+    PURPOSE: the worker's pinned budget is precious (-mcpa arena), and the wire penalty is
+    small: measured pinned 14.1 vs pageable 12.5 GB/s for a one-shot 310MB copy (t44_upload).
+PERFORMANCE (t44_upload + regbench2 probe, E=256 2bit geometry, 310MB/layer):
+    phase               old per-tensor      arena         arena+threaded fill
+    fill (host)         ~in-line, sync      100 ms        ~20 ms (hw_concurrency/2 threads)
+    upload              ~140 ms (2.4k waits) 26 ms        26 ms
+    malloc/rollback     2.4k frees          2.5 ms        2.5 ms
+    warm(512)+init      same                ~5 ms         ~5 ms
+    TOTAL/layer         168 ms              133 ms        50 ms   (48 layers: -5.7 s load)
+    xval rms unchanged 6.043e-07; bench_b70_py forward unchanged.
+TRAP (caught only because the C-ABI harness checks rms): the fill threads first shipped as
+emplace_back([&]{ for e=t; ... }) - loop variable captured BY REFERENCE: every thread read
+the racing final value of t, whole expert ranges never filled, rms 0.41 with no error
+anywhere. Lambdas taking loop indices capture [&, i] BY VALUE and re-verify numerically;
+a silent wrong-weights upload is exactly the class of bug the NOTES opened with.
+Keep t44_upload.cpp as the phase-timing lab. /tmp/regbench2.py (in NOTES spirit: keep as
+regbench) drives N synthetic E=256 registrations through the C ABI - the only honest way to
+measure registration throughput without a 4-minute model load per data point.
+STILL ON DEMAND (deliberate, see the STALE POOL POINTER entry): the workspace pool, bounce
+and stage buffers. cap_rows-known startup preallocation of the pool remains rejected: the
+naive nc bound (rows*topk under skew) is ~11 GB at SLOT_ROWS=512 - weight residency is
+worth more than the microseconds of a rare stepped grow.
+
+## Arena verification matrix (all four Qwen3.8-Flash-Next quants, -mcpa, SLOT_ROWS=512)
+| model (K2)          | registration        | run stability                                   | numerics                       |
+|---------------------|---------------------|--------------------------------------------------|--------------------------------|
+| 2.05bpw h4 (4)      | 48/48, 15.3GB       | 79k jobs incl. nc=521 pool grow: 0 faults, 0 pins | xval 6.04e-7                  |
+| 2.68bpw h6 (5)      | 48/48               | 0 faults / 0 errors                               | battery green                  |
+| 4.05bpw h6 (8)      | 47/48 + 1 graceful budget refusal @0.70 | 0 faults / 0 errors      | battery green                  |
+| 4.18bpw h6 (8+10 HYBRID!) | 45/48         | 0 faults / 0 errors - FIRST EVER K2=10 GemvFallback traffic at model scale | coherent 854 pre / 42 dec |
+Absolute tok/s in these logs are CONTAMINATED (concurrent 27GB download, back-to-back hot
+B70 - NOTES standing rules); the gates were stability+correctness, and they pass.
+4.18bpw is a HYBRID: quantize bits=4.16 shows up per-layer as k2 in {8,10} (the J-line log
+made this obvious in one grep) - the K2=10 layers ride GemvFallback, which the old xval
+tooling never covered (its --bits 4 --hb 1 synthetic = 4.5bpw is NOT what the model uses;
+the CPU ext refuses that rate: "unsupported trellis tile width 72").
+PLUGIN-ABI TOOLS (both committed, run them after ANY upload/ABI change):
+  * test_arena_update.py <xval_dir> - three BYTE-EXACT substitution identities for the
+    in-place install path: idempotent reinstall, slot<-src mapping (install e7's bytes into
+    slot 3: route-to-3 must equal the baseline route-to-7), fan-out overwrite. This is the
+    ONLY thing that actually exercises b70_update_expert - the model runs' tier-guard means
+    no install ever targeted a registered layer in any of the four gates (UPD ok = 0).
+  * regbench.py - synthetic E=256 registrations through the C ABI (registration throughput
+    without a 4-minute model load per data point).
+HARNESS GOTCHAS fixed/learned en route: bench_b70_py.py hardcoded gated=1 (gateless dumps
+then score rms ~1.05 - looks catastrophic, is nothing); and a --gateless xval WITHOUT
+--scalar compares against the AVX2 tier -> rms 1.38e-2 = exactly the documented AVX2-vs-
+scalar deviation (both plugin builds matched it to the last digit - identical-old-and-new
+is the signature of a harness/reference artifact, keep that reflex). Gateless vs scalar:
+4.99e-07. ctypes ABI note: the 13-array update/register args are pointers to uint64_t
+ARRAYS - pass ctypes.addressof(arr), not the stored data pointer (a wrong marshal segfaults
+inside fill_block reading the tensor's first 8 bytes as a pointer - the traceback reads
+like a plugin bug; it is not).
+ONE-OFF ODDITY (foreign, monitoring only): one bcs(blitter)-engine UA fault at 12:00:37,
+same VA in two ASIDs, AFTER the 2.05 gate process had exited and outside any forward
+window; no compute-engine (ccs) faults all session. Not ours by every indicator; if a
+future run pins with ccs faults at teardown, revisit.

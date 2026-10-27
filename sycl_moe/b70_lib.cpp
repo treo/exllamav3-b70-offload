@@ -29,14 +29,24 @@ namespace {
 
 struct Upload
 {
-    std::vector<uint16_t*> keep;   // device allocations owned here
-    // Per (expert*3+cat) {trellis,suh,svh,bias} currently published in the layer's d_tab;
-    // b70_update_expert frees these, re-uploads, and repoints (dynamic placement installs)
-    std::vector<std::array<uint16_t*, 4>> slots;
-    // Three-tier placement: only slots [0, n_sub) own real device weights (B70 tier); the
-    // rest alias slot 0's buffers in the lookup table and are NEVER addressed by a job
-    // (the child filters sel by membership) nor updated (b70_update_expert no-ops).
-    int n_sub = 0;
+    // ONE DEVICE ARENA per layer (the CUDA-tier handoff-segment philosophy: geometry known
+    // up front, everything is an offset, no allocator in the hot path). Per-expert blocks
+    // are REGULAR - same size, same field offsets - so a dynamic-placement install
+    // (b70_update_expert, always live with -mcpa) OVERWRITES the block in place: no free,
+    // no realloc, no d_tab repoint (bias presence is the only table change), and a failure
+    // during the host-side fill leaves the device untouched (the copy is atomic per expert).
+    // Registration is ONE H2D memcpy + ONE wait instead of ~2.4k synchronous per-tensor
+    // copies, and rollback / teardown accounting is one size. The old scheme's ~115k
+    // individual malloc_device calls were driver-bookkeeping and fragmentation pressure
+    // right where the ~300MB workspace pool needs to grow late in a near-full run.
+    char*   arena = nullptr;
+    size_t  arena_bytes = 0;
+    size_t  block = 0;             // bytes per expert block (64-aligned end)
+    size_t  cat_base[3] = {};      // cat 0 gate / 1 up / 2 down -> offset inside a block
+    size_t  off[3][4] = {};        // field 0 trellis / 1 suh / 2 svh / 3 bias -> block offset
+    size_t  sz[3][4] = {};
+    int     gated = 1;
+    int     n_sub = 0;             // B70-tier expert count; e >= n_sub alias block 0
 };
 
 struct Global
@@ -161,49 +171,83 @@ void ensure_capacity(int rows, int H)
 }
 
 // repacked upload: per-tile u32 word reversal (native ring -> column-window stream)
-const uint16_t* upload_trellis(const uint16_t* host, size_t n_u16, int K2)
+//
+// Arena geometry. Sections are 64B-aligned so every trellis word offset stays 4B-aligned
+// (the gemvs read u32s) and every section start is cacheline-clean for the DMA. Gateless
+// layers SKIP the gate cat: the block is up+down only (the old per-tensor scheme never
+// allocated gate buffers either).
+static void upload_layout(Upload& u, int H, int I, int k2, int gated)
 {
-    if (g.dev_full || g_alloc_bytes + n_u16 * 2 > g.budget) return nullptr;
-    std::vector<uint32_t> tmp(n_u16 / 2);
-    moe_sycl::repack_native_to_stream_words(tmp.data(), (const uint32_t*)host, n_u16 / (2 * 4 * (size_t)K2), K2);
-    uint32_t* p = sycl::malloc_device<uint32_t>(tmp.size(), *g.q);
-    MOE_ALOG_ALLOC(p, tmp.size() * 4, "trellis");
-    if (!p) { fprintf(stderr, "[b70moe] OOM trellis upload %zu words\n", tmp.size()); return nullptr; }
-    g.uploads.back()->keep.push_back((uint16_t*)p);   // recorded before the copy so a throwing
-    g_alloc_bytes += tmp.size() * 4;                  // wait() still rolls back cleanly
-    g.q->memcpy(p, tmp.data(), tmp.size() * 4).wait();
-    return (const uint16_t*)p;
+    const auto al64 = [](size_t x) { return (x + 63) & ~(size_t)63; };
+    const size_t tri_gu = al64((size_t)(H / 16) * (I / 16) * 8 * (size_t)k2 * 2);   // bytes
+    const size_t tri_d  = al64((size_t)(I / 16) * (H / 16) * 8 * (size_t)k2 * 2);
+    const size_t cat[3][4] = {
+        { tri_gu, al64((size_t)H * 2), al64((size_t)I * 2), al64((size_t)I * 2) },  // gate
+        { tri_gu, al64((size_t)H * 2), al64((size_t)I * 2), al64((size_t)I * 2) },  // up
+        { tri_d,  al64((size_t)I * 2), al64((size_t)H * 2), al64((size_t)H * 2) },  // down
+    };
+    size_t cb = 0;
+    for (int c = (gated ? 0 : 1); c < 3; ++c) {
+        u.cat_base[c] = cb;
+        size_t o = 0;
+        for (int f = 0; f < 4; ++f) { u.off[c][f] = cb + o; u.sz[c][f] = cat[c][f]; o += cat[c][f]; }
+        cb = al64(cb + o);
+    }
+    u.block = cb;
+    u.gated = gated;
 }
 
-const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required);
+// one cat's source arrays (expert-indexed pointer arrays into the worker's arena)
+struct CatSrc { const uint64_t *tr = nullptr, *suh = nullptr, *svh = nullptr, *bias = nullptr; };
 
-// One expert matrix: upload trellis (repacked native->stream) + scales + optional bias.
-// Shared by registration and the dynamic-placement update path. NOTE the keep push targets
-// the CURRENT back Upload - during b70_update_expert that is the last-registered layer's
-// list, whose entries are never individually freed (teardown keeps weights by design), so
-// the extra record is inert; the authoritative per-expert tracking is Upload::slots.
-bool fill_one(moe_sycl::MatrixSrc& m, const uint64_t* tr, const uint64_t* suh,
-              const uint64_t* svh, const uint64_t* bias, int e, int tri_sz, int k, int n, int k2)
+// Fill ONE expert block into a host staging buffer: trellis repacked native->stream, then
+// scales/bias verbatim. Absent matrices (gate on gateless layers, null arrays) make it
+// return false BEFORE any device-side action; absent bias leaves that section stale (never
+// read - the d_tab entry is null).
+static bool fill_block(char* dst, const Upload& u, const CatSrc src[3], size_t e_idx, int k2)
 {
-    m.trellis = upload_trellis((const uint16_t*)tr[e], tri_sz, k2);
-    m.suh = (const uint16_t*)upload_u16((const uint16_t*)suh[e], (size_t)k, true);
-    m.svh = (const uint16_t*)upload_u16((const uint16_t*)svh[e], (size_t)n, true);
-    m.bias = bias && bias[e] ? (const uint16_t*)upload_u16((const uint16_t*)bias[e], (size_t)n, true) : nullptr;
-    return m.trellis && m.suh && m.svh;
+    for (int c = (u.gated ? 0 : 1); c < 3; ++c) {
+        if (!src[c].tr || !src[c].tr[e_idx] || !src[c].suh[e_idx] || !src[c].svh[e_idx]) return false;
+        moe_sycl::repack_native_to_stream_words(
+            (uint32_t*)(dst + u.off[c][0]), (const uint32_t*)src[c].tr[e_idx],
+            u.sz[c][0] / (16 * (size_t)k2), k2);          // tile = 8*K2 u16 = 16*K2 bytes
+        memcpy(dst + u.off[c][1], (const void*)src[c].suh[e_idx], u.sz[c][1]);
+        memcpy(dst + u.off[c][2], (const void*)src[c].svh[e_idx], u.sz[c][2]);
+        if (src[c].bias && src[c].bias[e_idx]) memcpy(dst + u.off[c][3], (const void*)src[c].bias[e_idx], u.sz[c][3]);
+    }
+    return true;
 }
 
-const uint16_t* upload_u16(const uint16_t* host, size_t n, bool required)
+// device MatrixSrc for ARENA block e given source arrays indexed arr_idx (registration:
+// arr_idx==e; the update path passes one-expert arrays with arr_idx==0 and the layer slot e)
+static moe_sycl::MatrixSrc ms_at(const Upload& u, const CatSrc& sp, size_t arr_idx, int e, int c)
 {
-    if (!host) return nullptr;
-    if (g.dev_full || g_alloc_bytes + n * 2 > g.budget) return nullptr;
-    uint16_t* p = sycl::malloc_device<uint16_t>(n, *g.q);
-    MOE_ALOG_ALLOC(p, n * 2, "u16");
-    if (!p) { fprintf(stderr, "[b70moe] OOM allocating %zu u16\n", n); return nullptr; }
-    g.uploads.back()->keep.push_back(p);
-    g_alloc_bytes += n * 2;
-    g.q->memcpy(p, host, n * 2).wait();
-    (void)required;
-    return p;
+    moe_sycl::MatrixSrc m;
+    if (!sp.tr || !sp.tr[arr_idx]) return m;
+    const char* b = u.arena + (size_t)e * u.block;
+    m.trellis = (const uint16_t*)(b + u.off[c][0]);
+    m.suh     = (const uint16_t*)(b + u.off[c][1]);
+    m.svh     = (const uint16_t*)(b + u.off[c][2]);
+    m.bias    = (sp.bias && sp.bias[arr_idx]) ? (const uint16_t*)(b + u.off[c][3]) : nullptr;
+    return m;
+}
+
+// Process-stable upload staging (pageable: registration is one big copy per layer, wire-
+// time bound, and this must NOT compete with the worker's pinned-arena budget). Grows but
+// never shrinks, ForwardArena-style.
+static std::vector<uint8_t> g_up_stage;
+
+// Free a half-built layer's device memory and undo its budget accounting. Normal teardown
+// never frees arenas (weights stay, matching the old design and its NOTES rule).
+static void rollback_upload(Upload* u)
+{
+    if (!u) return;
+    if (u->arena) {
+        MOE_ALOG_FREE(u->arena, u->arena_bytes, "arena");
+        sycl::free(u->arena, *g.q);
+        g_alloc_bytes -= u->arena_bytes;
+        u->arena = nullptr;
+    }
 }
 
 } // namespace
@@ -261,50 +305,80 @@ static int64_t register_impl
 {
     if (!ensure_ctx()) return -1;
     std::lock_guard<std::mutex> lk(g.mu);
-    g.uploads.push_back(new Upload());
     const int E = num_experts;
     if (n_sub <= 0 || n_sub > E) n_sub = E;
     const int H = hidden, I = interm;
-    const int pu_gu = (H / 16) * (I / 16) * 8 * (2 * bits + hb);
-    const int pu_d  = (I / 16) * (H / 16) * 8 * (2 * bits + hb);
-    std::vector<moe_sycl::MatrixSrc> gs(E), us(E), ds(E);
-    g.uploads.back()->slots.assign((size_t)E * 3, {});
-    auto fill = [&](moe_sycl::MatrixSrc& m, const uint64_t* tr, const uint64_t* suh,
-                    const uint64_t* svh, const uint64_t* bias, int e, int tri_sz, int k, int n,
-                    int cat) {
-        m.trellis = upload_trellis((const uint16_t*)tr[e], tri_sz, 2 * bits + hb);
-        m.suh = (const uint16_t*)upload_u16((const uint16_t*)suh[e], (size_t)k, true);
-        m.svh = (const uint16_t*)upload_u16((const uint16_t*)svh[e], (size_t)n, true);
-        m.bias = bias && bias[e] ? (const uint16_t*)upload_u16((const uint16_t*)bias[e], (size_t)n, true) : nullptr;
-        if (!m.trellis || !m.suh || !m.svh) return false;
-        std::array<uint16_t*, 4>& sl = g.uploads.back()->slots[(size_t)e * 3 + cat];
-        sl = { (uint16_t*)m.trellis, (uint16_t*)m.suh, (uint16_t*)m.svh, (uint16_t*)m.bias };
-        return true;
-    };
-    for (int e = 0; e < n_sub; ++e) {
-        if ((gated && !fill(gs[e], gate_trellis, gate_suh, gate_svh, gate_bias, e, pu_gu, H, I, 0)) ||
-            !fill(us[e], up_trellis, up_suh, up_svh, up_bias, e, pu_gu, H, I, 1) ||
-            !fill(ds[e], down_trellis, down_suh, down_svh, down_bias, e, pu_d, I, H, 2)) {
-            // roll back this layer's device allocations and fall back to CPU for it
-            fprintf(stderr, "[b70moe] registration out of device memory; layer stays on CPU\n");
-            g.dev_full = true;
-            Upload* u = g.uploads.back();
-            for (uint16_t* p : u->keep) { MOE_ALOG_FREE(p, 0, "rollback"); sycl::free(p, *g.q); }
-            g.uploads.pop_back();
-            delete u;
-            return -1;
-        }
+    const int k2 = 2 * bits + hb;
+    Upload* u = new Upload();
+    u->n_sub = n_sub;
+    upload_layout(*u, H, I, k2, gated);
+    u->arena_bytes = (size_t)n_sub * u->block;
+    if (g.dev_full || g_alloc_bytes + u->arena_bytes > g.budget) {
+        fprintf(stderr, "[b70moe] registration out of device memory; layer stays on CPU\n");
+        g.dev_full = true;
+        delete u;
+        return -1;
     }
-    // non-members share slot 0's device buffers: a stray chunk would read finite weights
-    // instead of unmapped memory, and the table stays dense (zero kernel-side changes)
+    u->arena = (char*)sycl::malloc_device<char>(u->arena_bytes, *g.q);
+    MOE_ALOG_ALLOC(u->arena, u->arena_bytes, "arena");
+    if (!u->arena) {
+        fprintf(stderr, "[b70moe] OOM arena alloc %zu B; layer stays on CPU\n", u->arena_bytes);
+        g.dev_full = true;
+        delete u;
+        return -1;
+    }
+    g_alloc_bytes += u->arena_bytes;
+    g.uploads.push_back(u);   // owned from here: every later throw unwinds via rollback_upload
+    std::vector<moe_sycl::MatrixSrc> gs(E), us(E), ds(E);
+    const CatSrc src[3] = {
+        CatSrc{ gate_trellis, gate_suh, gate_svh, gate_bias },
+        CatSrc{ up_trellis,   up_suh,   up_svh,   up_bias   },
+        CatSrc{ down_trellis, down_suh, down_svh, down_bias },
+    };
+    try {
+        if (g_up_stage.size() < u->arena_bytes) g_up_stage.resize(u->arena_bytes);
+        char* stage = (char*)g_up_stage.data();
+        // Parallel fill: the repack is pure per-tile word reversal, independent across
+        // experts, and single-threaded it DOMINATES model load (~100 ms/layer at E=256
+        // 2bit - t44_upload phase timings). Half the cores: registration runs alongside
+        // the still-loading parent, and the copy below is wire-bound anyway.
+        const unsigned hc = std::thread::hardware_concurrency();
+        const int nthr = (int)std::max(1u, std::min<unsigned>(hc / 2, (unsigned)n_sub));
+        std::atomic<int> bad{0};
+        std::vector<std::thread> thr;
+        thr.reserve((size_t)nthr);
+        for (int t = 0; t < nthr; ++t)
+            thr.emplace_back([&, t]{   // t BY VALUE (by-reference capture = every thread
+                for (int e = t; e < n_sub && !bad.load(std::memory_order_relaxed); e += nthr)   // reads the racing loop var
+                    if (!fill_block(stage + (size_t)e * u->block, *u, src, e, k2)) bad.store(1);
+            });
+        for (auto& th : thr) th.join();
+        if (bad.load()) throw std::runtime_error("expert weights missing in arena sources");
+        // ONE contiguous H2D pass for the whole layer (the only queue op of a fill; the
+        // in-order queue + .wait keep it fully ordered against concurrent forwards)
+        g.q->memcpy(u->arena, stage, u->arena_bytes).wait();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[b70moe] registration upload failed: %s; layer stays on CPU\n", e.what());
+        g.dev_full = true;
+        rollback_upload(u);
+        g.uploads.pop_back();
+        delete u;
+        return -1;
+    }
+    for (int e = 0; e < n_sub; ++e) {
+        if (gated) gs[e] = ms_at(*u, src[0], e, e, 0);
+        us[e] = ms_at(*u, src[1], e, e, 1);
+        ds[e] = ms_at(*u, src[2], e, e, 2);
+    }
+    // non-members share block 0: a stray chunk would read finite weights instead of
+    // unmapped memory, and the table stays dense (zero kernel-side changes)
     for (int e = n_sub; e < E; ++e) { gs[e] = gs[0]; us[e] = us[0]; ds[e] = ds[0]; }
-    g.uploads.back()->n_sub = n_sub;
     moe_sycl::LayerParams p;
     p.num_experts = E; p.hidden = H; p.interm = I; p.bits = bits; p.hb = hb;
     p.activation = activation; p.act_limit = act_limit; p.gated = gated != 0;
     auto* layer = new moe_sycl::MoeSyclLayer();
     layer->init(g.q, p, gs, us, ds);
-    g.by_layer[(const void*)(intptr_t)layer] = g.uploads.back();
+    g.by_layer[(const void*)(intptr_t)layer] = u;
     fprintf(stderr, "[b70moe] registered layer: E %d (B70 tier %d), B70 weights so far %.2f GB, pool %.1f MB\n",
             E, n_sub, g_alloc_bytes / 1e9, moe_sycl::g_ws_bytes / 1e6);
     // budget gate is WEIGHTS-only by design (g_ws_bytes pool excluded): a large-prefill
@@ -351,7 +425,7 @@ int64_t b70_register_layer_n
     g.dev_full = true;
     while (g.uploads.size() > ups0) {
         Upload* u = g.uploads.back();
-        for (uint16_t* p : u->keep) sycl::free(p, *g.q);
+        rollback_upload(u);
         g.uploads.pop_back();
         delete u;
     }
@@ -402,7 +476,7 @@ int64_t b70_register_layer
     g.dev_full = true;
     while (g.uploads.size() > ups0) {
         Upload* u = g.uploads.back();
-        for (uint16_t* p : u->keep) sycl::free(p, *g.q);
+        rollback_upload(u);
         g.uploads.pop_back();
         delete u;
     }
@@ -563,40 +637,31 @@ int b70_update_expert
     if (e >= u->n_sub) return 0;   // non-member slot: arena-only, nothing published on device
     std::lock_guard<std::mutex> exec_lk(g.exec_mu);   // robust even against a violated quiesce contract
     const auto& p = layer->params();
-    const int E = p.num_experts, H = p.hidden, I = p.interm;
     const int k2 = 2 * p.bits + p.hb;
-    const int pu_gu = (H / 16) * (I / 16) * 8 * k2;
-    const int pu_d  = (I / 16) * (H / 16) * 8 * k2;
-    // the thirteen pointer arrays carry ONE expert (index 0); e selects the layer slot
-    moe_sycl::MatrixSrc nm[3];
-    if ((p.gated && !fill_one(nm[0], gate_trellis, gate_suh, gate_svh, gate_bias, 0, pu_gu, H, I, k2)) ||
-        !fill_one(nm[1], up_trellis, up_suh, up_svh, up_bias, 0, pu_gu, H, I, k2) ||
-        !fill_one(nm[2], down_trellis, down_suh, down_svh, down_bias, 0, pu_d, I, H, k2))
-    {
-        // partial upload: free the just-allocated pieces and undo their budget accounting
-        const size_t tb = (size_t)pu_gu * 2, db = (size_t)pu_d * 2;
-        for (int c = 0; c < 3; ++c)
-        {
-            const bool isg = c < 2;
-            uint16_t* x[4] = { (uint16_t*)nm[c].trellis, (uint16_t*)nm[c].suh,
-                               (uint16_t*)nm[c].svh, (uint16_t*)nm[c].bias };
-            size_t by[4] = { isg ? tb : db, (size_t)H * 2, (size_t)I * 2, (size_t)I * 2 };
-            if (c == 2) { by[1] = (size_t)I * 2; by[2] = (size_t)H * 2; by[3] = (size_t)H * 2; }
-            for (int f = 0; f < 4; ++f)
-                if (x[f]) { sycl::free(x[f], *g.q); g_alloc_bytes -= by[f]; }
-        }
+    // the thirteen pointer arrays carry ONE expert (index 0); e selects the ARENA BLOCK.
+    // The block fills in host staging first, so the device changes only via ONE in-place
+    // memcpy: no free, no realloc, no budget motion, and a fill failure keeps the previous
+    // weights byte-intact (the old path could leave a half-installed mix of old/new).
+    const CatSrc src[3] = {
+        CatSrc{ gate_trellis, gate_suh, gate_svh, gate_bias },
+        CatSrc{ up_trellis,   up_suh,   up_svh,   up_bias   },
+        CatSrc{ down_trellis, down_suh, down_svh, down_bias },
+    };
+    try {
+        if (g_up_stage.size() < u->block) g_up_stage.resize(u->block);
+        char* stage = (char*)g_up_stage.data();
+        if (!fill_block(stage, *u, src, 0, k2)) return 1;   // incomplete source: keep old weights
+        g.q->memcpy(u->arena + (size_t)e * u->block, stage, u->block).wait();
+        // data pointers are UNCHANGED by the in-place overwrite; only BIAS presence can
+        // toggle with the new tensors, so just republish the table rows (cheap, idempotent)
+        for (int c = (u->gated ? 0 : 1); c < 3; ++c)
+            layer->update_expert(c, e, ms_at(*u, src[c], 0, e, c));
+        if (moe_sycl::alog()) moe_sycl::alog_msg("UPD ok h %lld e %d block %zu", (long long)handle, e, u->block);
+        return 0;
+    } catch (const std::exception& ex) {
+        fprintf(stderr, "[b70moe] expert update threw: %s\n", ex.what());
         return 1;
     }
-    for (int c = 0; c < 3; ++c)
-    {
-        std::array<uint16_t*, 4>& sl = u->slots[(size_t)e * 3 + c];
-        for (uint16_t* old : sl) if (old) { MOE_ALOG_FREE(old, 0, "upd_free"); sycl::free(old, *g.q); }      // quiesced: safe
-        sl = { (uint16_t*)nm[c].trellis, (uint16_t*)nm[c].suh,
-               (uint16_t*)nm[c].svh, (uint16_t*)nm[c].bias };
-        for (uint16_t* x : sl) if (x) u->keep.push_back(x);
-        layer->update_expert(c, e, nm[c]);
-    }
-    return 0;
 }
 
 } // extern "C"

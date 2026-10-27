@@ -19,7 +19,8 @@ def group(pre):
     sv = (ctypes.c_uint64*E)(*[arr(f'{pre}_svh_{e}', np.float16).ctypes.data_as(ctypes.c_void_p).value for e in range(E)])
     return tr, su, sv
 gt, gs, gv = group('gate'); ut, us, uv = group('up'); dt, ds, dv = group('down')
-h = lib.b70_register_layer(E, H, I, bits, hb, 0, ctypes.c_float(0.0), 1,
+h = lib.b70_register_layer(E, H, I, bits, hb, 0, ctypes.c_float(0.0),
+                           int(meta.get('gateless', '0')) == 0,
                            gt, gs, gv, None, ut, us, uv, None, dt, ds, dv, None)
 x = arr('x'); sel = arr('sel', np.int32); w = arr('wts')
 out = np.zeros(int(meta['rows']) * H, dtype=np.float32)

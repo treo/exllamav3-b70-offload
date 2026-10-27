@@ -186,6 +186,19 @@ Methodology note (cost us a day, see NOTES.md): **never A/B with `--v`** — SYC
 event profiling inflates the 6-kernel pipeline ~40µs on this driver. Interleave runs of
 the binaries and take min-of-3 on the unprofiled median.
 
+### Plugin-ABI tools (run after ANY upload/register/change to the C ABI)
+
+```bash
+python3 test_arena_update.py ../xval_s   # byte-exact in-place install identities (T1..T3);
+                                         # the only thing that exercises b70_update_expert -
+                                         # tier guards mean model runs never install onto
+                                         # registered layers
+python3 test_arena_update.py /tmp/xval_gl # gateless too (xval_cpu.py --gateless --scalar;
+                                         # without --scalar the ref carries the real 1.4e-2
+                                         # AVX2-vs-scalar delta and 'rms 0.0138' is EXPECTED)
+python3 regbench.py ./libb70moe.so 256 6 # synthetic E=256 registration throughput, no model
+```
+
 ### Cross-validation against the real CPU extension
 
 ```bash
@@ -207,8 +220,13 @@ Notes:
   gather) + host-side layer object. Weights are stored in the **native** mul1 tile layout,
   stream-repacked at upload so a GEMV thread reads a contiguous bit window
   (`repack_native_to_stream_words`, exact bit formulas documented in the header comment).
-- `b70_lib.cpp` — the C ABI the worker dlopens (`b70_init/_register_layer/_forward/_warm/
-  _free_layer`), VRAM budget + rollback, workspace pool shared across layers.
+- `b70_lib.cpp` — the C ABI the worker dlopens (`b70_init/_register_layer_n/_forward/_warm/
+  _free_layer/_update_expert`). Weights live in ONE device ARENA per layer with a regular
+  per-expert block layout (registration = one threaded host fill + one H2D copy; a dynamic-
+  placement install is an atomic in-place block overwrite - no free, no repoint). VRAM budget
+  + rollback on that one allocation; scratch lives in the workspace pool shared across layers
+  (rebound on every forward - never cache pool pointers per layer, see NOTES 'STALE POOL
+  POINTER').
 - Hooks on the exllamav3 side: `exllamav3_ext/cpu/moe_mul1.cpp` (`B70Backend`, forward
   redirect, native-layout swizzle gate) and one `int64_t b70` field in `moe_mul1.h`.
 - `NOTES.md` — the full debug/optimization log: tile bit-layout derivation, the queue
