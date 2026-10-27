@@ -21,6 +21,7 @@ using namespace moe_sycl;
 struct Args
 {
     int E = 16, rows = 1, topk = 10, bits = 2, hb = 0, act = 0, iters = 50;
+    double skew = 0.0;   // >0: zipf(rank^-skew) expert selection (worker-skew repro)
     bool gated = true, check = true, verbose = false, i8trace = false, bare = false;
     uint64_t seed = 7;
     const char* load = nullptr;
@@ -512,6 +513,7 @@ int main(int argc, char** argv)
         else if (s == "--topk") a.topk = val();
         else if (s == "--bits") a.bits = val();
         else if (s == "--hb") a.hb = val();
+        else if (s == "--skew") a.skew = i + 1 < argc ? atof(argv[++i]) : 0.0;
         else if (s == "--act") a.act = val();
         else if (s == "--iters") a.iters = val();
         else if (s == "--nocheck") a.check = false;
@@ -687,6 +689,54 @@ int main(int argc, char** argv)
     for (auto& v : hx) v = exl3ref::f32_to_f16(rng.uniform(-2.f, 2.f));
     std::vector<int> sel((size_t)rows * topk);
     std::vector<uint16_t> wts((size_t)rows * topk);
+    if (a.skew < 0.0)
+    {
+        // degenerate repro (skew<0, use with --nocheck): all-parent-owned job, exactly
+        // what a fully-streamed prefill slice produces for the worker -> empty chunk set
+        // in b70_lib forward_impl. Checks whether the chunks.empty() path corrupts
+        // (stale dout) or faults.
+        for (size_t i = 0; i < sel.size(); ++i) { sel[i] = -1; wts[i] = exl3ref::f32_to_f16(0.5f); }
+    }
+    else if (a.skew > 0.0)
+    {
+        // zipf over expert ranks: reproduces the skewed per-expert m distribution an
+        // unseeded placement produces (hot experts worker-side). Distinct per token
+        // via bounded redraw; a token that stays stuck falls back to uniform draws.
+        std::vector<double> cdf(a.E);
+        double acc = 0.0;
+        for (int i = 0; i < a.E; ++i) acc += 1.0 / std::pow((double)i + 1.0, a.skew);
+        double run = 0.0;
+        for (int i = 0; i < a.E; ++i) { run += (1.0 / std::pow((double)i + 1.0, a.skew)) / acc; cdf[i] = run; }
+        for (int t = 0; t < rows; ++t)
+        {
+            int j = 0, guard = 0;
+            while (j < topk && guard < topk * 64)
+            {
+                ++guard;
+                const double u = (double)rng.next() / 18446744073709551616.0;
+                int e = (int)(std::lower_bound(cdf.begin(), cdf.end(), u) - cdf.begin());
+                if (e >= a.E) e = a.E - 1;
+                bool dup = false;
+                for (int k = 0; k < j; ++k) if (sel[(size_t)t * topk + k] == e) { dup = true; break; }
+                if (dup) continue;
+                sel[(size_t)t * topk + j] = e;
+                wts[(size_t)t * topk + j] = exl3ref::f32_to_f16(rng.uniform(0.05f, 1.f));
+                ++j;
+            }
+            if (j < topk)   // pathological: fill rest from a shuffled tail (uniform)
+            {
+                std::vector<int> pool(a.E);
+                for (int i = 0; i < a.E; ++i) pool[i] = i;
+                for (int i = j; i < topk; ++i)
+                {
+                    std::swap(pool[i], pool[i + rng.next() % (a.E - i)]);
+                    sel[(size_t)t * topk + i] = pool[i];
+                    wts[(size_t)t * topk + i] = exl3ref::f32_to_f16(rng.uniform(0.05f, 1.f));
+                }
+            }
+        }
+    }
+    else
     for (int t = 0; t < rows; ++t) {
         // distinct experts per token
         std::vector<int> pool(a.E);

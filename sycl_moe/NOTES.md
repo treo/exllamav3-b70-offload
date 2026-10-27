@@ -1045,3 +1045,20 @@ only SKEW reaches (large per-expert m => deep chunk chains per expert, nc up to 
 DEFAULT RESTORED TO 128. Next move: --skew (zipf) assignment mode in bench_layer to
 reproduce standalone, then bisect EXL3_MOE_I8RING=0/1 and slim; suspect a8/qsx or ring
 copy addressing when chunk slots per expert >> warm-case counts.
+
+## Fault forensics round 2 + poison latch (the hang is DEAD, the fault is alive)
+- NOT memory pressure: 17.78 GiB constant at fault (user-measured), budget 0.35 still
+  faults => address/context fault in float-tier 512-row jobs under (only partly modeled)
+  skew; bench cannot reproduce even at zipf 3.0 (single-layer, serial). Pipeline-only
+  ingredients remain: 48 layers + ring staging + multi-thread job arrival.
+- THE FIX THAT MATTERS REGARDLESS (b70_lib): g.poison latch. First forward exception
+  latches the plugin; every later forward returns 3 instantly (never touches the dead
+  queue). Completion wait is bounded (15 s deadline polling
+  get_info<command_execution_status>; DPC++ has no event::poll/timed wait_and_throw).
+  Verified on the previously-UNHELLABLE config (fresh+float+512): one fault, clean
+  pinning cascade, full eval completes (exit 0). Before: infinite parent spin.
+- Cap default stays 128 (clean everywhere incl. all fresh-profile arms). 512 is safe on
+  the h6 float tier (x268/x268_512/y405_512b: hundreds of 512-row float jobs clean) and
+  on ANY model with warmed profiles + int8; forbidden regime today = h4 shapes, fresh
+  placement, big jobs. bench_layer gained --skew <exp> (zipf selection; <0 = all-minus-1
+  degenerate job probe).

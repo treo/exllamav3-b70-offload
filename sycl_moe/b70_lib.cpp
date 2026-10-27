@@ -17,6 +17,9 @@
 #include <stdexcept>
 #include <vector>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <unordered_map>
 #include "moe_sycl.hpp"
 using moe_sycl::g_alloc_bytes;
@@ -46,6 +49,12 @@ struct Global
     // forwards start mid-load). Lock order: g.mu -> exec_mu (register/update hold mu and
     // reach warm; the forward path takes exec_mu only).
     std::mutex exec_mu;
+    // Poison latch: after any device fault (UR_RESULT_ERROR_DEVICE_LOST and friends) the
+    // queue is dead - every later submit hangs or throws, and a compute thread stuck in a
+    // dead-queue wait never sets the job's done flag => the parent spins forever (observed
+    // hang at EXL3_MOE_CPU_SLOT_ROWS=512). Once poisoned, forwards fail instantly so the
+    // worker pins layers to CPU and jobs complete.
+    std::atomic<bool> poison{false};
     std::vector<Upload*> uploads;
     bool ok = false;
     size_t budget = ~(size_t)0;  // device bytes we allow ourselves to hold
@@ -202,16 +211,20 @@ static void forward_impl(int64_t, const void*, const int32_t*, const void*, floa
 // Wraps forward_impl: 0 = ok, nonzero = device failure (caller falls back to CPU).
 int b70_forward(int64_t handle, const void* x, const int32_t* sel, const void* w, float* out, int rows, int topk)
 {
+    if (g.poison.load(std::memory_order_relaxed)) return 3;   // device dead: instant fail, never touch the queue
     try {
         forward_impl(handle, x, sel, w, out, rows, topk);
         return 0;
     } catch (const sycl::exception& e) {
         fprintf(stderr, "[b70moe] forward sycl error: %s\n", e.what());
+        g.poison.store(true);
         return 1;
     } catch (const std::exception& e) {
         fprintf(stderr, "[b70moe] forward error: %s\n", e.what());
+        g.poison.store(true);
         return 1;
     } catch (...) {
+        g.poison.store(true);
         return 1;
     }
 }
@@ -482,7 +495,28 @@ static void forward_impl
     if (!chunks.empty())
         e_done = layer->forward(chunks.data(), (int)chunks.size(), tmap, d_x, d_out, rows, &e_x);
     sycl::event e_rd = g.q->memcpy(g_stage.stage, d_out, (size_t)rows * H * 4, {e_done});
-    e_rd.wait();
+    // bounded completion: a kernel wedged on a dead context must not strand the worker
+    // thread holding exec_mu (parent would spin on the job's done flag forever).
+    // sycl::event has no timed wait in DPC++ - poll with a deadline.
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto dl = t0 + std::chrono::milliseconds(15000);
+        while (e_rd.get_info<sycl::info::event::command_execution_status>()
+               != sycl::info::event_command_status::complete)
+        {
+            if (std::chrono::steady_clock::now() > dl)
+            {
+                g.poison.store(true);
+                throw std::runtime_error("b70 forward completion timeout (device wedged)");
+            }
+            // fine grain first (decode jobs finish in ~0.2 ms; a 500us poll quantum would
+            // add it to EVERY layer job), coarse after 5 ms where the wait is no longer
+            // on any critical path we care about
+            const bool early = (std::chrono::steady_clock::now() - t0) < std::chrono::milliseconds(5);
+            std::this_thread::sleep_for(early ? std::chrono::microseconds(20)
+                                              : std::chrono::microseconds(500));
+        }
+    }
     memcpy(out, g_stage.stage, (size_t)rows * H * 4);
     g_last_ev = e_rd;
 }
