@@ -986,3 +986,23 @@ Every model on every axis this session (best measured, pre/dec):
    update+evict protocol): the only way to beat 748-era prefill WITH the decode gains;
    real cache-protocol work, next-tier effort.
 5. MAXM 16/32 wide prefill tier: still valid, orthogonal, separate instantiations only.
+
+## L0 native submission: how far the probe got (t42/t43 + arg-count probes)
+VERIFIED on the PRODUCTION TU (not toy kernels):
+1. moe_sycl.cpp -c -save-temps -> sycl-post-link -ir-output-only -spec-const=native ->
+   llvm-spirv -spirv-ext=+SPV_KHR_cooperative_matrix => VALID 243KB SPV; the erff
+   undefined-symbol warning is harmless (zeModuleCreate accepts the module; 27 kernels,
+   names are _ZTS... mangled, strstr-selectable). Completion via plain q.wait().
+2. Functor kernel ABI via zeKernelSetArgumentValue probing: args are EXACTLY
+   {captured ptrs..., by-value capture struct, local_accessor as one 8B ptr}; nd_item
+   adds NO visible args; WithArguments validates count strictly (short array = memmove
+   segfault INSIDE NEO - never probe counts by crashing).
+3. BLOCKER = SLM binding for the accessor arg: module metadata says localMemSize=0;
+   any host/device pointer passed as the local arg does NOT bind shared memory (kernel
+   completes rc=0, writes vanish), nullptr + barriers deadlocks the queue. The SYCL
+   runtime clearly uses driver-internal local binding invisible on the public ze surface.
+   NEXT STEP (sanest path first): build an SPV variant with -DMOE_L0_NO_SLM that points
+   the band/ring slabs at per-layer GLOBAL USM scratch (kernels become pure-global,
+   trivially WithArguments-launchable; slim-path bands are tiny so SLM->global cost
+   should be small - MEASURE on bench shapes); only if that regresses, reverse-engineer
+   the UR/L0 KernelImp local-arg trick. Upside if achieved: ~20-45us/layer x 48 decode.
