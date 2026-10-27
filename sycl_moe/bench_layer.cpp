@@ -23,6 +23,7 @@ struct Args
     int E = 16, rows = 1, topk = 10, bits = 2, hb = 0, act = 0, iters = 50;
     double skew = 0.0;   // >0: zipf(rank^-skew) expert selection (worker-skew repro)
     bool gated = true, check = true, verbose = false, i8trace = false, bare = false;
+    int alt = 0;   // --alt N: alternate two x datasets for N forwards, check each (coop visibility stress)
     uint64_t seed = 7;
     const char* load = nullptr;
 };
@@ -518,6 +519,7 @@ int main(int argc, char** argv)
         else if (s == "--iters") a.iters = val();
         else if (s == "--nocheck") a.check = false;
         else if (s == "--bare") a.bare = true;
+        else if (s == "--alt") a.alt = val();
         else if (s == "--gateless") a.gated = false;
         else if (s == "--v") a.verbose = true;
         else if (s == "--i8trace") a.i8trace = true;
@@ -602,8 +604,9 @@ int main(int argc, char** argv)
         std::vector<std::vector<std::pair<int, float>>> per_expert(E);
         for (int t = 0; t < rows; ++t)
             for (int j = 0; j < topk; ++j)
-                per_expert[sel2[(size_t)t * topk + j]].emplace_back(
-                    t, exl3ref::f16_to_f32(wts2[(size_t)t * topk + j]));
+                if (sel2[(size_t)t * topk + j] >= 0)   // --skew -1: inactive (parent-owned) pick
+                    per_expert[sel2[(size_t)t * topk + j]].emplace_back(
+                        t, exl3ref::f16_to_f32(wts2[(size_t)t * topk + j]));
         std::vector<ChunkDev> chunks;
         for (int e = 0; e < E; ++e) {
             auto& lst = per_expert[e];
@@ -757,6 +760,7 @@ int main(int argc, char** argv)
     std::vector<std::vector<std::pair<int, float>>> per_expert(a.E);
     for (int t = 0; t < rows; ++t)
         for (int j = 0; j < topk; ++j)
+            if (sel[(size_t)t * topk + j] >= 0)   // --skew -1: inactive (parent-owned) pick
             per_expert[sel[(size_t)t * topk + j]].emplace_back(
                 t, exl3ref::f16_to_f32(wts[(size_t)t * topk + j]));
     std::vector<ChunkDev> chunks;
@@ -851,7 +855,7 @@ int main(int argc, char** argv)
     // per-stage check: recompute stage 0..4 for chunk 0 row 0 from the reference,
     // and locate the first stage whose device output disagrees.
     // (float-tier buffers only: the int8 tier never writes tout/toutd, skip there)
-    if (a.check && a.gated && a.act == 0 && !layer.int8_active) {
+    if (a.check && a.gated && a.act == 0 && !layer.int8_active && !rchunks.empty()) {
         const auto& ch = rchunks[0];
         const int j = 0, r = 0;
         const int e = ch.expert;
@@ -1028,6 +1032,169 @@ int main(int argc, char** argv)
         } else if (max_rel > 2e-3) { printf("MISMATCH\n"); return 1; }
     }
 
+    // ---------------------------------------------------- alternating-dataset visibility stress
+    // Counter-fed fused kernels read cross-WG data written EARLIER IN THE SAME LAUNCH; a
+    // static bench dataset cannot expose a missing stale-L1 bypass (the previous
+    // iteration's bytes are the correct bytes). Alternate two different x datasets and
+    // verify EVERY output against its own host reference.
+    if (a.alt > 0 && a.check) {
+        std::vector<uint16_t> hxB(hx.size());
+        for (auto& v : hxB) v = exl3ref::f32_to_f16(rng.uniform(-2.f, 2.f));
+        uint16_t* dxB = sycl::malloc_device<uint16_t>(hxB.size(), q);
+        q.memcpy(dxB, hxB.data(), hxB.size() * 2).wait();
+        std::vector<float> refA(got.size()), refB(got.size());
+        moe_ref::forward(L, rchunks, hx.data(), rows, refA.data());
+        moe_ref::forward(L, rchunks, hxB.data(), rows, refB.data());
+        double worst = 0; int bad = 0;
+        static const int altdup = []{ const char* e = getenv("MOE_ALTDUP"); return e ? atoi(e) : 1; }();
+        // CRITICAL (NOTES bug #8 reproduced): consecutive forwards MUST be chained through
+        // forward()'s pre_dep like b70_forward does with g_last_ev. On this stack the
+        // implicit in-order ordering between q.memcpy and q.submit is NOT enforced, so an
+        // unchained alt loop lets forward N+1's blob H2D (which zero-inits the arrival
+        // counters!) race with forward N's still-running kernels. With the GU fusion the
+        // counters are consumed at kernel 2 of 4 (vs the last kernel in the split path),
+        // turning a narrow historical window into a deterministic failure. Symptom that
+        // nails it: `out` byte-identical to the PREVIOUS dataset (epilogue never fired),
+        // and every host-syncing probe (extra memset/memcpy in the chain) making it pass.
+        sycl::event chain = e_fw;   // continue from the check forward's last event
+        for (int i = 0; i < a.alt; ++i) {
+            const bool b1 = (i / altdup) & 1;
+            sycl::event ef = layer.forward(chunks.data(), (int)chunks.size(), tmap, b1 ? dxB : dx, dout, rows, &chain);
+            std::vector<float> g(got.size());
+            chain = q.memcpy(g.data(), dout, g.size() * 4, {ef});
+            chain.wait();
+            if (i <= 3 && a.gated && a.act == 0 && !rchunks.empty() && getenv("EXL3_MOE_STAGEPROBE")) {
+                // external stage readback: recompute reference tout (raw gemv) and tind
+                // (act+prep_d) for chunk 0 / row 0 and compare against the device ws
+                const auto& ch0 = rchunks[0];
+                const uint16_t* xcur = b1 ? hxB.data() : hx.data();
+                std::vector<float> xr(H), tin_r((size_t)std::max(H, I)), tg_r(I), tu_r(I);
+                for (int k = 0; k < H; ++k) xr[k] = exl3ref::f16_to_f32(xcur[(size_t)ch0.token[0] * H + k]);
+                moe_ref::prep_row(xr.data(), L.gates[ch0.expert].suh.data(), H, tin_r.data());
+                moe_ref::gemv_raw(L, L.gates[ch0.expert], tin_r.data(), 1, tg_r.data());
+                moe_ref::prep_row(xr.data(), L.ups[ch0.expert].suh.data(), H, tin_r.data());
+                moe_ref::gemv_raw(L, L.ups[ch0.expert], tin_r.data(), 1, tu_r.data());
+                // transform + act + prep_d for row 0 (mirrors K34)
+                std::vector<float> gtu(I);
+                for (int blk = 0; blk < I; blk += 128) {
+                    std::vector<float> gh(tg_r.begin() + blk, tg_r.begin() + blk + 128);
+                    std::vector<float> uh(tu_r.begin() + blk, tu_r.begin() + blk + 128);
+                    moe_ref::hadamard_128(gh.data()); moe_ref::hadamard_128(uh.data());
+                    for (int k = 0; k < 128; ++k) {
+                        const float gv = gh[k] * exl3ref::HAD_SCALE * exl3ref::f16_to_f32(L.gates[ch0.expert].svh[blk + k]);
+                        const float uv = uh[k] * exl3ref::HAD_SCALE * exl3ref::f16_to_f32(L.ups[ch0.expert].svh[blk + k]);
+                        uh[k] = (gv / (1.f + std::exp(std::min(-gv, 80.f)))) * uv;
+                    }
+                    for (int k = 0; k < 128; ++k) gh[k] = uh[k] * exl3ref::f16_to_f32(L.downs[ch0.expert].suh[blk + k]);
+                    moe_ref::hadamard_128(gh.data());
+                    for (int k = 0; k < 128; ++k) gtu[blk + k] = gh[k] * exl3ref::HAD_SCALE;
+                }
+                // device sums, mirroring the kernel's slice reduction (ascending qq)
+                const int nq = layer.nslgu_dbg;
+                std::vector<float> tgsum(I, 0.f), tusum(I, 0.f), devTind(I), tmp(I);
+                for (int qq = 0; qq < nq; ++qq) {   // gate slot j=0, mu=0
+                    q.memcpy(tmp.data(), layer.ws(1) + (size_t)qq * 8 * I, I * 4).wait();
+                    for (int k = 0; k < I; ++k) tgsum[k] += tmp[k];
+                }
+                for (int qq = 0; qq < nq; ++qq) {   // up slot = gemv slot index 1 (j*2+mu, j=0 mu=1)
+                    q.memcpy(tmp.data(), layer.ws(1) + (size_t)(nq + qq) * 8 * I, I * 4).wait();
+                    for (int k = 0; k < I; ++k) tusum[k] += tmp[k];
+                }
+                q.memcpy(devTind.data(), layer.ws(3), I * 4).wait();
+                // ALL-chunks tind sweep: compare device tind[j][0] against a full host
+                // recompute per chunk (row 0 only; decode shapes have m=1 per chunk here)
+                int tbad = 0; size_t tj = 0; int tk0 = 0; double tworstj = 0;
+                for (size_t j = 0; j < rchunks.size(); ++j) {
+                    const auto& ch = rchunks[j];
+                    if (ch.m < 1) continue;
+                    for (int k = 0; k < H; ++k) xr[k] = exl3ref::f16_to_f32(xcur[(size_t)ch.token[0] * H + k]);
+                    std::vector<float> tgv(I), tuv(I), hgv(I);
+                    if (a.gated) {
+                        moe_ref::prep_row(xr.data(), L.gates[ch.expert].suh.data(), H, tin_r.data());
+                        moe_ref::gemv_raw(L, L.gates[ch.expert], tin_r.data(), 1, tgv.data());
+                    }
+                    moe_ref::prep_row(xr.data(), L.ups[ch.expert].suh.data(), H, tin_r.data());
+                    moe_ref::gemv_raw(L, L.ups[ch.expert], tin_r.data(), 1, tuv.data());
+                    if (!a.gated) tgv = tuv;
+                    for (int blk = 0; blk < I; blk += 128) {
+                        std::vector<float> gh(tgv.begin() + blk, tgv.begin() + blk + 128);
+                        std::vector<float> uh(tuv.begin() + blk, tuv.begin() + blk + 128);
+                        moe_ref::hadamard_128(gh.data()); moe_ref::hadamard_128(uh.data());
+                        for (int k = 0; k < 128; ++k) {
+                            const float gv = gh[k] * exl3ref::HAD_SCALE * exl3ref::f16_to_f32(L.gates[ch.expert].svh[blk + k]);
+                            const float uv = uh[k] * exl3ref::HAD_SCALE * exl3ref::f16_to_f32(L.ups[ch.expert].svh[blk + k]);
+                            uh[k] = (gv / (1.f + std::exp(std::min(-gv, 80.f)))) * uv;
+                        }
+                        for (int k = 0; k < 128; ++k) gh[k] = uh[k] * exl3ref::f16_to_f32(L.downs[ch.expert].suh[blk + k]);
+                        moe_ref::hadamard_128(gh.data());
+                        for (int k = 0; k < 128; ++k) hgv[blk + k] = gh[k] * exl3ref::HAD_SCALE;
+                    }
+                    std::vector<float> devj(I);
+                    q.memcpy(devj.data(), layer.ws(3) + j * 8 * (size_t)I, I * 4).wait();
+                    for (int k = 0; k < I; ++k) {
+                        const double dd = std::fabs(hgv[k] - devj[k]) / (std::fabs(hgv[k]) + 1e-3);
+                        if (dd > 2e-3) { if (!tbad) { tj = j; tk0 = k; tworstj = dd; } ++tbad; }
+                        else if (tbad == 1 && dd > tworstj) { tj = j; tk0 = k; tworstj = dd; }
+                    }
+                }
+                std::printf("tind-allchunks: bad_values %d (first j %zu col %d rel %.3e)\n", tbad, tj, tk0, tworstj);
+                double wg2 = 0, wu = 0, wd = 0, gi2 = 0, ui2 = 0, wdd = 0;
+                for (int k = 0; k < I; ++k) {
+                    const double dg = std::fabs(tg_r[k] - tgsum[k]) / (std::fabs(tg_r[k]) + 1e-3);
+                    const double du = std::fabs(tu_r[k] - tusum[k]) / (std::fabs(tu_r[k]) + 1e-3);
+                    const double dd = std::fabs(gtu[k] - devTind[k]) / (std::fabs(gtu[k]) + 1e-3);
+                    if (dg > wg2) { wg2 = dg; gi2 = k; }
+                    if (du > wu) { wu = du; ui2 = k; }
+                    if (dd > wd) { wd = dd; wdd = k; }
+                }
+                std::printf("stageprobe i%d: tout_g rel %.3e @%d (ref %.5f dev %.5f) | tout_u rel %.3e @%d | tind rel %.3e @%d (ref %.5f dev %.5f)\n",
+                            i, wg2, (int)gi2, tg_r[(int)gi2], tgsum[(int)gi2], wu, (int)ui2, wd, (int)wdd, gtu[(int)wdd], devTind[(int)wdd]);
+            }
+            if (i == 1 && getenv("EXL3_MOE_B70_CTRDBG")) {
+                int dbgv[2];
+                layer.read_dbg(dbgv);
+                std::printf("epilogue fires: gu %d (want %d)  d-l2 %d (want %d)\n",
+                            dbgv[0], (int)chunks.size() * (I / 128), dbgv[1], rows * (H / 128));
+            }
+            if (i == 1 && getenv("EXL3_MOE_B70_CTRDBG")) {
+                const size_t nb = layer.ctr_bytes_dbg;
+                if (nb) {
+                    std::vector<int> c(nb / 4);
+                    layer.peek(c.data(), (const char*)layer.blob() + layer.ctr_offset(), nb);
+                    int hist[24] = {};
+                    for (int v : c) hist[v < 24 ? v : 23]++;
+                    printf("ctr hist: ");
+                    for (int k = 0; k < 24; ++k) if (hist[k]) printf("%d:%d ", k, hist[k]);
+                    printf("(cells %zu)\n", c.size());
+                }
+            }
+            const std::vector<float>& ref = b1 ? refB : refA;
+            if (i == 1 && getenv("EXL3_MOE_STAGEPROBE")) {
+                for (int k = 0; k < 6; ++k)
+                    std::printf("out[%d] ref %.6f got %.6f\n", k, ref[k], g[k]);
+                // is got perhaps the OTHER dataset's out? (stale-from-prev-forward test)
+                const std::vector<float>& other = b1 ? refA : refB;
+                int match_other = 0;
+                for (size_t k = 0; k < g.size(); ++k)
+                    if (std::fabs(other[k] - g[k]) < 1e-3 * (std::fabs(other[k]) + 1e-3)) ++match_other;
+                std::printf("got matches OTHER dataset in %d / %zu columns\n", match_other, g.size());
+            }
+            for (size_t k = 0; k < g.size(); ++k) {
+                const double d = std::fabs((double)ref[k] - g[k]);
+                const double r = d / (std::fabs((double)ref[k]) + 1e-3);
+                // staleness detector, not a precision gate: float tier uses 2e-3 rel; the
+                // int8 tier legitimately deviates ~1.3e-3 rms / ~1e-2 rel on cancelling
+                // columns (documented band) - stale outputs are O(1) wrong and still trip
+                // this. The precision gate proper is the check/MISMATCH block above.
+                if (r > (layer.int8_active ? 5e-2 : 2e-3)) ++bad;
+                if (r > worst) worst = r;
+            }
+        }
+        printf("alt-stress: iters %d worst_rel %.3e bad %d\n", a.alt, worst, bad);
+        sycl::free(dxB, q);
+        if (bad) { printf("ALT MISMATCH\n"); return 1; }
+    }
+
     // ---------------------------------------------------- bench
     // warmup
     layer.prof = a.verbose;
@@ -1044,6 +1211,7 @@ int main(int argc, char** argv)
     }
     if (a.verbose) {
         const char* names[6] = {"K1 prep_gu", "K2 gemv_gu", "K34 act+prep_d", "K5 gemv_d", "K6 gather", "-"};
+        const char* namc[6] = {"K1 prep_gu", "K2 gemv_gu", "K34 act+prep_d", "K56 coop-dn", "-", "-"};
         const char* n8u[8] = {"K1 prep_gu", "Q1 quant_u", "G2 gemv8_gu", "K34i8 act", "Q2 quant_d",
                               "G5 gemv8_d", "memset out", "K6i8 gather"};
         const char* n8f[7] = {"Q1f p+quant", "G2 gemv8_gu", "K34i8 act", "Q2 quant_d",
@@ -1052,11 +1220,12 @@ int main(int argc, char** argv)
         auto& evs = layer.events();
         uint64_t prev_end = 0;
         const bool f8 = layer.int8_active, fused = layer.i8fuse() != 0;
-        const size_t kev = f8 ? (fused ? 7u : 8u) : 6u;
+        const bool fc = !f8 && layer.coop_active() != 0;
+        const size_t kev = f8 ? (fused ? 7u : 8u) : (fc ? 4u : 6u);
         for (size_t kk = 1; kk < evs.size() && kk <= kev; ++kk) {
             uint64_t st = evs[kk].get_profiling_info<sycl::info::event_profiling::command_start>();
             uint64_t en = evs[kk].get_profiling_info<sycl::info::event_profiling::command_end>();
-            printf("  %-12s span %8.1f  gap %8.1f\n", f8 ? (fused ? n8f[kk - 1] : n8u[kk - 1]) : names[kk - 1],
+            printf("  %-12s span %8.1f  gap %8.1f\n", f8 ? (fused ? n8f[kk - 1] : n8u[kk - 1]) : (fc ? namc[kk - 1] : names[kk - 1]),
                 (double)(en - st) * 1e-3, prev_end ? (double)(st - prev_end) * 1e-3 : 0.0);
             prev_end = en;
         }

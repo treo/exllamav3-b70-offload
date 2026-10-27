@@ -92,7 +92,8 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `EXL3_MOE_B70_LIB` | Path to `libb70moe.so` (default `libb70moe.so` on the loader path). Set by `env.sh`. |
 | `EXL3_MOE_B70_BUDGET` | Fraction of GPU VRAM the plugin may hold weights in (default `0.82`; the plugin also needs room for per-forward workspaces — if forwards start faulting, lower it). Layers past the budget register-fail and stay on CPU — this is safe and automatic. |
 | `EXL3_MOE_B70_SUB` | Three-tier placement: keep only the first `n` (or fraction `f<1.0`) experts of EVERY layer device-resident on the B70; the coldest slots of every layer fall back to CPU/RAM compute (arena + streaming). `auto` = defer all B70 registrations to worker start, then size every tier as the fair share of the remaining device budget across the (now known) layer count. Recommended for models whose expert set exceeds both GPUs (2.68bpw: +43% prefill, +12% decode vs classic; 4.05bpw: pair with `EXL3_MOE_STREAM_T=4..6`). `Unset = full-slice registration (classic whole-layer tier). Hot experts then live on the B70 across all layers instead of a prefix of layers owning everything. The parent respects the tier: pinned-arena streaming and promote-on-miss only target CPU-tier slots, so `-mcpa` no longer steals B70 work. |
-| `MOE_NSL=0..8` | Override the split-K degree of the GEMV kernels (default: auto per matrix class). Tuning knob for experiments. |
+| `MOE_NSL=0..8` | Override the split-K degree of the GEMV kernels (default: auto per matrix class). Tuning knob for experiments. `EXL3_MOE_NSLG`/`EXL3_MOE_NSLD` set the float tier's gate/up and down degrees separately. |
+| `EXL3_MOE_B70_COOP` | `0` disables the counter-fed fused DOWN kernel (float tier, `rows<=8`, compile-time-specialized rates: K5+K6 in ONE launch with CUDA-`exl3_moe_coop`-style arrival counters; `NSL_D=1` keeps the row sum in registers, no float atomics, summation order bit-stable vs the split path). Default on: ~-11us per decode forward (C-ABI 113→101 us on the xval shape). Sub-switches: `EXL3_MOE_B70_COOPDN=0` restores classic K5+K6; `EXL3_MOE_B70_COOPGU=1` opts into the parked (currently ~neutral) K2+K34 fusion. |
 | `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
 | `EXL3_MOE_B70_OVERLAP` | `0` disables prefill-size mixed-job overlap (B70 half on a borrowed thread while the CPU pool works the other half; default on for `rows>=16`, sequential for decode sizes). 0-4% prefill on 4.05bpw (noise-bound), neutral elsewhere. |
 | `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows). ALL eleven contract rates (K2∈{2,3,4,5,6,7,8,10,12,14,16}, halves only ≤3.5 — see NOTES 'bitrate contract') are compile-time specialized on both tiers; out-of-contract rates fall to the runtime float `GemvFallback`, never a fault. |
@@ -216,10 +217,14 @@ Notes:
 
 ## Design map (for hacking on it)
 
-- `moe_sycl.{hpp,cpp}` — the six kernels (prep_gu, gemv_gu, act+prep_d fused, gemv_d,
-  gather) + host-side layer object. Weights are stored in the **native** mul1 tile layout,
+- `moe_sycl.{hpp,cpp}` — the pipeline kernels (prep_gu, gemv_gu, act+prep_d fused, gemv_d,
+  gather; in coop float mode `CoopDownK` merges gemv_d+gather into one counter-fed launch)
+  + host-side layer object. Weights are stored in the **native** mul1 tile layout,
   stream-repacked at upload so a GEMV thread reads a contiguous bit window
   (`repack_native_to_stream_words`, exact bit formulas documented in the header comment).
+  Coop arrival counters live in the control blob (zeroed by its H2D and re-zeroed by K1
+  on the render engine); same-launch cross-WG reads use device-scope relaxed atomic loads
+  (`coop_load` - the annotated_ptr read_hint form never demonstrated L1 bypass here).
 - `b70_lib.cpp` — the C ABI the worker dlopens (`b70_init/_register_layer_n/_forward/_warm/
   _free_layer/_update_expert`). Weights live in ONE device ARENA per layer with a regular
   per-expert block layout (registration = one threaded host fill + one H2D copy; a dynamic-

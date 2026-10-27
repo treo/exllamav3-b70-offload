@@ -1328,3 +1328,102 @@ DOWN(+transform+gather chained) + D2H):
     preferred, same trick as K6 owner-gather); counter reset protocol across forwards
     (monotonic epoch counters, never zero-and-reuse); grid oversize is free on Xe (early
     exit blocks cost one dispatch slot).
+
+## Counter-fed fused DOWN (float tier) SHIPPED + the polling-quantum discovery (2026-10-27/28)
+
+WHAT SHIPPED (EXL3_MOE_B70_COOP default ON; float tier, specialized rates, rows<=8):
+- CoopDownK = K5+K6 in ONE launch, CUDA exl3_moe_coop doctrine (arrival counters, no
+  barriers, no cooperative grid). Default NSL_D=1 register-accumulator variant: the
+  single slice's gemv exit IS the full k-sum, so toutd never goes to global, there is
+  ONE counter tier (ctr2 per (token,128-col blk)), one it.barrier(global) per
+  transformer, and the last entry-arrival sums tsw rows in ASCENDING entry order and
+  writes `out` - the old K6's exact accumulation order (the NSL>1 two-tier fallback
+  keeps slice-slot sums in fixed order too; zero float atomics anywhere).
+- Zero-entry tokens are written by tail owner WGs (grid += rows*nbk); the nc==0
+  degenerate job needs NO memset command anymore (bench --skew -1 covers it; also
+  fixed: grow_p(size 0) threw fake-OOM, and bench chunkers indexed per_expert[-1]).
+- Counters ride the control blob (host zeroes the zone; blob H2D precedes consumers)
+  AND K1 re-zeroes them on the render engine (extra grid rows) - belt-and-braces after
+  the cross-engine scare below (turned out to be harness races, but the render-side
+  reset costs ~nothing and makes the first-arrival-vs-DMA question moot by
+  construction).
+- had128_strided: barrier-free 128-pt sequentia Hadamard in a 16-lane sub-group,
+  v[p]=index 16p+lane (widths 1..8 -> lane-xor shuffles, 16..64 -> in-register slot
+  xors). BIT-EXACT vs the SLM version (level order and per-pair ops identical) - the
+  fused battery prints byte-identical max/rms to the split path. ~90 ALU/shuffle vs 8
+  group barriers per transformed row.
+- coop_load (same-launch cross-WG reads) = device-scope relaxed atomic load, NOT the
+  annotated_ptr read_hint spelling (see traps - the hint form is unproven here; and a
+  static-data bench CANNOT see missing L1 bypasses, use --alt).
+- CoopGuK (K2+K34 fused via ctrG per (chunk,blk)): implemented, bit-identical, battery
+  green, but parked DEFAULT OFF (EXL3_MOE_B70_COOPGU=1 to enable): on the C-ABI decode
+  shape it is at best a wash (D-fused 98.9 vs D+GU 100.6 at NSLG=2; at auto NSLG=7
+  101.5 vs 109). The arrival+fence tax scales with unit count (nc*nm*nbk*NSL_GU) and
+  the epilogue tail serializes the fused kernel's end. A strided-network GU epilogue
+  (2 barriers + 3 networks) shipped in the parked variant too.
+- b70_lib: wake-first bounded completion - yield-spin <1ms, 100us sleeps <5ms, 500us
+  after, 15s poison deadline unchanged. EXL3_MOE_B70_WAIT=1 = plain event .wait() (lab).
+- bench_layer: --alt N alternating-dataset stress (chains via pre_dep like production -
+  see traps), MOE_ALTDUP for A,A,B,B patterns, EXL3_MOE_STAGEPROBE external tout/tind
+  readbacks incl. all-chunks tind vs host recompute, EXL3_MOE_B70_CTRDBG epilogue-fire
+  counters, int8-aware alt threshold, per-kernel EXL3_MOE_NSLG/NSLD float overrides.
+
+MEASURED (sustained min-of-3 unless noted; float rows=1 E12 topk10):
+- bench split 170.2 -> coop-D 158.8 (-6.7%). NSL_D=1 is part of the win (split@NSLD=1
+  is 160.3, so fusion nets ~1.5 in bench but see C-ABI).
+- C-ABI (bench_b70_py, xval_s, post polling-fix): SPLIT 113.6 -> coop-D 101.5/102.0.
+  rms 6.043e-07 -> 6.5295e-07 (legit nsl_d=1 slice-rounding shift, same class).
+- THE POLLING QUANTUM WAS THE BIGGEST SINGLE LEVER: the old 20us-sleep status polling
+  showed medians of 181-188 where event .wait() shows 102-113 (BOTH/SPLIT modes paid
+  +70us on nearly every call; DONLY got lucky). Every pre-existing C-ABI number in
+  these notes (incl. the famous "fp32 tier 110.7us") is suspect in one direction or
+  the other; production decode jobs lose ~70us/layer to poll slop, x48 = ~3.4 ms/token
+  on fully-offloaded models. RE-MEASURE anything measured through b70_forward with the
+  old polling loop before trusting deltas under ~15%.
+- Models (48/48 registered, run-twice-score-second protocol; r1 of 4.05 coop=0 hit the
+  classic under-registration ghost at 28.6 - the protocol caught it again):
+  4.05 -mcs448: coop-D 60.5 dec / 606 pre | split(new wait) 59.3 / 537 | pre-session
+  record 57.x/500-ish. 2.05 -mcs256: dec 70.2-70.6 BOTH ways (flat, as the decode
+  anatomy predicts - offload is ~10% of that token budget), prefill in the usual
+  1240-1320 noise band.
+  ppl 2.05 mcs384 r8: 2.524839 (coop) == 2.524839 (split). test_arena_update 3/3.
+
+TRAPS FROM THIS SESSION (each cost real hours):
+1. BUG #8 BIT AGAIN - IN MY OWN HARNESS. The --alt loop fired forward N+1's blob memcpy
+   (which zeroes the counter zone!) unchained behind forward N's still-running kernels.
+   Signature: fused-GU runs produced `out` BYTE-IDENTICAL to the previous dataset (the
+   epilogue's fetch_add landed on counters the next blob had already re-stamped, so
+   flg[1] never fired). Every host-syncing probe (debug memset inserted in the chain,
+   stage-probe memcpys) made it "pass" - textbook race masquerading as logic bug. The
+   kernels were correct all along. RULE: any harness/lab that submits queue work MUST
+   chain with depends_on/pre_dep exactly like production; "fails deterministically until
+   I add a sync" == ordering race, full stop.
+2. Same trap poisoned micro-labs (t45 deleted, t46 archived): unchained repeated
+   launches of a publication microbench produced ~58% "failures" INCLUDING reads of
+   FUTURE launches' values - physically impossible under serialized execution, and the
+   giveaway that launches overlapped. Chained: 0/1.23M mismatches for plain-store +
+   it.barrier(global_space) + acq_rel fetch_add + device atomic loads. So: that
+   publication chain IS SOUND on this stack, single-kernel; kernel boundaries handle
+   cross-kernel visibility as usual.
+3. read_hint<cache_control<uncached,L1>> via annotated_ptr: never demonstrated an
+   effect (consistent with the older NOTES 'no measurable effect' on streaming hints);
+   device-scope relaxed atomic loads DO demonstrably hit L2. Use the latter for
+   same-launch cross-WG reads.
+4. Debug-code sizing bug (H floats into an I-sized vector) presented as `malloc():
+   invalid size` heap corruption - looked like a plugin/ABI bug, was the bench.
+   Audit probe buffers before believing device guilt.
+5. Piped `icpx ... | grep` hid nothing this time but a STALE BINARY (build died, grep
+   matched the old log) nearly produced a phantom "t46 passes/fails" round - always
+   echo rc + check the log file exists, per the standing rule.
+6. Old notes correction: "6-kernel float pipeline" was 5 kernels + blob; coop-D makes
+   it 4 + blob + x/D2H = 6 queue ops total per decode forward, and GU fusion would make
+   it 5 (parked, see above).
+
+NEXT (updated): (a) retune float NSL_GU with the honest wait - both fused configs
+preferred NSLG=2 over auto-7 on C-ABI with a wave cliff at 3 (bench prefers 7! - the
+child-process overlap in the real model decides; measure on 4.05 decode, not harnesses);
+(b) native-L0 submission (PLAN_L0) - still worth ~4-6us/submit host-side, but the
+polling fix already removed the fattest slice of per-command slop; (c) GU-fusion retry
+only bundled with (a) and/or per-(entry) 2-arrival units; (d) had128_strided is
+available for the int8 tier's K34i8/K6i8 (multi-row paths are not barrier-bound - low
+priority).
