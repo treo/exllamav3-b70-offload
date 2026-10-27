@@ -1006,3 +1006,28 @@ VERIFIED on the PRODUCTION TU (not toy kernels):
    trivially WithArguments-launchable; slim-path bands are tiny so SLM->global cost
    should be small - MEASURE on bench shapes); only if that regresses, reverse-engineer
    the UR/L0 KernelImp local-arg trick. Upside if achieved: ~20-45us/layer x 48 decode.
+
+## EXL3_MOE_CPU_SLOT_ROWS anatomy (the question: is it the MoE chunk size?)
+Hierarchy of "chunk" on this path (do not conflate):
+- cap_rows (SLOT_ROWS, python TUNING:101 -> _issue_compute `for a in range(0,rows,cap)`):
+  TOKEN ROWS PER WORKER JOB. Sizes the pinned handoff slot (x/sel/w/out block layout is
+  single-sourced from cap_rows in BOTH moe_cpu_host.py:1245-1294 and moe_handoff.cu:470),
+  the collect window (= num_slots jobs), the b70 bounce/stage via ensure_capacity, and the
+  tmap blob. It is the knob analogous to a micro-batch, NOT the DPAS tile.
+- MOE_MAXM=8 (ChunkDev rows): the DPAS chunk width = the true analogue of CUDA's
+  MOE_TILESIZE_M. Raising it is the wide-M tier project (new instantiations, acc/a8 layout
+  constants derive from it), separate from cap_rows.
+Why bigger cap_rows wins prefill (measured, E512 bench, us/token-row): 54.6@64 -> 36.5@128
+-> 22.7@256 -> 18.3@512 -> 15.9@1024: sublinear because slots fill toward 8 rows and the
+per-job chain (stage D2H + 6-kernel chain + readback + collect) amortizes over more rows.
+e2e tables in doc/env_vars.md. Memory management needed for the raise: NONE functionally
+(all device buffers grow on demand: ensure_ws by nc, ensure_capacity by rows), but two
+real fixes came out of it: registration warm (2048,1024) pre-inflated the SHARED pool
+~1.2 GB underneath the whole weight set (widest-slice models then failed the first real
+pool grow near VRAM-full -> pin -> wedged staging ring (observed: 100% CPU spin in parent
+at warmup)); warm now (512,512), and grow_p OOM THROWS (b70_forward catch -> clean pin)
+instead of null-pointer device faults. Pool bytes no longer count in the registration
+budget (commit 0d420807) so large pools cannot starve runtime installs.
+Default raised 64 -> 512 (not 1024: +5% prefill traded for the regime that surfaced the
+wedging bug; retest 1024 after the warm/OOM fixes if desired). Decode unaffected by
+construction (rows << cap); 2.68/4.05 decode measured UNCHANGED-to-better at 512.

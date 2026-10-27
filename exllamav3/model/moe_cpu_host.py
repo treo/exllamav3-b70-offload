@@ -98,7 +98,7 @@ class MoeCpuTuning:
         # --- CPU worker / staging ---
         self.num_slots = int(os.environ.get("EXL3_MOE_CPU_SLOTS", 4))
         assert 1 <= self.num_slots <= 8, "EXL3_MOE_CPU_SLOTS must be 1..8 (MOE_MAX_SLOTS in moe_handoff.h)"
-        self.cap_rows = int(os.environ.get("EXL3_MOE_CPU_SLOT_ROWS", 64))
+        self.cap_rows = int(os.environ.get("EXL3_MOE_CPU_SLOT_ROWS", 512))
         # Physical cores kept free of pool workers for the host process, whether the pool pins
         # its workers (EXL3_MOE_CPU_PIN) or lets them float; the host is confined to them once
         # the worker has started, see moe_cpu_affinity.py. 0 disables the reservation

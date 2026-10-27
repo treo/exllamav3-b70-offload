@@ -282,8 +282,13 @@ static int64_t register_impl
     // budget gate is WEIGHTS-only by design (g_ws_bytes pool excluded): a large-prefill
     // workspace peak (~1-2 GB at EXL3_MOE_CPU_SLOT_ROWS=256) must not starve runtime
     // installs; physical headroom comes from the budget fraction itself
-    // pre-size for typical handoff geometries (slot cap rows x topk)
-    b70_warm((int64_t)(intptr_t)layer, 2048, 1024);
+    // pre-size for typical handoff geometries. MODERATE on purpose: this runs UNDER the
+    // whole weight set (registration), and the warm primes the SHARED pool to the warm's
+    // chunk count - at (2048,1024) that inflated the pool ~1.2 GB before the last layers
+    // registered, and on the widest slices the first real-job pool grow then collided with
+    // near-full VRAM (failed forward -> mid-job pin -> wedged staging ring). Larger jobs
+    // still grow the pool on demand through ensure_ws (now a clean throw, see below).
+    b70_warm((int64_t)(intptr_t)layer, 512, 512);
     b70_warm((int64_t)(intptr_t)layer, 1, 16);
     return (int64_t)(intptr_t)layer;
 }

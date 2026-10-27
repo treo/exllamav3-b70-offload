@@ -389,11 +389,19 @@ Worker thread count, set per component via `config.infer_params.moe_cpu_threads`
 
 Fallback worker thread count when the component's `-mclt`/`-dmclt` config value is not set.
 
-### `EXL3_MOE_CPU_SLOTS` (default: `4`), `EXL3_MOE_CPU_SLOT_ROWS` (default: `64`)
+### `EXL3_MOE_CPU_SLOTS` (default: `4`), `EXL3_MOE_CPU_SLOT_ROWS` (default: `512`)
 
-Compute job-ring depth and rows per slot (the CPU-tail chunk size). Each slot holds one
-in-flight chunk of the D2H-staged input, selected experts and routing weights, and the
-H2D-staged fp32 output.
+Compute job-ring depth and rows per slot (one worker job's token rows: the parent splits
+each offloaded layer's forward into `cap_rows` slices). Each slot holds the D2H-staged
+input, selected experts, routing weights and the staged fp32 output; sizes scale linearly
+(4 slots x 512 rows x H=2560 ~ 55 MB of shared memory). Bigger jobs are pure win for the
+offloaded prefill path: per-slot DPAS chunks pack fuller (experts see more rows per job),
+and each job amortizes one staging + handoff + kernel-chain round. Measured (3090+B70,
+Qwen3.8-Flash-Next, prefill 2048 / decode S=1 tok/s): 4.05bpw 64->589/52.2, 128->674/53.5,
+256->750/54.2, 512->823-831/54.0; 2.68bpw 512->691/55.6 (vs 560/56.6 at 64). 1024 adds ~5%
+more prefill but first met a VRAM-pressure pin at the widest expert slices; the registration
+warm was shrunk to (512 rows, 512 chunks) and workspace OOM now fails cleanly, so 1024 is
+retestable. The knob does not touch decode (rows stay far below the cap).
 
 ### `EXL3_MOE_CPU_WSLOTS` (default: `2`), `EXL3_MOE_CPU_WSLOT_MB` (default: `32`)
 
