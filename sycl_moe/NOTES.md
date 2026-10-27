@@ -940,3 +940,16 @@ prefill / 53.3 decode WITHOUT any stream_t override (+43% prefill vs classic ful
 model whose expert bytes exceed 3090+B70; explicit stream_t is a per-model trim knob,
 worth ~8% on 4.05 (st4: 599/53.8 - beats classic on BOTH axes). no-mcpa pays only ~9%
 prefill at auto-tier on 2.68: the tier wins even without page-locked streaming.
+
+## Round 10 + confirmations: overlap verdict and prefill noise floor
+
+Prefill repeats of ONE config (4.05, SUB=0.5, st4, overlap on): 608 / 568 / 576 (±3.5%,
+overnight thermal?). Decode is rock stable (54.7/54.2/53.6/54.6). Lesson: single-digit
+percent PREFILL deltas need 3 reps or a cooled interleaved pair; decode deltas >=1 t/s
+are trustworthy from one run. Overlap stands at "0-4%, noise-bound, mechanistically
+sound" - kept default-on for rows>=16, kill switch EXL3_MOE_B70_OVERLAP=0.
+Final headline configs measured this session (pre/dec tok/s):
+  2.68bpw auto-tier+pinned+ring: 748/53.3 (classic tier 525/47.6, CPU-only -)
+  4.05bpw SUB=0.5+st4+pinned+ring: ~580-600/54 (classic 590/48.1, CPU-only 226/37.5)
+2.05bpw regression trio running (full-tier registration + anti-theft rule = streaming
+blocked on fully registered layers by design; must confirm no prefill loss there).

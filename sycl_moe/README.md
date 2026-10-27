@@ -94,6 +94,7 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `EXL3_MOE_B70_SUB` | Three-tier placement: keep only the first `n` (or fraction `f<1.0`) experts of EVERY layer device-resident on the B70; the coldest slots of every layer fall back to CPU/RAM compute (arena + streaming). `auto` = defer all B70 registrations to worker start, then size every tier as the fair share of the remaining device budget across the (now known) layer count. Recommended for models whose expert set exceeds both GPUs (2.68bpw: +43% prefill, +12% decode vs classic; 4.05bpw: pair with `EXL3_MOE_STREAM_T=4..6`). `Unset = full-slice registration (classic whole-layer tier). Hot experts then live on the B70 across all layers instead of a prefix of layers owning everything. The parent respects the tier: pinned-arena streaming and promote-on-miss only target CPU-tier slots, so `-mcpa` no longer steals B70 work. |
 | `MOE_NSL=0..8` | Override the split-K degree of the GEMV kernels (default: auto per matrix class). Tuning knob for experiments. |
 | `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
+| `EXL3_MOE_B70_OVERLAP` | `0` disables prefill-size mixed-job overlap (B70 half on a borrowed thread while the CPU pool works the other half; default on for `rows>=16`, sequential for decode sizes). 0-4% prefill on 4.05bpw (noise-bound), neutral elsewhere. |
 | `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows and the layer is stream-layout). |
 
 Works with `--moe_cpu_split` (dynamic, placement-profile driven) and `--moe_cpu_offload`.
@@ -120,6 +121,21 @@ silently (`[b70] dlopen failed; falling back to CPU` / `[b70moe] no SYCL GPU: ..
 Caveat: a *malformed* `ONEAPI_DEVICE_SELECTOR` value (e.g. `opencl:none`) aborts inside the
 oneAPI runtime during dlopen, before any plugin code runs — the selector is parsed by
 adapter static init. Use a valid value or unset it.
+
+### Recipe: models whose expert set exceeds both GPUs (2.68/4.05bpw class)
+
+```bash
+EXL3_MOE_B70=1 EXL3_MOE_I8RING=1 EXL3_MOE_B70_SUB=auto \
+EXL3_MOE_PINNED_ARENA=1   # -mcpa: page-locked arena + streamed prefill + promote-on-miss
+```
+
+The B70 holds the hot tier of *every* layer (fair budget share, sized at worker start);
+`-mcpa` mechanisms then cooperate instead of stealing: streaming and promote-on-miss only
+touch CPU-tier slots. On deep oversubscription (4.05bpw) `EXL3_MOE_B70_SUB=0.50
+EXL3_MOE_STREAM_T=4` measured ~580-600 prefill / 54 decode (overlap adds 0-4%, noise-bound).
+Measured (this box, 3090+B70):
+2.68bpw 748 prefill / 53.3 decode (+43%/+12% vs the classic whole-layer tier),
+4.05bpw ~590/54 (beats classic decode clearly, prefill parity-to-+1%; +160%/+45% vs CPU-only).
 
 ## Benchmarks
 
