@@ -143,8 +143,16 @@ documented knob, not default.
 
 ## Recommended recipe per class
 
-- Model fits both GPUs (2.05 class): pure defaults. Full tier + anti-theft rule means streaming
-  is blocked on fully registered layers by design (that is correct, not a bug).
+- Model fits both GPUs (2.05 class): pure defaults, and **the streamed tier now takes hot picks
+  from B70-resident slots** (`EXL3_MOE_B70_STREAM_HOT=1`, default). The earlier rule - "full tier
+  + anti-theft means streaming is blocked on fully registered layers by design (that is correct,
+  not a bug)" - is RETRACTED: measured 2026-10-27 it cost 37% prefill vs the CPU worker
+  (1197-1202 vs 1871-1903 @4096), because a fully registered layer then re-streams every
+  expert once per 8-pick chunk per `cap_rows` job (32 jobs × ~142 chunks per 4096-token layer)
+  while the streamed path pays one DMA per expert per chunk. Allowing hot picks to stream keeps
+  the arena copy (so decode is untouched, measured 65-68 t/s either way) and masks the streamed
+  picks out of the worker job, so nothing is computed twice - see `../NOTES.md` Standing
+  decisions and `measurements-ledger.md`.
 - Oversubscribed (2.68 / 4.05 / 4.18):
   `EXL3_MOE_B70=1 EXL3_MOE_I8RING=1 EXL3_MOE_B70_SUB=auto EXL3_MOE_PINNED_ARENA=1`,
   and on deep oversubscription (4.05) `EXL3_MOE_B70_SUB=0.50 EXL3_MOE_STREAM_T=4`.

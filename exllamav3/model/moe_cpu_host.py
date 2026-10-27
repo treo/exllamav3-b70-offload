@@ -171,6 +171,15 @@ class MoeCpuTuning:
         # Fused-tier row tiles (32 / 64-row kernel instances per expert range), as EXL3_MOE_MTILE
         # on the GPU side
         self.mtile = os.environ.get("EXL3_MOE_MTILE", "1") != "0"
+        # Allow the streamed-prefill tier to take HOT picks even when their expert slot is
+        # resident on the B70 (the -mcpa anti-theft rule otherwise restricts streaming to
+        # CPU-tier slots, so a fully registered layer forfeits streamed prefill completely).
+        # The B70 re-reads an expert's weights once per 8-pick chunk PER cap_rows JOB, while a
+        # streamed expert pays one PCIe DMA for the whole prefill chunk: at rows>=1024 that is
+        # an order of magnitude less traffic. Decode is untouched (streaming only engages above
+        # stream_min_rows) and the B70 keeps its arena copy, so hot experts stay device-local.
+        # =0 restores the classic steal-proofing rule. Default: on whenever the arena streams.
+        self.b70_stream_hot = os.environ.get("EXL3_MOE_B70_STREAM_HOT", "1") != "0"
 
         # --- debug / kill switches ---
         self.stream_debug = bool(os.environ.get("EXL3_MOE_STREAM_DEBUG"))
@@ -1953,7 +1962,12 @@ class MoeCpuHost:
             # ring kernel, does fast). Only CPU-tier slots (>= b70n) may stream. A fully
             # registered layer (b70n == E) streams nothing and just runs as a plain job.
             hn = self.layer_b70n[layer_idx] if layer_idx < len(self.layer_b70n) else 0
-            streamed = [e for e in range(E) if counts_h[e] >= st["stream_t"] and e >= hn]
+            # EXL3_MOE_B70_STREAM_HOT (default on): the streamed tier may take hot picks from
+            # B70-resident slots too. The B70 pays one weight stream per 8-pick chunk per
+            # cap_rows job; a streamed hot expert pays one PCIe DMA for the whole chunk, and
+            # the B70 keeps its copy (decode unaffected), so this is cooperation, not theft.
+            floor = 0 if (hn and TUNING.b70_stream_hot) else hn
+            streamed = [e for e in range(E) if counts_h[e] >= st["stream_t"] and e >= floor]
             if TUNING.stream_debug:
                 n_str = sum(counts_h[e] for e in streamed)
                 print(f" -- stream L{layer_idx}: rows {rows}, streamed experts "

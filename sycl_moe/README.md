@@ -94,6 +94,9 @@ EXL3_MOE_B70=1 python your_script.py --moe_cpu_split N ...   # or -mcs N
 | `EXL3_MOE_B70_SUB` | Three-tier placement: keep only the first `n` (or fraction `f<1.0`) experts of EVERY layer device-resident on the B70; the coldest slots of every layer fall back to CPU/RAM compute (arena + streaming). `auto` = defer all B70 registrations to worker start, then size every tier as the fair share of the remaining device budget across the (now known) layer count. Recommended for models whose expert set exceeds both GPUs (2.68bpw: +43% prefill, +12% decode vs classic; 4.05bpw: pair with `EXL3_MOE_STREAM_T=4..6`). `Unset = full-slice registration (classic whole-layer tier). Hot experts then live on the B70 across all layers instead of a prefix of layers owning everything. The parent respects the tier: pinned-arena streaming and promote-on-miss only target CPU-tier slots, so `-mcpa` no longer steals B70 work. |
 | `MOE_NSL=0..8` | Override the split-K degree of the GEMV kernels (default: auto per matrix class). Tuning knob for experiments. `EXL3_MOE_NSLG`/`EXL3_MOE_NSLD` set the float tier's gate/up and down degrees separately. |
 | `EXL3_MOE_B70_COOP` | `0` disables the counter-fed fused DOWN kernel (float tier, `rows<=8`, compile-time-specialized rates: K5+K6 in ONE launch with CUDA-`exl3_moe_coop`-style arrival counters; `NSL_D=1` keeps the row sum in registers, no float atomics, summation order bit-stable vs the split path). Default on: ~-11us per decode forward (C-ABI 113→101 us on the xval shape). Sub-switches: `EXL3_MOE_B70_COOPDN=0` restores classic K5+K6; `EXL3_MOE_B70_COOPGU=1` opts into the parked (currently ~neutral) K2+K34 fusion. |
+| `EXL3_MOE_B70_STREAM_HOT` | Read by the PARENT (python, `moe_cpu_host.py`): let the streamed-prefill tier take HOT picks even when their expert slot is B70-resident. Default ON. The classic `-mcpa` anti-theft rule (stream only CPU-tier slots) made a fully registered layer stream nothing at all, which cost 37% prefill vs the CPU worker on 2.05bpw: the B70 re-reads an expert's weights once per 8-pick chunk per `cap_rows` job, while a streamed expert pays one PCIe DMA for the whole prefill chunk. This is not theft - the arena copy stays resident (decode unaffected, streaming is gated to rows >= stream_min_rows) and masked picks (`sel=-1`) leave the worker job. `=0` restores the classic rule. |
+| `EXL3_MOE_B70_BUCKET` | `0` disables int8 fragment bucketing (default on). The chunker puts every chunk one m8 fragment can cover (`m <= I8_TOK_PER_FRAG`) at the front of the chunk list and forward() runs those as a separate NF=1 launch instead of padding every chunk to `I8_FRAGS` fragments - the CUDA tier's m-tile ladder (`exl3_moe_kernel.cuh`: 64 -> 32 -> 16). E260 int8 rows32/64/128: 1919->1648, 2630->2260, 3121->2867 us. |
+| `EXL3_MOE_I8SLIMRING` | `1` opts the ALL-narrow (slim, decode-shaped) int8 kernel into SLM A staging too. Measured NEGATIVE at every all-narrow shape (E260: rows1 197.6->225.3, rows4 411->487, rows8 714->793 us) so it stays off; the mixed-job narrow bucket is unaffected (it shares the wide launch's ring decision, where staging IS worth it). |
 | `EXL3_MOE_B70_MCAP=4\|8` | Lab override of the int8 chunk width cap (default 8; the fp32 tier is always capped at 4). |
 | `EXL3_MOE_B70_OVERLAP` | `0` disables prefill-size mixed-job overlap (B70 half on a borrowed thread while the CPU pool works the other half; default on for `rows>=16`, sequential for decode sizes). 0-4% prefill on 4.05bpw (noise-bound), neutral elsewhere. |
 | `EXL3_MOE_B70_INT8` | `1` force the int8/DPAS tier, `0` force fp32; unset = auto (int8 iff the forward has ≥2 token rows). ALL eleven contract rates (K2∈{2,3,4,5,6,7,8,10,12,14,16}, halves only ≤3.5 — see `archive/mul1-trellis-spec.md`) are compile-time specialized on both tiers; out-of-contract rates fall to the runtime float `GemvFallback`, never a fault. |
@@ -159,7 +162,8 @@ Measured, this machine (Arc Pro B70 + RTX 3090, one model each):
 
 | model | config | CPU worker | + B70 |
 |---|---|---|---|
-| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256` | 68–70 t/s dec, ~1511 pre | **70–71 t/s, 1876 pre (+24%)** |
+| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256 -mcpa` (hot-pick streaming, default) | 1180/1616/1840 pre @1024/2048/4096, ~64 dec | **1230/1604/1969 pre, ~67 dec** |
+| Qwen3.8-Flash-Next-2.05bpw | `-mcs 256` (no pinned arena) | ~1456-1511 pre, 68-70 dec | **1850-1886 pre (+25%), 70-72 dec** |
 | Qwen3.8-Flash-Next-2.68bpw | `-mcs 448` | 40.2 t/s dec | **56.2 t/s (+40%)** |
 | Qwen3.8-Flash-Next-4.05bpw | `-mcs 448` | 25.0 t/s dec | **51.0 t/s (+104%)** |
 | ppl wikitext-2 (20×2048) | 2.05 / 2.68 / 4.05 | 3.96007 / 3.82400 / 3.73050 | 3.96836 / 3.82209 / 3.73007 |
@@ -167,6 +171,36 @@ Measured, this machine (Arc Pro B70 + RTX 3090, one model each):
 
 The win is proportional to how much of the model the 3090 can't hold: at `-mcs 256` on
 2.05bpw decode is not MoE-CPU-bound, at `-mcs 448` on 4.05bpw it completely is.
+
+### Prefill economics (measured 2026-10-27, 2.05bpw `-mcs 256 -mcpa`)
+
+Three numbers decide everything, all measured at the model's own shape (E=260, H=2560,
+I=640, K2=8, topk 10, ~5 worker picks per token):
+
+* one streamed expert onto the 3090 = its 2.46 MB over the Gen4 x8 link ≈ **184 us** of link
+  time (`_ensure_stream_state` probes the real bandwidth; ~260 experts qualify per 4096-token
+  chunk) → the streamed leg of a 4096-token prefill ≈ 2.3 s, i.e. ~1800 tok/s wall;
+* one DPAS **chunk** on the B70 costs ~12 us at the model shape (≈200 GB/s of 608) and its cost
+  splits into a fragment term (~6.5 us per m8 fragment - dominant) and a traversal term: the
+  MAXM sweep in `moe_layout.hpp` shows MAXM=16 (1.7x fewer traversals, 1.2-2x the fragments) is
+  20-95% SLOWER and MAXM=4 (2x the traversals, same fragments) 12-22% slower, and that the
+  padding fragment is the part we can remove - `EXL3_MOE_B70_BUCKET` (default on) runs narrow
+  chunks as a single fragment: rows32/64/128 = 1919→1648 / 2630→2260 / 3121→2867 us;
+* so the two legs cross at roughly "stream an expert only if it is picked by more rows than the
+  B70 can chew through in one DMA" - which is what the auto `stream_t` (probe-scaled, ≈11 here)
+  approximates. Sweeping 4/11/16/24/32/48/64/96 is FLAT from 11 to 48 (±3.5%) and worse at 4,
+  64 and 96: the balance point is broad, and the B70 leg hides under the link leg.
+
+Consequence: `-mcpa` prefill on a model that fits both GPUs is **link-bound**, and the B70 adds
+most of its value in decode (+5-8% here). Getting prefill materially above ~2000 tok/s needs the
+B70's per-fragment cost down (esimd `xmx::dpas`, t40 spike; an int8 m16 accumulator does not
+exist on this device, so fragments cannot be widened) - not a different placement of the same
+work. `EXL3_MOE_B70_STREAM_HOT=0` measures the no-link regime (≈1400 tok/s with big jobs).
+
+Quality gate for that regime (eval/ppl.py scores one row per forward, so it CANNOT exercise the
+streamed tier at all): `python qa_stream.py -m <model> -mcs 256 -mcpa -ngr -mct 15 -cs 12288
+-tok 8192 -chunk 1024`, 8192 tokens of chunked prefill - CPU 2.316795, B70+hot-pick 2.320494
+(+0.16%), B70 anti-theft 2.317882 (+0.05%); the recorded int8-tier budget is ≤0.25%.
 
 ### Layer microbenchmark (standalone, no exllamav3 needed)
 
@@ -218,13 +252,20 @@ Notes:
 ## Design map (for hacking on it)
 
 - `moe_sycl.{hpp,cpp}` — the pipeline kernels (prep_gu, gemv_gu, act+prep_d fused, gemv_d,
-  gather; in coop float mode `CoopDownK` merges gemv_d+gather into one counter-fed launch)
-  + host-side layer object. Weights are stored in the **native** mul1 tile layout,
-  stream-repacked at upload so a GEMV thread reads a contiguous bit window
-  (`repack_native_to_stream_words`, exact bit formulas documented in the header comment).
+  gather; in coop float mode `CoopDownK` merges gemv_d+gather into one counter-fed launch;
+  the int8 gemv runs one launch per FRAGMENT BUCKET - narrow chunks NF=1, wide chunks
+  NF=I8_FRAGS - see `moe_bucket_chunks`) + host-side layer object. Weights are stored in the
+  **native** mul1 tile layout, stream-repacked at upload so a GEMV thread reads a contiguous
+  bit window (`repack_native_to_stream_words`; the arena is now **n-major in tile order** so a
+  column-tile reader walks k sequentially, and the call therefore needs the matrix's
+  `tiles_k`).
   Coop arrival counters live in the control blob (zeroed by its H2D and re-zeroed by K1
   on the render engine); same-launch cross-WG reads use device-scope relaxed atomic loads
   (`coop_load` - the annotated_ptr read_hint form never demonstrated L1 bypass here).
+- `moe_layout.hpp` — the SINGLE SOURCE OF TRUTH for chunk/fragment geometry (`MOE_WIDEM_MAXM`,
+  `MOE_MAXM`, `I8R`, `I8_A8BLK`, the shift forms, `i8_row_of`), included by `moe_sycl.hpp`,
+  `moe_host_ref.hpp` and `bench_layer.cpp` alike, so a wide-M experiment is one -D and a host
+  reference that stopped matching the device becomes a compile error instead of a mystery rms.
 - `b70_lib.cpp` — the C ABI the worker dlopens (`b70_init/_register_layer_n/_forward/_warm/
   _free_layer/_update_expert`). Weights live in ONE device ARENA per layer with a regular
   per-expert block layout (registration = one threaded host fill + one H2D copy; a dynamic-

@@ -18,6 +18,47 @@ noted, "VOID" = invalidated by a confounder listed in `measurement-discipline.md
 | per-command host cost | SYCL submit ~3.7 µs; raw ze append ~2 µs (12-15 µs for a 6-kernel chain) |
 | per-command GPU cost at decode | ~8-15 µs per chained queue op; `--bare` barrier round trip 33 µs |
 
+## 2026-10-27 (evening): prefill policy + plugin A/Bs, 2.05bpw
+
+`perf.py -mcs 256 -ngr -mct 15 -mcpa --max_length 4096` (prefill tok/s at the stated context
+length; decode = ctx 0 … 3840), reps interleaved in one batch, scored per NOTES rule 6.
+
+| arm | pre 1024 | pre 2048 | pre 4096 | dec mean | notes |
+|---|---|---|---|---|---|
+| CPU worker | 1179 / 1180 | 1559 / 1616 | 1960 / 1840 | 64.4 / 64.0 | the bar; no B70 |
+| B70, classic anti-theft (`STREAM_HOT=0`) | 986 / 971 | 1114 / 1102 | 1202 / 1197 | 67.3 / 67.5 | the regression this fixes |
+| B70, hot-pick streaming (default) | 1247 / 1230 | 1605 / 1604 | 1984 / 1969 | 67.2 / 67.2 | shipped (bucketing + n-major) |
+| B70 streaming, k-major plugin | 1240 / 1163 | 1628 / 1670 | 2006 / 1902 | 68.1 / 66.7 | n-major pair: neutral in-model |
+| B70 streaming, n-major only | 1254 / 1229 | 1634 / 1707 | 1897 / 1895 | 67.6 / 67.7 | (kernel -7%, tail share too small to show) |
+| B70 streaming, `STREAM_T=32` | 1298 | 1622 | 1963 | 67.0 | plateau, not a win |
+| B70 no streaming, `SLOT_ROWS=512/1024` | 1077 / 1070 | 1256 / 1293 | 1411 / 1401 | — | the no-PCIe regime |
+
+Streaming threshold sweep with the knob on (prefill @4096): st4 1690 | auto(≈11) 1857-1984 |
+16 1953-2005 | 24 1912-1969 | 32 1963-2045 | 48 1878 | 64 1838 | 96 1720 → flat from 11 to 32,
+worse from 48 up and much worse at 4; auto stays the default. `SUB=0.5/0.25` (leaving part of
+each layer's expert set on the CPU pool): 1806 / 1857 - splitting the tail off the B70 does NOT
+help here. `cap_rows` with streaming (pre-bucketing) 256/512/1024: 1925 / 1938-1957 / 1955, and
+1920 with bucketing; the CPU arm is flat too (1872 at 512) ⇒ 128 stays the default.
+
+Plugin A/B, standalone (bench_layer E=260/K2=8 int8, min-of-2 interleaved, µs/job):
+rows128 k-major 3320 → n-major 3092 (-6.9%); rows1 float 179.0 → 165.0 (-7.8%); rows512
+8934 → 8531. Bucketing on top of n-major: rows32 1919→1648, rows64 2630→2260, rows128
+3121→2867, rows256 4834→4667, rows512 8604→8379, rows1024 15776→15539. Wide-M (MAXM=16) and
+slim+A-ring are negative - tables in `moe_layout.hpp` / `int8-dpas-tier.md`.
+
+Pure-read probe t47 (1.68 GB footprint): production [tk][nf] order 305 GB/s, n-major 781,
+sequential `uint4` 781 - the pattern, not the byte count, was the cap; the kernels only convert
+~7% of that into wall clock because they are fragment-bound, not DRAM-bound.
+
+C-ABI decode shape (`bench_b70_py.py`, xval_s, rows=1): 103.6 µs (ref 101.5-102.0), rms
+6.5295e-07 = the recorded reference ⇒ the geometry refactor and bucketing are value-preserving.
+
+Quality: `qa_stream.py` (8192 tokens of chunked prefill - the only gate that engages the streamed
+tier, since eval/ppl.py scores one row per forward): CPU 2.316795, B70+hot-pick 2.320494
+(+0.16%), B70 anti-theft 2.317882 (+0.05%); budget ≤0.25%. `ppl.py -mcs 384 -r 20 -l 2048`
+(rows < stream_min_rows, so the knob is inert there): CPU 3.969679, B70 knob on 3.975833,
+knob off 3.969526.
+
 ## Model end state (current build: coop-D + ring + MAXM8 + full rate specialization)
 
 | model | config | pre / dec (CPU worker) | pre / dec (B70) |
