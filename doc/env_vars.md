@@ -389,7 +389,7 @@ Worker thread count, set per component via `config.infer_params.moe_cpu_threads`
 
 Fallback worker thread count when the component's `-mclt`/`-dmclt` config value is not set.
 
-### `EXL3_MOE_CPU_SLOTS` (default: `4`), `EXL3_MOE_CPU_SLOT_ROWS` (default: `512`)
+### `EXL3_MOE_CPU_SLOTS` (default: `4`), `EXL3_MOE_CPU_SLOT_ROWS` (default: `128`)
 
 Compute job-ring depth and rows per slot (one worker job's token rows: the parent splits
 each offloaded layer's forward into `cap_rows` slices). Each slot holds the D2H-staged
@@ -401,7 +401,14 @@ Qwen3.8-Flash-Next, prefill 2048 / decode S=1 tok/s): 4.05bpw 64->589/52.2, 128-
 256->750/54.2, 512->823-831/54.0; 2.68bpw 512->691/55.6 (vs 560/56.6 at 64). 1024 adds ~5%
 more prefill but first met a VRAM-pressure pin at the widest expert slices; the registration
 warm was shrunk to (512 rows, 512 chunks) and workspace OOM now fails cleanly, so 1024 is
-retestable. The knob does not touch decode (rows stay far below the cap).
+retestable. CAUTION (open bug): on the h4/DPAS tier, jobs of 512+ rows fault the device
+(UR_RESULT_ERROR_DEVICE_LOST) when the routed expert distribution is SKEWED, i.e. when the
+worker slice still holds the hot experts (unseeded profile). Warm-seeded placements hide it
+(the worker jobs come out flat). Device VRAM was <75% at the fault and a smaller registration
+budget does not help - an address fault in the fat int8 path under skew, not OOM; reproducible
+(2/2) and quarantined by pinning. Until root-caused the default is 128 (clean in every tested
+regime); 512 is safe on the h6 float tier. The knob does not touch decode (rows stay far below
+the cap).
 
 ### `EXL3_MOE_CPU_WSLOTS` (default: `2`), `EXL3_MOE_CPU_WSLOT_MB` (default: `32`)
 

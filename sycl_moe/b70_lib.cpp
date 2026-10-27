@@ -205,6 +205,12 @@ int b70_forward(int64_t handle, const void* x, const int32_t* sel, const void* w
     try {
         forward_impl(handle, x, sel, w, out, rows, topk);
         return 0;
+    } catch (const sycl::exception& e) {
+        fprintf(stderr, "[b70moe] forward sycl error: %s\n", e.what());
+        return 1;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[b70moe] forward error: %s\n", e.what());
+        return 1;
     } catch (...) {
         return 1;
     }

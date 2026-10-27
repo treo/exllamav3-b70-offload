@@ -1031,3 +1031,17 @@ budget (commit 0d420807) so large pools cannot starve runtime installs.
 Default raised 64 -> 512 (not 1024: +5% prefill traded for the regime that surfaced the
 wedging bug; retest 1024 after the warm/OOM fixes if desired). Decode unaffected by
 construction (rows << cap); 2.68/4.05 decode measured UNCHANGED-to-better at 512.
+
+## OPEN BUG: DEVICE_LOST at cap_rows>=512 on the h4/DPAS tier under skewed worker jobs
+Repro: 2.05bpw, EMPTY expert_stats dir (fresh identity placement => hot experts on the
+worker side => skewed per-expert m in every job), EXL3_MOE_CPU_SLOT_ROWS=512, default
+auto tier: first 2048-prefill pass -> every layer logs 'forward sycl error:
+UR_RESULT_ERROR_DEVICE_LOST' once (message now surfaces via b70_forward catch upgrade).
+2/2 deterministic + same matrix CLEAN: warmed profile (any cap), fresh x cap<=128,
+fresh x h6 models (float tier), bench shapes E256/512 rows512 tk10 uniform (int8 AND
+fp32 tier, single layer). Budget 0.60 (15GB weights, <75% VRAM) STILL faults => NOT
+pressure; it is an address fault in the fat int8 path (ring? prep-quant? gemv?) that
+only SKEW reaches (large per-expert m => deep chunk chains per expert, nc up to ~3.5k).
+DEFAULT RESTORED TO 128. Next move: --skew (zipf) assignment mode in bench_layer to
+reproduce standalone, then bisect EXL3_MOE_I8RING=0/1 and slim; suspect a8/qsx or ring
+copy addressing when chunk slots per expert >> warm-case counts.
