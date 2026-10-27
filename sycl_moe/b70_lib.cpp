@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include "moe_sycl.hpp"
 using moe_sycl::g_alloc_bytes;
+using moe_sycl::g_ws_bytes;
 
 namespace {
 
@@ -276,10 +277,13 @@ static int64_t register_impl
     auto* layer = new moe_sycl::MoeSyclLayer();
     layer->init(g.q, p, gs, us, ds);
     g.by_layer[(const void*)(intptr_t)layer] = g.uploads.back();
-    fprintf(stderr, "[b70moe] registered layer: E %d (B70 tier %d), B70 bytes so far %.2f GB\n",
-            E, n_sub, g_alloc_bytes / 1e9);
+    fprintf(stderr, "[b70moe] registered layer: E %d (B70 tier %d), B70 weights so far %.2f GB, pool %.1f MB\n",
+            E, n_sub, g_alloc_bytes / 1e9, moe_sycl::g_ws_bytes / 1e6);
+    // budget gate is WEIGHTS-only by design (g_ws_bytes pool excluded): a large-prefill
+    // workspace peak (~1-2 GB at EXL3_MOE_CPU_SLOT_ROWS=256) must not starve runtime
+    // installs; physical headroom comes from the budget fraction itself
     // pre-size for typical handoff geometries (slot cap rows x topk)
-    b70_warm((int64_t)(intptr_t)layer, 64, 1024);
+    b70_warm((int64_t)(intptr_t)layer, 2048, 1024);
     b70_warm((int64_t)(intptr_t)layer, 1, 16);
     return (int64_t)(intptr_t)layer;
 }

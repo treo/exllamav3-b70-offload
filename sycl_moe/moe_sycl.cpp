@@ -26,6 +26,7 @@ using AP_W = expe::annotated_ptr<const uint32_t, decltype(expe::properties{g_rea
 namespace moe_sycl {
 
 size_t g_alloc_bytes = 0;
+size_t g_ws_bytes = 0;   // see moe_sycl.hpp: pool bytes are physical but not budget-bearing
 
 namespace {
 
@@ -128,12 +129,12 @@ void MoeSyclLayer::ensure_ws(int nc, int rows)
     auto grow_p = [&](int slot, auto*& p, size_t count) {
         using T = std::remove_pointer_t<std::remove_reference_t<decltype(p)>>;
         if (g_ws.buf[slot] && count <= g_ws.cap[slot]) { p = (T*)g_ws.buf[slot]; return; }
-        if (g_ws.buf[slot]) { sycl::free(g_ws.buf[slot], *Q); g_alloc_bytes -= g_ws.cap[slot] * sizeof(T); }
+        if (g_ws.buf[slot]) { sycl::free(g_ws.buf[slot], *Q); g_ws_bytes -= g_ws.cap[slot] * sizeof(T); }
         T* np = sycl::malloc_device<T>(count, *Q);
         if (!np) fprintf(stderr, "[b70moe] OOM workspace alloc %zu x %zu\n", count, sizeof(T));
         g_ws.buf[slot] = np;
         g_ws.cap[slot] = np ? count : 0;
-        g_alloc_bytes += np ? count * sizeof(T) : 0;
+        g_ws_bytes += np ? count * sizeof(T) : 0;
         p = np;
         if (!p) return;
         // prefault so device page tables are populated before the kernel pipeline runs

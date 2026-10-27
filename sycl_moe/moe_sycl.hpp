@@ -9,6 +9,9 @@
 namespace moe_sycl {
 
 extern size_t g_alloc_bytes;
+extern size_t g_ws_bytes;   // shared workspace pool (ensure_ws): physical VRAM, but NOT
+                           // weights - excluded from the registration budget so a big
+                           // prefill's pool growth cannot starve runtime expert installs
 
 // Host helper: convert a native mul1 trellis (u16 array, tiles of 8*K2 u16 = 4*K2 u32 words)
 // into the GPU "stream" layout: state t's 16-bit window lives at bit
