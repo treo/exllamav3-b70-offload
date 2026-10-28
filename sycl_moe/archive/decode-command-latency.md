@@ -182,3 +182,114 @@ small — MEASURE on bench shapes); only if that regresses, reverse-engineer the
 local-arg trick. Upside if achieved: ~20-45 µs/layer x 48 at decode — though note the polling
 fix (`measurement-discipline.md`) already removed the fattest slice of per-command slop, so the
 honest remaining estimate is ~4-6 µs/submit host-side.
+---
+
+# Research 2026-10-28 (late night): the SYCL/L0 stack's own options for decode
+
+Sources: the vendor runtime tree (`~/projects/vendor/llvm/sycl`, docs in `doc/syclgraph/` +
+`doc/design/CommandGraph.md` + `doc/EnvironmentVariables.md`), the installed 2026.2 headers, a
+driver-extension enumeration against *this* GPU (`lab_graph*` below, `/tmp/l0probe/exts.cpp`), and
+the Level Zero spec for the extension pages. Labs: `sycl_moe/lab_graph.cpp`, `lab_graph3.cpp`
+(`icpx -fsycl -O2 <f>.cpp -o <f>`, no profiler, burn-in, min-of-3).
+
+## 1. SYCL command graphs — measured win, no kernel-image surgery, RECOMMENDED NEXT STEP
+
+`sycl::ext::oneapi::experimental::command_graph` (aspect `ext_oneapi_graph` = **supported** on the
+B70) maps to UR command buffers, which on Level Zero use
+`zeCommandListImmediateAppendCommandListsExp` (the driver advertises
+`ZE_experimental_immediate_command_list_append`) — the whole captured chain becomes ONE immediate
+append with one wait event and one signal event, instead of N submits through UR→PI→L0. UR also
+splits captured memory ops onto a copy queue and kernels onto the compute queue.
+
+| chain (each = one decode-shaped forward, host waits at the end) | submits | graph replay | ratio |
+|---|---|---|---|
+| H2D + 6 kernels + D2H (`lab_graph`, 8 commands) | 22.98 us | 14.22 us | **1.62x** |
+| same, 8 replays in flight before one wait | 22.98 us | 13.68 us | 1.68x |
+| H2D job block + 3 kernels (`lab_graph3`, 4 commands) | 15.37 us | 10.49 us | **1.47x** |
+| one `single_task` + wait = the 1-command floor | — | 5.90 us | — |
+
+So ~2.1 us per command through submits, ~1.0 us per command inside a graph, plus a ~6 us fixed
+round trip. Decode's float-tier chain is 3-5 commands + 2-3 copies ⇒ expect **~5-9 us off every
+B70 forward** (~250-430 us per token over 48 layers: roughly +2-4% decode on 2.05bpw, more for the
+6-7-command int8 chain that spec-decode/batched rows 2-8 run).
+
+**The design problem is that a graph bakes in kernel arguments and grid sizes.** Solved without
+`dynamic` machinery, and validated in `lab_graph3.cpp`: put the per-job values (rows, nc, chunk
+bytes…) in a **pinned host "job block"** whose H2D copy is *inside* the graph — a replay re-reads
+the host buffer (500/500 trials with changing values, bit-exact against a host-computed
+recurrence), so the host just writes bytes and replays. Grids then need a bucket: capture a graph
+per (layer, tier, nc-bucket) with the kernels early-exiting on `chunk >= nc_from_job_block`
+(the chunk list already lives in the control blob, and the extra workgroups are ~free at these
+sizes). Alternative if buckets get awkward: `sycl_ext::property::graph::updatable` +
+`dynamic_parameter`/`dynamic_command_group` + `execGraph.update(node)` — present in the 2026.2
+headers, but `update()` host-synchronises per the usage guide, so it is for occasional changes
+(a new expert pointer after `b70_update_expert`), not the hot path.
+
+Caveats to gate on: graph objects are per-layer-persistent (build at registration, ~48+ objects);
+`q.ext_oneapi_graph(g)` is deprecated in favour of `q.graph_exec(g)` (same call); the extension is
+experimental so keep a runtime fallback (if finalize/first replay throws, stay on submits — same
+posture as the .so/`dlopen` fallback); correctness gate = the usual `--i8trace` battery *plus* a
+model decode A/B, and any pointer that can move (`ensure_capacity` growth, `grow_p` rebinds) must
+trigger a re-capture — that is the same footgun class as the stale-pool-pointer incident.
+
+## 2. Runtime environment knobs — screened for decode, ALL NEGATIVE (do not retry)
+
+`perfab.sh decenv`, `perf.py -spf -dr 3` (decode averaged over ctx 0…3840), one round per arm,
+control bracketing: control = **68.3 t/s**.
+
+| env (in the worker process, which owns the SYCL queue) | dec | Δ |
+|---|---|---|
+| `SYCL_UR_USE_LEVEL_ZERO_V2=0` (old adapter; V2 is default on Xe2+) | 65.9 | **-3.6%** |
+| `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0` (batched command lists) | 65.1 | **-4.6%** |
+| `SYCL_PI_LEVEL_ZERO_USE_COPY_ENGINE=1` | 61.8 | **-9.5%** |
+| `SYCL_PI_LEVEL_ZERO_USE_COPY_ENGINE_FOR_H2D=1 _FOR_D2H=1` | 64.1 | **-6.1%** |
+| `SYCL_PI_LEVEL_ZERO_IMMEDIATE_COMMANDLISTS_EVENT_CLEANUP_THRESHOLD=64` | 66.5 | -2.7% |
+| `SYCL_PI_LEVEL_ZERO_USE_COMPUTE_ENGINE=1` | 67.4 | -1.3% |
+
+Conclusion: today's defaults (V2 adapter + immediate command lists + copies on the compute engine)
+are the optimum; copy-engine offload is actively bad for this workload (extra queue + cross-queue
+event per copy). Those numbers are also evidence that the remaining decode cost is *per-command
+driver work*, which is exactly what graphs reduce — a different mechanism than queue choice.
+
+## 3. Not available on this hardware/driver (measured, saves someone a week)
+
+Enumerated the 63 extensions of the loaded driver (`zeDriverGetExtensionProperties`, loader 1.33.1,
+driver 259.39758, runtime 26.35):
+
+* **No IPA / ML-IPA** (no `ZE_experimental_ipa*`, no IPA symbols in `libze_intel_gpu.so`) — the
+  "instruction prefetch agent" trick for many-small-kernel chains does not exist on Battlemage.
+* **No mutable calls / resident kernels** (`zeMutableCall*` absent) — the zero-launch-doorbell
+  persistent-kernel design is off the table; the megakernel-with-barriers result already showed
+  phase-sync starvation anyway.
+* **`max_compute_queue_indices = 1`** on the B70 (queried via
+  `sycl::ext::intel::info::device::max_compute_queue_indices`) — so `property::queue::compute_index`
+  (and the old L0 "low-latency queue index") offers nothing here.
+* Present but **only reachable from a native-L0 path**: `ZE_experimental_mutable_command_list` 1.1
+  (patch kernel args/grids of a recorded command list without re-appending — would remove the
+  "pre-build the arg buffer and rebuild on every realloc" footgun in PLAN_L0),
+  `ZE_experimental_event_pool_counter_based` + `ZEX_counter_based_event` (cheaper events than the
+  default pool — relevant to the completion poll),
+  `ZEX_intel_experimental_queue_copy_operations_offload_hint`, `ZE_experimental_scheduling_hints`
+  (`zeKernelSchedulingHintExp`, introduced in L0 1.2; semantics are priority-ish hints, no CUDA-PDL
+  equivalent), and `ZE_extension_record_replay_graph`/`ZE_experimental_record_replay_graph`
+  (what graphs ultimately use; also allows capture directly on an *immediate* command list).
+
+Implication for **PLAN_L0**: graphs already capture 1.3-1.6x of the command cost with zero
+SPIR-V/module work, and the 1-command floor is ~6 us, so the *remaining* headroom for raw
+`zeCommandListAppendLaunchKernel` appends after graphs is only a few microseconds per forward.
+Recommendation: do graphs first; keep PLAN_L0 (with `ZE_experimental_mutable_command_list` as the
+answer to its arg-mutation and SLM-binding problems) as the follow-up if the residual floor hurts.
+
+## 4. Two cheap host-side items found in the headers while doing the above
+
+1. `sycl::ext::oneapi::experimental::register_host_memory(ptr, bytes, context, flags)` — register
+   a plain host allocation with the driver so USM copies DMA it directly. `b70_lib` currently does
+   `memcpy(g_stage.stage_u16, x, rows*H*2)` then `q->memcpy(d_x, g_stage…)` and the mirror image on
+   the way out (`d_out → g_stage → caller's slot`) — ~15 KB per row of double handling, which at
+   prefill tail sizes is hundreds of MB per token-pass. Either register the caller's pinned handoff
+   segment (it is already page-locked for CUDA) or make `g_stage` a `sycl::malloc_host` buffer and
+   drop the intermediate memcpy entirely: one command and one CPU copy less per forward.
+2. `sycl::ext::oneapi::experimental::reusable_events` (+ `event_mode`/`low_power`) — the decode
+   path creates/signals/polls ~4-8 events per forward, and the completion wait polls
+   `event::get_info<command_execution_status>()` (a driver call per poll). Reusing an event pool
+   instead of fresh event objects is the cheap version of the counter-based-event idea above.

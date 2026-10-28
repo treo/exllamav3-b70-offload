@@ -274,9 +274,22 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
 1. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
    retune measured on real 4.05 decode (C-ABI prefers 2, bench prefers 7 — a wave cliff at 3) and
    per-(entry) 2-arrival units. Summation order must stay bit-identical.
-2. **Native-L0 submission** — `PLAN_L0.md`, feasibility proven, single blocker (SLM binding for the
-   `local_accessor` arg is invisible on the public ze surface); first move is a `-DMOE_L0_NO_SLM`
-   global-scratch SPV variant, measured. Worth less than it looked after the polling fix.
+2. **SYCL command graphs for the decode chain** — the cheapest big decode lever found 2026-10-28
+   and measured (`lab_graph.cpp`/`lab_graph3.cpp`, `archive/decode-command-latency.md` §“Research
+   2026-10-28”): a captured graph of the forward's command chain replays at **1.47-1.62x lower
+   cost** than building it with submits (8 commands: 23.0 -> 14.2 us; 4 commands: 15.4 -> 10.5 us;
+   1-command floor 5.9 us), because UR command buffers become ONE
+   `zeCommandListImmediateAppendCommandListsExp` instead of N submits through UR->PI->L0. Per-job
+   values go through a **pinned host job block whose H2D is inside the graph** (validated: a replay
+   re-reads the host buffer, 500/500 trials bit-exact) plus nc-bucketed grids with an early exit -
+   no `dynamic`/`updatable` graph machinery needed, and no own-SPIR-V module either. Expect ~5-9 us
+   off every B70 forward (~+2-4% decode on 2.05bpw, more for the 6-7-command int8 chain that
+   rows 2-8 / spec-decode run). Gate: build at registration, re-capture on ANY pointer that can
+   move (`ensure_capacity`, `grow_p`), fall back to submits if the experimental path throws.
+   **Native-L0 submission (`PLAN_L0.md`) drops to 2b**: graphs already take the multi-submit
+   overhead, leaving only the few us between 'graph replay' and the 1-command floor; and if it is
+   attempted, `ZE_experimental_mutable_command_list` 1.1 (present on this driver) is the answer to
+   both its arg-buffer-rebuild and its SLM-binding problems.
 3. **Per-fragment DPAS efficiency** (was "DPAS kernel-side prefill gap"). The cost model is now
    measured, not guessed: **run time is proportional to the number of m8 FRAGMENTS executed**
    (MAXM=16 ran 1.2x the fragments of MAXM=8 at E260/rows1024 and took 1.20x the time, while
@@ -340,7 +353,12 @@ for the all-narrow slim kernel (`EXL3_MOE_I8SLIMRING=1`: +14..+18% at rows 1-8, 
 **int8 m16 joint_matrix accumulator (not supported by the device)**, **blocking the streamed tier
 on fully B70-registered layers** (the 2026-10-27 prefill regression; see Standing decisions),
 **`-mcs 320` on 2.05bpw** and **`CPU_WSLOTS>2` / bigger streamed batches** (2026-10-28, all under
-the new split: `ab.sh knobs`/`knobs2` in `SESSION_20261028.md`).
+the new split: `ab.sh knobs`/`knobs2` in `SESSION_20261028.md`), **every Level-Zero runtime env
+knob for decode** (`SYCL_UR_USE_LEVEL_ZERO_V2=0` -3.6%, immediate-commandlists=0 -4.6%, copy-engine
+offload -6…-9.5%, event-cleanup threshold -2.7%, compute-engine index -1.3%: `perfab.sh decenv`),
+**queue-index/low-latency-queue** (`max_compute_queue_indices == 1` on the B70), and **IPA/ML-IPA +
+mutable-call resident kernels** (neither extension exists on this driver — enumerated 63 extensions;
+see `archive/decode-command-latency.md` §“Research 2026-10-28”).
 
 ## Also
 
