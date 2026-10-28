@@ -588,3 +588,62 @@ Capability, and long-lived execution. Useful outcomes:
   `AsyncAlloc/device` document the runtime's dynamic-SLM and async-allocation paths; my per-submit
   measurement already varied exactly those shapes (2.55-2.62 us), so they are ruled out as the cause
   of the model's 5.4 us / harness's 21 us.
+
+## 2026-10-28: the queue PROPERTY is the cheap part of the submit cost (lab_inorder_cost.cpp)
+
+Prompted by re-opening P1 (see `platform-pitfalls.md` P1: production never built an in-order queue),
+the obvious follow-up is whether that costs us anything per action - because `sub` = 27.2 µs of the
+66.1 µs decode forward is exactly "per action × 5".
+
+Chain arm (one decode-shaped forward: H2D blob 1 KB + 4 kernels + D2H 10 KB, host time measured as a
+40-chain burst with the device busy behind it, min-of-5 windows, 200 chains burn-in; 7 independent
+runs). µs per chain of 6 actions:
+
+| arm | µs/chain | note |
+|---|---|---|
+| default queue + explicit `depends_on` on every op (**production today**) | **14.1 – 17.2** (median 14.8) | |
+| default queue, no edges (unsafe; isolates the bookkeeping) | 13.8 – 14.9 (median 14.2) | edges cost ~0.1 µs/action, i.e. ~1 µs/chain |
+| `in_order` queue + edges | 14.0 – 14.5 (median 14.2) | |
+| `in_order` queue, no edges | 13.7 – 14.2 (median 13.9) | |
+
+So the dependency edges P1 mandates are **not** where the money is (~6% of the chain), and switching
+to an in-order queue while keeping them is roughly neutral at chain level. Which raised a question,
+because the same table on the *wall* axis showed 18.3-20.4 µs with no clear winner, and the isolated
+launch numbers below contradict both.
+
+Call-path arm, the clean comparison: **6 identical launches, same kernel, same 14 arguments, same
+device work**, only the enqueue API and the queue property varied (2 repeats, 360 launches per cell,
+min-of-5 windows). µs per launch, host side:
+
+| queue | `q.submit` + functor | `ext_oneapi::nd_launch` + prebuilt kernel |
+|---|---|---|
+| **`in_order`** | **2.53 / 2.55** | 3.13 / 3.25 |
+| default (out-of-order) | 3.15 / 3.23 | 3.42 / 3.58 |
+
+Two conclusions, one of them a correction:
+
+1. **The queue property is worth ~0.6 µs per kernel launch (≈20%), and it is the property, not the
+   edges.** Same functor, same kernel, same args: 2.53 µs on an in-order queue vs 3.15 µs on the
+   out-of-order queue that production builds. The vendor launch-latency doc's note - "on an
+   out-of-order queue, event-less submission still creates events internally" - is the plausible
+   mechanism, and it is consistent with the edge cost being ~0.1 µs while the *property* cost is
+   ~0.6 µs: the runtime pays for an event per command because the queue could run them concurrently,
+   whether or not we ask for one.
+   Transfer estimate: decode issues ~5 actions/forward, of which 4 are kernel launches ⇒ ~2.5 µs/chain
+   here, and if the model's higher per-action cost (5.4 µs vs the lab's 2.5-3.2) carries the same
+   proportion, **~4-5 µs of the 66.1 µs forward**, i.e. ~1.5-2% decode at 2.05bpw - near the ±3% noise
+   floor, larger in share where the B70 leg dominates (4.05bpw).
+2. **`nd_launch` is not a lever - it is a small loss.** 0.6 µs *slower* per launch than `q.submit`
+   with a functor, on both queue flavours. This firm up's the earlier regimes K-O result ("identical",
+   2.66 vs 2.63) into "identical-or-worse", and kills the interim reading of the chain table above,
+   which had made the handler-free path look fast (it differed from the control in kernel body *and*
+   in how many handler submits it replaced - the trap of comparing arms that differ in more than the
+   factor under test).
+
+Not yet done (deliberately, because the model A/B is the expensive part and the answer is ~1%):
+build the plugin queue with `property::queue::in_order{}` behind a knob, read `sub` with
+`EXL3_MOE_B70_HOSTPROF` (rule 11: it prints its own denominator now), then 3 interleaved `perfab.sh`
+rounds on both placement layouts. Semantically in_order only *adds* ordering, and every op is already
+chained, so correctness is not at stake; the thing to watch is any place that relied on two
+independent command streams overlapping on the one queue (`b70_warm` against `b70_forward` share it
+today, serialized by `g.exec_mu`).

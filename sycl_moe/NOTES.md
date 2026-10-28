@@ -110,6 +110,13 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
     pass, 5-7 k afterwards; streamed experts 260 → ~70-110, tail rows 0 → ~300-770). Every
     policy/threshold experiment run on cold state measures a different workload. `pb.py`'s reps
     (or perf.py run 2) are the steady state; `split_report.py` shows the split per forward.
+12. **Arms must differ in exactly ONE factor — a 20% phantom win cost an hour.** In
+    `lab_inorder_cost.cpp` the first "handler-free `nd_launch`" arm looked ~2 µs/chain faster than the
+    control, but it also swapped the kernel body and replaced a different NUMBER of `q.submit` calls
+    inside the chain. Re-measured with 6 identical launches (same kernel, same 14 args, same device
+    work, only the API differing) the effect reverses sign: `nd_launch` is ~0.6 µs/launch *slower*.
+    Before quoting any A/B, name the single factor and show the arm that changes only it — and when a
+    result contradicts a previous measurement, suspect the comparison before the compiler.
 11. **An instrument that prints nothing may be BROKEN, not silent.** The first version of
     `EXL3_MOE_B70_HOSTPROF` never reset its stage counter in `begin()`, so after ~2 forwards
     nothing accumulated and every later window printed an empty line. I read that silence as
@@ -346,11 +353,22 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
    token, 6-8%, if it went away. Three candidate answers are already measured NO: command graphs
    (see 5), kernel fusion (`CoopGuK`: a wash - the device-side arrival chain costs what the dropped
    command saved), and **bypassing the runtime's command-group handler** - the promising one from
-   `test-e2e/EnqueueFunctions/nd_launch_kernel_obj_direct.cpp` ("no handler is created for these"),
-   which measures identical to the handler path (2.66-2.67 vs 2.63 us, regimes K-O of
-   `lab_submit_busy.cpp`), i.e. the cost is the L0 commit itself, not SYCL bookkeeping. That also
-   predicts PLAN_L0 would not deliver its headline benefit, so the raw
-   `zeCommandListAppendLaunchKernel` experiment is deprioritized. Still unexplained: the *same*
+   `test-e2e/EnqueueFunctions/nd_launch_kernel_obj_direct.cpp` ("no handler is created for these").
+   Measured twice now and it is **identical-or-worse**: 2.66-2.67 vs 2.63 us (regimes K-O of
+   `lab_submit_busy.cpp`), and with the arms truly matched - 6 identical launches, same kernel, same
+   14 args - `nd_launch` is ~0.6 us/launch SLOWER than `q.submit`+functor on both queue flavours
+   (`lab_inorder_cost.cpp`). i.e. the cost is the L0 commit, not SYCL's handler. That also predicts
+   PLAN_L0 would not deliver its headline benefit, so the raw
+   `zeCommandListAppendLaunchKernel` experiment is deprioritized.
+   **But the queue PROPERTY behind it is worth something** (`lab_inorder_cost.cpp`, and see P1: the
+   plugin's queue has never been in-order): the same `q.submit`+functor launch costs **2.53 us on an
+   `in_order` queue vs 3.15 us on the out-of-order queue we build** - ~0.6 us/launch, ~20%, and the
+   explicit `depends_on` edges themselves are only ~0.1 us/action. Plausible mechanism: the runtime
+   allocates an event per command because on an out-of-order queue commands COULD overlap, whether or
+   not we ask. Est. 4-5 us of the model's 66.1 us forward (~1.5-2% decode at 2.05bpw, more where the
+   B70 leg dominates) - near the noise floor, so it needs `EXL3_MOE_B70_HOSTPROF` plus 3 interleaved
+   `perfab.sh` rounds before anyone ships it. In_order only ADDS ordering and every op is already
+   chained, so the change is semantically safe; the thing to check is `b70_warm` sharing the queue. Still unexplained: the *same*
    `q.submit` costs 2.6 us in the lab (flat across drained/busy/no-dep/barrier-bracket regimes and
    across `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property
    shapes), ~5.4 us inside the plugin, ~21 us under `bench_layer`; the lab also drifts ~15% run to
