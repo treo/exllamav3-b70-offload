@@ -1,0 +1,28 @@
+ -- Loading /home/treo/projects/vendor/tabbyAPI/models/Qwen3.5-35B-A3B-3bpw-hq2
+
+ -- Warming up...
+
+ -- Loading tokenizer...
+Downloading WikiText-2 raw to /tmp/llama_cpp_ppl_wikitext2/wikitext-2-raw-v1.zip ...
+ -- Bitrate: 3.21 bpw / 6.01 bpw (head)
+ -- Chunk size: 4096
+
+
+[33;1mPrefill:[0m
+Length     256: [32;1m   1762.67[0m tokens/s
+Length     512: [32;1m   3300.03[0m tokens/s
+Length    1024: [32;1m   4349.85[0m tokens/s
+Length    2048: [32;1m   5043.39[0m tokens/s
+Length    4096: [32;1m   5762.02[0m tokens/s
+
+
+
+[33;1mGeneration[0m
+Context      0: S=[37;1m1 [32;1m    118.35[0m tokens/s [37;1m[115.33 - 121.37][0m
+Context    256: S=[37;1m1 [32;1m    107.85[0m tokens/s [37;1m[106.84 - 108.86][0m
+Context    512: S=[37;1m1 [32;1m    119.86[0m tokens/s [37;1m[115.91 - 123.81][0m
+Context   1024: S=[37;1m1 [32;1m    124.42[0m tokens/s [37;1m[123.74 - 125.10][0m
+Context   2048: S=[37;1m1 [32;1m    118.83[0m tokens/s [37;1m[115.18 - 122.48][0m
+Context   3840: S=[37;1m1 [32;1m    123.60[0m tokens/s [37;1m[122.52 - 124.68][0m
+
+

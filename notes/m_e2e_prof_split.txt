@@ -1,0 +1,1436 @@
+ -- Loading /home/treo/projects/vendor/tabbyAPI/models/Qwen3.5-35B-A3B-3bpw-hq2
+ -- CPU split experts (worker, dynamic): model.language_model.layers.0.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.1.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.2.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.3.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.4.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.5.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.6.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.7.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.8.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.9.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.10.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.11.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.12.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.13.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.14.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.15.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.16.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.17.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.18.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.19.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.20.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.21.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.22.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.23.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.24.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.25.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.26.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.27.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.28.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.29.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.30.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.31.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.32.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.33.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.34.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.35.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.36.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.37.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.38.mlp [64..256) of 256
+ -- CPU split experts (worker, dynamic): model.language_model.layers.39.mlp [64..256) of 256
+
+ -- CPU MoE worker started: 40 layers, avx2, 15 threads
+ -- CPU MoE host affinity: host on LPs [15, 31]
+ -- Warming up...
+ -- handoff prof (64 jobs, ms/job avg|max): gap 0.909|25.866 spin 0.051|0.413 compute 0.723|17.377 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (128 jobs, ms/job avg|max): gap 0.418|4.482 spin 0.068|0.433 compute 1.150|8.984 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (192 jobs, ms/job avg|max): gap 1.099|45.702 spin 0.097|0.828 compute 2.467|21.754 | empty 0/64, cpu-assign/row 5.99
+ -- handoff prof (256 jobs, ms/job avg|max): gap 13.217|604.446 spin 0.087|1.664 compute 5.254|27.035 | empty 0/64, cpu-assign/row 6.14
+ -- handoff prof (320 jobs, ms/job avg|max): gap 3.273|89.306 spin 0.018|0.373 compute 7.215|54.140 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (384 jobs, ms/job avg|max): gap 30.095|1837.037 spin 0.032|1.027 compute 2.583|5.081 | empty 0/64, cpu-assign/row 6.29
+ -- handoff prof (448 jobs, ms/job avg|max): gap 26.242|1576.656 spin 0.066|0.620 compute 3.834|6.774 | empty 0/64, cpu-assign/row 6.00
+
+ -- Loading tokenizer...
+ -- Bitrate: 3.66 bpw / 6.01 bpw (head)
+ -- Chunk size: 4096
+
+ -- moe_cpu prof (512 jobs, us/job): prep_gu 0.0 | gemv_gu 1840.2 (32.8 GB/s) | act+prep_d 0.0 | gemv_d 1012.3 (29.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (512 jobs, ms/job avg|max): gap 18.511|1146.925 spin 0.081|0.980 compute 1.964|5.537 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (576 jobs, ms/job avg|max): gap 1.683|7.975 spin 0.006|0.182 compute 2.609|3.926 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (640 jobs, ms/job avg|max): gap 3.378|75.467 spin 0.012|0.341 compute 2.603|3.742 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (704 jobs, ms/job avg|max): gap 2.280|12.599 spin 0.004|0.088 compute 2.199|3.367 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (768 jobs, ms/job avg|max): gap 4.175|106.662 spin 0.011|0.584 compute 2.156|3.230 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (832 jobs, ms/job avg|max): gap 4.825|31.282 spin 0.037|1.380 compute 2.093|4.234 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (896 jobs, ms/job avg|max): gap 4.033|21.799 spin 0.016|0.826 compute 1.867|3.124 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (960 jobs, ms/job avg|max): gap 9.473|120.143 spin 0.008|0.175 compute 1.705|3.041 | empty 0/64, cpu-assign/row 0.00
+ -- moe_cpu prof (1024 jobs, us/job): prep_gu 0.0 | gemv_gu 1564.3 (28.9 GB/s) | act+prep_d 0.0 | gemv_d 872.2 (25.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (1024 jobs, ms/job avg|max): gap 6.498|28.978 spin 0.012|0.230 compute 1.680|3.891 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (1088 jobs, ms/job avg|max): gap 14.238|136.200 spin 0.013|0.467 compute 1.512|2.898 | empty 0/64, cpu-assign/row 0.00
+
+[33;1mPrefill:[0m
+ -- handoff prof (1152 jobs, ms/job avg|max): gap 11.573|103.797 spin 0.022|0.979 compute 2.078|5.478 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (1216 jobs, ms/job avg|max): gap 1.807|10.344 spin 0.024|0.712 compute 2.646|4.323 | empty 0/64, cpu-assign/row 0.00
+Length     256: [32;1m    387.18[0m tokens/s
+ -- handoff prof (1280 jobs, ms/job avg|max): gap 3.547|82.613 spin 0.010|0.225 compute 2.651|4.267 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (1344 jobs, ms/job avg|max): gap 2.252|13.360 spin 0.004|0.098 compute 2.483|4.081 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (1408 jobs, ms/job avg|max): gap 2.395|13.273 spin 0.005|0.120 compute 2.324|3.195 | empty 0/64, cpu-assign/row 0.00
+Length     512: [32;1m    610.48[0m tokens/s
+ -- handoff prof (1472 jobs, ms/job avg|max): gap 5.220|102.988 spin 0.005|0.127 compute 2.068|2.981 | empty 0/64, cpu-assign/row 0.00
+ -- moe_cpu prof (1536 jobs, us/job): prep_gu 0.0 | gemv_gu 1495.2 (27.2 GB/s) | act+prep_d 0.0 | gemv_d 837.3 (24.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (1536 jobs, ms/job avg|max): gap 3.309|20.110 spin 0.010|0.539 compute 2.049|3.374 | empty 0/64, cpu-assign/row 0.00
+Length    1024: [32;1m    982.83[0m tokens/s
+ -- handoff prof (1600 jobs, ms/job avg|max): gap 7.272|110.193 spin 0.010|0.536 compute 2.046|5.232 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (1664 jobs, ms/job avg|max): gap 5.298|26.597 spin 0.012|0.532 compute 1.761|3.198 | empty 0/64, cpu-assign/row 0.00
+Length    2048: [32;1m   1659.79[0m tokens/s
+ -- handoff prof (1728 jobs, ms/job avg|max): gap 10.147|124.064 spin 0.011|0.207 compute 1.707|2.524 | empty 0/64, cpu-assign/row 0.00
+ -- handoff prof (1792 jobs, ms/job avg|max): gap 12.822|35.171 spin 0.030|0.536 compute 1.433|2.302 | empty 0/64, cpu-assign/row 0.00
+Length    4096: [32;1m   2794.89[0m tokens/s
+
+
+ -- handoff prof (1856 jobs, ms/job avg|max): gap 3.793|32.593 spin 0.071|0.161 compute 0.588|2.292 | empty 0/64, cpu-assign/row 6.22
+ -- handoff prof (1920 jobs, ms/job avg|max): gap 0.025|0.863 spin 0.128|0.703 compute 0.189|0.310 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (1984 jobs, ms/job avg|max): gap 0.040|0.834 spin 0.108|0.447 compute 0.195|0.338 | empty 0/64, cpu-assign/row 5.86
+ -- moe_cpu prof (2048 jobs, us/job): prep_gu 0.0 | gemv_gu 1276.9 (26.7 GB/s) | act+prep_d 0.0 | gemv_d 712.4 (23.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (2048 jobs, ms/job avg|max): gap 0.018|0.837 spin 0.107|0.232 compute 0.199|0.268 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (2112 jobs, ms/job avg|max): gap 0.047|1.245 spin 0.117|0.546 compute 0.203|0.265 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (2176 jobs, ms/job avg|max): gap 0.043|1.333 spin 0.114|0.306 compute 0.197|0.281 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (2240 jobs, ms/job avg|max): gap 0.019|0.879 spin 0.107|0.326 compute 0.192|0.275 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (2304 jobs, ms/job avg|max): gap 0.032|0.781 spin 0.114|0.406 compute 0.206|0.336 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (2368 jobs, ms/job avg|max): gap 0.021|1.149 spin 0.132|0.375 compute 0.213|0.301 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (2432 jobs, ms/job avg|max): gap 0.034|0.794 spin 0.104|0.286 compute 0.203|0.279 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (2496 jobs, ms/job avg|max): gap 0.039|0.878 spin 0.115|0.527 compute 0.220|0.329 | empty 0/64, cpu-assign/row 6.05
+ -- moe_cpu prof (2560 jobs, us/job): prep_gu 0.0 | gemv_gu 1047.9 (26.9 GB/s) | act+prep_d 0.0 | gemv_d 583.5 (24.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (2560 jobs, ms/job avg|max): gap 0.097|3.671 spin 0.111|0.534 compute 0.224|0.405 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (2624 jobs, ms/job avg|max): gap 0.035|0.850 spin 0.108|0.409 compute 0.207|0.314 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (2688 jobs, ms/job avg|max): gap 0.025|0.909 spin 0.116|0.608 compute 0.201|0.269 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (2752 jobs, ms/job avg|max): gap 0.034|0.894 spin 0.145|0.772 compute 0.208|0.293 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (2816 jobs, ms/job avg|max): gap 0.040|0.812 spin 0.124|0.482 compute 0.196|0.303 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (2880 jobs, ms/job avg|max): gap 0.026|1.042 spin 0.205|1.366 compute 0.195|0.894 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (2944 jobs, ms/job avg|max): gap 0.055|2.114 spin 0.257|1.740 compute 0.217|1.265 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (3008 jobs, ms/job avg|max): gap 0.025|1.059 spin 0.297|1.652 compute 0.206|0.273 | empty 0/64, cpu-assign/row 6.08
+ -- moe_cpu prof (3072 jobs, us/job): prep_gu 0.0 | gemv_gu 895.1 (27.2 GB/s) | act+prep_d 0.0 | gemv_d 497.2 (24.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (3072 jobs, ms/job avg|max): gap 0.055|1.713 spin 0.282|1.774 compute 0.193|0.277 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (3136 jobs, ms/job avg|max): gap 0.049|1.790 spin 0.286|1.950 compute 0.195|0.364 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (3200 jobs, ms/job avg|max): gap 0.018|0.784 spin 0.147|0.808 compute 0.192|0.262 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (3264 jobs, ms/job avg|max): gap 0.031|0.788 spin 0.121|0.733 compute 0.192|0.252 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (3328 jobs, ms/job avg|max): gap 0.018|0.848 spin 0.153|0.806 compute 0.192|0.291 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (3392 jobs, ms/job avg|max): gap 0.035|0.858 spin 0.115|0.528 compute 0.192|0.272 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (3456 jobs, ms/job avg|max): gap 0.035|0.793 spin 0.111|0.320 compute 0.200|0.279 | empty 0/64, cpu-assign/row 6.14
+ -- handoff prof (3520 jobs, ms/job avg|max): gap 0.018|0.753 spin 0.106|0.224 compute 0.194|0.262 | empty 0/64, cpu-assign/row 6.00
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.017 max 0.847 | worst layers L0:0.033 L23:0.026 L3:0.023 L26:0.021
+ -- split prof [wait] (2048 brackets, stream ms): med 0.160 p90 0.455 max 14.448 | worst layers L0:0.638 L2:0.410 L20:0.339 L8:0.329
+ -- moe_cpu prof (3584 jobs, us/job): prep_gu 0.0 | gemv_gu 784.9 (27.4 GB/s) | act+prep_d 0.0 | gemv_d 435.3 (24.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (3584 jobs, ms/job avg|max): gap 0.218|11.890 spin 0.150|0.763 compute 0.196|0.279 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (3648 jobs, ms/job avg|max): gap 0.023|0.831 spin 0.125|0.738 compute 0.196|0.264 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (3712 jobs, ms/job avg|max): gap 0.032|0.766 spin 0.115|0.575 compute 0.202|0.284 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (3776 jobs, ms/job avg|max): gap 0.033|1.001 spin 0.151|0.923 compute 0.198|0.275 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (3840 jobs, ms/job avg|max): gap 0.019|0.776 spin 0.111|0.334 compute 0.181|0.251 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (3904 jobs, ms/job avg|max): gap 0.036|0.906 spin 0.129|0.812 compute 0.191|0.258 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (3968 jobs, ms/job avg|max): gap 0.015|0.747 spin 0.153|0.828 compute 0.197|0.350 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (4032 jobs, ms/job avg|max): gap 0.036|0.941 spin 0.103|0.286 compute 0.193|0.262 | empty 0/64, cpu-assign/row 6.06
+ -- moe_cpu prof (4096 jobs, us/job): prep_gu 0.0 | gemv_gu 702.3 (27.6 GB/s) | act+prep_d 0.0 | gemv_d 388.9 (24.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (4096 jobs, ms/job avg|max): gap 0.032|0.790 spin 0.129|0.851 compute 0.203|0.296 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (4160 jobs, ms/job avg|max): gap 0.025|0.747 spin 0.100|0.324 compute 0.192|0.309 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (4224 jobs, ms/job avg|max): gap 0.042|1.030 spin 0.150|0.926 compute 0.210|0.737 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (4288 jobs, ms/job avg|max): gap 0.024|1.307 spin 0.111|0.288 compute 0.202|0.272 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (4352 jobs, ms/job avg|max): gap 0.040|1.327 spin 0.112|0.726 compute 0.207|0.276 | empty 0/64, cpu-assign/row 6.23
+ -- handoff prof (4416 jobs, ms/job avg|max): gap 0.041|0.930 spin 0.127|0.849 compute 0.212|0.302 | empty 0/64, cpu-assign/row 6.25
+ -- handoff prof (4480 jobs, ms/job avg|max): gap 0.037|1.045 spin 0.122|0.680 compute 0.214|0.283 | empty 0/64, cpu-assign/row 6.23
+ -- handoff prof (4544 jobs, ms/job avg|max): gap 0.055|0.903 spin 0.125|0.794 compute 0.203|0.281 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (4608 jobs, us/job): prep_gu 0.0 | gemv_gu 638.8 (27.8 GB/s) | act+prep_d 0.0 | gemv_d 353.2 (25.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (4608 jobs, ms/job avg|max): gap 0.018|0.765 spin 0.103|0.146 compute 0.193|0.301 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (4672 jobs, ms/job avg|max): gap 0.033|0.789 spin 0.151|0.743 compute 0.190|0.274 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (4736 jobs, ms/job avg|max): gap 0.034|0.802 spin 0.126|0.893 compute 0.195|0.296 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (4800 jobs, ms/job avg|max): gap 0.018|0.765 spin 0.112|0.625 compute 0.190|0.279 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (4864 jobs, ms/job avg|max): gap 0.036|1.069 spin 0.130|0.849 compute 0.191|0.258 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (4928 jobs, ms/job avg|max): gap 0.018|0.780 spin 0.140|1.000 compute 0.190|0.285 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (4992 jobs, ms/job avg|max): gap 0.036|0.772 spin 0.114|0.733 compute 0.190|0.254 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (5056 jobs, ms/job avg|max): gap 0.040|0.758 spin 0.128|0.717 compute 0.189|0.253 | empty 0/64, cpu-assign/row 5.92
+ -- moe_cpu prof (5120 jobs, us/job): prep_gu 0.0 | gemv_gu 587.2 (28.0 GB/s) | act+prep_d 0.0 | gemv_d 324.2 (25.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (5120 jobs, ms/job avg|max): gap 0.019|0.917 spin 0.148|1.318 compute 0.203|0.413 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (5184 jobs, ms/job avg|max): gap 0.033|0.764 spin 0.104|0.281 compute 0.185|0.256 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (5248 jobs, ms/job avg|max): gap 0.015|0.752 spin 0.137|0.784 compute 0.205|0.574 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (5312 jobs, ms/job avg|max): gap 0.032|0.857 spin 0.114|0.342 compute 0.192|0.280 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (5376 jobs, ms/job avg|max): gap 0.045|1.553 spin 0.140|0.705 compute 0.197|0.268 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (5440 jobs, ms/job avg|max): gap 0.017|0.747 spin 0.130|0.710 compute 0.196|0.313 | empty 0/64, cpu-assign/row 6.16
+ -- handoff prof (5504 jobs, ms/job avg|max): gap 0.033|0.855 spin 0.130|0.752 compute 0.202|0.262 | empty 0/64, cpu-assign/row 6.25
+ -- handoff prof (5568 jobs, ms/job avg|max): gap 0.015|0.727 spin 0.162|0.753 compute 0.203|0.275 | empty 0/64, cpu-assign/row 6.08
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.085 | worst layers L3:0.015 L0:0.015 L7:0.011 L1:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.147 p90 0.247 max 1.413 | worst layers L23:0.224 L34:0.206 L20:0.206 L17:0.197
+ -- moe_cpu prof (5632 jobs, us/job): prep_gu 0.0 | gemv_gu 545.3 (28.2 GB/s) | act+prep_d 0.0 | gemv_d 300.5 (25.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (5632 jobs, ms/job avg|max): gap 0.214|11.652 spin 0.110|0.548 compute 0.192|0.265 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (5696 jobs, ms/job avg|max): gap 0.034|0.797 spin 0.105|0.344 compute 0.191|0.260 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (5760 jobs, ms/job avg|max): gap 0.021|1.055 spin 0.137|0.649 compute 0.205|0.356 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (5824 jobs, ms/job avg|max): gap 0.041|1.202 spin 0.112|0.813 compute 0.198|0.261 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (5888 jobs, ms/job avg|max): gap 0.025|0.820 spin 0.138|0.755 compute 0.204|0.276 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (5952 jobs, ms/job avg|max): gap 0.034|0.921 spin 0.116|0.601 compute 0.212|0.270 | empty 0/64, cpu-assign/row 6.38
+ -- handoff prof (6016 jobs, ms/job avg|max): gap 0.042|0.786 spin 0.136|0.713 compute 0.202|0.297 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (6080 jobs, ms/job avg|max): gap 0.017|0.772 spin 0.120|0.694 compute 0.199|0.261 | empty 0/64, cpu-assign/row 6.27
+ -- moe_cpu prof (6144 jobs, us/job): prep_gu 0.0 | gemv_gu 510.5 (28.4 GB/s) | act+prep_d 0.0 | gemv_d 281.0 (25.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (6144 jobs, ms/job avg|max): gap 0.053|1.339 spin 0.109|0.418 compute 0.199|0.272 | empty 0/64, cpu-assign/row 6.14
+ -- handoff prof (6208 jobs, ms/job avg|max): gap 0.016|0.750 spin 0.144|0.707 compute 0.206|0.276 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (6272 jobs, ms/job avg|max): gap 0.033|0.782 spin 0.109|0.656 compute 0.190|0.261 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (6336 jobs, ms/job avg|max): gap 0.034|0.752 spin 0.133|0.817 compute 0.196|0.294 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (6400 jobs, ms/job avg|max): gap 0.016|0.739 spin 0.119|0.387 compute 0.201|0.268 | empty 0/64, cpu-assign/row 6.20
+ -- handoff prof (6464 jobs, ms/job avg|max): gap 0.041|0.922 spin 0.121|0.340 compute 0.195|0.267 | empty 0/64, cpu-assign/row 6.17
+ -- handoff prof (6528 jobs, ms/job avg|max): gap 0.018|0.854 spin 0.121|0.464 compute 0.200|0.269 | empty 0/64, cpu-assign/row 6.17
+ -- handoff prof (6592 jobs, ms/job avg|max): gap 0.036|0.843 spin 0.111|0.494 compute 0.199|0.277 | empty 0/64, cpu-assign/row 6.23
+ -- moe_cpu prof (6656 jobs, us/job): prep_gu 0.0 | gemv_gu 480.9 (28.6 GB/s) | act+prep_d 0.0 | gemv_d 264.4 (26.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (6656 jobs, ms/job avg|max): gap 0.037|0.925 spin 0.116|0.331 compute 0.192|0.292 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (6720 jobs, ms/job avg|max): gap 0.016|0.763 spin 0.126|0.565 compute 0.196|0.296 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (6784 jobs, ms/job avg|max): gap 0.035|0.983 spin 0.107|0.374 compute 0.199|0.277 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (6848 jobs, ms/job avg|max): gap 0.017|0.733 spin 0.106|0.265 compute 0.188|0.249 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (6912 jobs, ms/job avg|max): gap 0.034|0.954 spin 0.132|0.341 compute 0.205|0.544 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (6976 jobs, ms/job avg|max): gap 0.030|0.740 spin 0.106|0.304 compute 0.194|0.283 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (7040 jobs, ms/job avg|max): gap 0.018|0.754 spin 0.116|0.408 compute 0.194|0.280 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (7104 jobs, ms/job avg|max): gap 0.034|0.744 spin 0.117|0.614 compute 0.198|0.412 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (7168 jobs, us/job): prep_gu 0.0 | gemv_gu 455.5 (28.8 GB/s) | act+prep_d 0.0 | gemv_d 250.1 (26.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (7168 jobs, ms/job avg|max): gap 0.020|0.948 spin 0.137|0.584 compute 0.188|0.281 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (7232 jobs, ms/job avg|max): gap 0.035|0.737 spin 0.102|0.293 compute 0.175|0.256 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (7296 jobs, ms/job avg|max): gap 0.033|0.763 spin 0.113|0.379 compute 0.192|0.265 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (7360 jobs, ms/job avg|max): gap 0.016|0.735 spin 0.118|0.336 compute 0.201|0.279 | empty 0/64, cpu-assign/row 6.19
+ -- handoff prof (7424 jobs, ms/job avg|max): gap 0.031|0.740 spin 0.126|0.569 compute 0.197|0.268 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (7488 jobs, ms/job avg|max): gap 0.017|0.748 spin 0.118|0.432 compute 0.189|0.258 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (7552 jobs, ms/job avg|max): gap 0.031|0.732 spin 0.101|0.121 compute 0.183|0.270 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (7616 jobs, ms/job avg|max): gap 0.036|0.997 spin 0.129|0.423 compute 0.190|0.263 | empty 0/64, cpu-assign/row 5.66
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.045 | worst layers L0:0.014 L3:0.012 L20:0.011 L32:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.147 p90 0.237 max 0.755 | worst layers L25:0.203 L13:0.187 L7:0.185 L11:0.183
+ -- moe_cpu prof (7680 jobs, us/job): prep_gu 0.0 | gemv_gu 433.2 (29.0 GB/s) | act+prep_d 0.0 | gemv_d 237.6 (26.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (7680 jobs, ms/job avg|max): gap 0.189|11.113 spin 0.121|0.381 compute 0.195|0.287 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (7744 jobs, ms/job avg|max): gap 0.040|0.932 spin 0.106|0.632 compute 0.197|0.278 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (7808 jobs, ms/job avg|max): gap 0.015|0.735 spin 0.131|0.377 compute 0.191|0.272 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (7872 jobs, ms/job avg|max): gap 0.030|0.746 spin 0.120|0.383 compute 0.191|0.295 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (7936 jobs, ms/job avg|max): gap 0.035|0.744 spin 0.109|0.545 compute 0.183|0.276 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (8000 jobs, ms/job avg|max): gap 0.015|0.746 spin 0.109|0.316 compute 0.188|0.255 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (8064 jobs, ms/job avg|max): gap 0.032|0.754 spin 0.132|0.444 compute 0.199|0.315 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (8128 jobs, ms/job avg|max): gap 0.015|0.745 spin 0.114|0.362 compute 0.174|0.246 | empty 0/64, cpu-assign/row 5.48
+ -- moe_cpu prof (8192 jobs, us/job): prep_gu 0.0 | gemv_gu 413.7 (29.1 GB/s) | act+prep_d 0.0 | gemv_d 226.6 (26.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (8192 jobs, ms/job avg|max): gap 0.039|0.895 spin 0.111|0.422 compute 0.190|0.265 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (8256 jobs, ms/job avg|max): gap 0.031|0.755 spin 0.140|0.563 compute 0.188|0.273 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (8320 jobs, ms/job avg|max): gap 0.018|0.735 spin 0.132|0.412 compute 0.184|0.245 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (8384 jobs, ms/job avg|max): gap 0.031|0.731 spin 0.118|0.418 compute 0.191|0.263 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (8448 jobs, ms/job avg|max): gap 0.015|0.738 spin 0.131|0.454 compute 0.189|0.281 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (8512 jobs, ms/job avg|max): gap 0.031|0.739 spin 0.108|0.296 compute 0.187|0.307 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (8576 jobs, ms/job avg|max): gap 0.033|0.757 spin 0.133|0.766 compute 0.189|0.275 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (8640 jobs, ms/job avg|max): gap 0.019|0.751 spin 0.116|0.564 compute 0.192|0.266 | empty 0/64, cpu-assign/row 5.97
+ -- moe_cpu prof (8704 jobs, us/job): prep_gu 0.0 | gemv_gu 396.4 (29.3 GB/s) | act+prep_d 0.0 | gemv_d 216.9 (26.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (8704 jobs, ms/job avg|max): gap 0.037|0.767 spin 0.098|0.123 compute 0.188|0.250 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (8768 jobs, ms/job avg|max): gap 0.015|0.728 spin 0.141|0.419 compute 0.192|0.272 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (8832 jobs, ms/job avg|max): gap 0.043|1.429 spin 0.125|0.707 compute 0.186|0.251 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (8896 jobs, ms/job avg|max): gap 0.033|0.862 spin 0.116|0.778 compute 0.189|0.273 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (8960 jobs, ms/job avg|max): gap 0.017|0.868 spin 0.125|0.778 compute 0.197|0.307 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (9024 jobs, ms/job avg|max): gap 0.040|1.281 spin 0.132|0.571 compute 0.193|0.287 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (9088 jobs, ms/job avg|max): gap 0.026|1.322 spin 0.114|0.766 compute 0.184|0.252 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (9152 jobs, ms/job avg|max): gap 0.033|0.739 spin 0.119|0.598 compute 0.185|0.257 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (9216 jobs, us/job): prep_gu 0.0 | gemv_gu 381.1 (29.5 GB/s) | act+prep_d 0.0 | gemv_d 208.4 (26.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (9216 jobs, ms/job avg|max): gap 0.033|0.819 spin 0.130|0.761 compute 0.186|0.256 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (9280 jobs, ms/job avg|max): gap 0.017|0.758 spin 0.153|0.823 compute 0.196|0.282 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (9344 jobs, ms/job avg|max): gap 0.046|0.908 spin 0.111|0.567 compute 0.188|0.289 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (9408 jobs, ms/job avg|max): gap 0.016|0.731 spin 0.133|0.737 compute 0.198|0.276 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (9472 jobs, ms/job avg|max): gap 0.034|0.968 spin 0.126|0.333 compute 0.204|0.270 | empty 0/64, cpu-assign/row 6.28
+ -- handoff prof (9536 jobs, ms/job avg|max): gap 0.036|0.939 spin 0.128|0.704 compute 0.205|0.273 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (9600 jobs, ms/job avg|max): gap 0.017|0.744 spin 0.117|0.379 compute 0.196|0.265 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (9664 jobs, ms/job avg|max): gap 0.031|0.753 spin 0.124|0.837 compute 0.191|0.295 | empty 0/64, cpu-assign/row 5.97
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.115 | worst layers L0:0.013 L7:0.012 L3:0.012 L10:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.142 p90 0.240 max 0.998 | worst layers L17:0.193 L11:0.192 L13:0.190 L25:0.190
+ -- moe_cpu prof (9728 jobs, us/job): prep_gu 0.0 | gemv_gu 367.6 (29.6 GB/s) | act+prep_d 0.0 | gemv_d 200.8 (27.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (9728 jobs, ms/job avg|max): gap 0.181|10.536 spin 0.150|0.831 compute 0.193|0.320 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (9792 jobs, ms/job avg|max): gap 0.030|0.762 spin 0.116|0.556 compute 0.201|0.320 | empty 0/64, cpu-assign/row 6.12
+ -- handoff prof (9856 jobs, ms/job avg|max): gap 0.038|1.133 spin 0.111|0.367 compute 0.206|0.302 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (9920 jobs, ms/job avg|max): gap 0.020|0.767 spin 0.138|0.740 compute 0.190|0.258 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (9984 jobs, ms/job avg|max): gap 0.032|0.842 spin 0.122|0.632 compute 0.192|0.308 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (10048 jobs, ms/job avg|max): gap 0.015|0.727 spin 0.142|1.011 compute 0.193|0.291 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (10112 jobs, ms/job avg|max): gap 0.034|0.820 spin 0.123|0.335 compute 0.191|0.259 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (10176 jobs, ms/job avg|max): gap 0.032|0.832 spin 0.137|0.788 compute 0.193|0.267 | empty 0/64, cpu-assign/row 5.94
+ -- moe_cpu prof (10240 jobs, us/job): prep_gu 0.0 | gemv_gu 355.5 (29.7 GB/s) | act+prep_d 0.0 | gemv_d 194.0 (27.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (10240 jobs, ms/job avg|max): gap 0.018|0.745 spin 0.114|0.389 compute 0.198|0.323 | empty 0/64, cpu-assign/row 6.12
+ -- handoff prof (10304 jobs, ms/job avg|max): gap 0.032|0.754 spin 0.121|0.750 compute 0.191|0.256 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (10368 jobs, ms/job avg|max): gap 0.023|0.906 spin 0.137|0.576 compute 0.200|0.366 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (10432 jobs, ms/job avg|max): gap 0.032|0.772 spin 0.105|0.391 compute 0.195|0.264 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (10496 jobs, ms/job avg|max): gap 0.037|0.753 spin 0.126|0.589 compute 0.201|0.297 | empty 0/64, cpu-assign/row 6.17
+ -- handoff prof (10560 jobs, ms/job avg|max): gap 0.016|0.760 spin 0.142|0.724 compute 0.203|0.303 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (10624 jobs, ms/job avg|max): gap 0.040|1.136 spin 0.133|0.700 compute 0.209|0.298 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (10688 jobs, ms/job avg|max): gap 0.017|0.763 spin 0.115|0.731 compute 0.201|0.296 | empty 0/64, cpu-assign/row 5.92
+ -- moe_cpu prof (10752 jobs, us/job): prep_gu 0.0 | gemv_gu 344.6 (29.9 GB/s) | act+prep_d 0.0 | gemv_d 187.9 (27.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (10752 jobs, ms/job avg|max): gap 0.054|1.351 spin 0.113|0.419 compute 0.209|0.289 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (10816 jobs, ms/job avg|max): gap 0.038|0.934 spin 0.129|0.521 compute 0.220|0.315 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (10880 jobs, ms/job avg|max): gap 0.023|0.798 spin 0.121|0.830 compute 0.219|0.314 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (10944 jobs, ms/job avg|max): gap 0.036|0.801 spin 0.114|0.512 compute 0.207|0.280 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (11008 jobs, ms/job avg|max): gap 0.015|0.761 spin 0.137|0.631 compute 0.199|0.340 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (11072 jobs, ms/job avg|max): gap 0.048|1.572 spin 0.145|0.729 compute 0.205|0.316 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (11136 jobs, ms/job avg|max): gap 0.030|0.767 spin 0.106|0.369 compute 0.189|0.254 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (11200 jobs, ms/job avg|max): gap 0.026|1.249 spin 0.211|1.508 compute 0.194|0.276 | empty 0/64, cpu-assign/row 5.75
+ -- moe_cpu prof (11264 jobs, us/job): prep_gu 0.0 | gemv_gu 334.9 (30.0 GB/s) | act+prep_d 0.0 | gemv_d 182.4 (27.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (11264 jobs, ms/job avg|max): gap 0.046|1.046 spin 0.343|1.664 compute 0.209|0.563 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (11328 jobs, ms/job avg|max): gap 0.027|0.836 spin 0.290|1.755 compute 0.210|1.306 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (11392 jobs, ms/job avg|max): gap 0.043|0.966 spin 0.308|1.936 compute 0.206|0.296 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (11456 jobs, ms/job avg|max): gap 0.041|1.390 spin 0.288|1.844 compute 0.193|0.287 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (11520 jobs, ms/job avg|max): gap 0.017|0.773 spin 0.172|1.321 compute 0.196|0.273 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (11584 jobs, ms/job avg|max): gap 0.044|1.425 spin 0.126|0.655 compute 0.192|0.304 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (11648 jobs, ms/job avg|max): gap 0.017|0.749 spin 0.121|0.664 compute 0.198|0.281 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (11712 jobs, ms/job avg|max): gap 0.044|1.343 spin 0.108|0.294 compute 0.188|0.287 | empty 0/64, cpu-assign/row 5.78
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.062 | worst layers L0:0.015 L3:0.013 L1:0.011 L8:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.156 p90 0.293 max 2.020 | worst layers L13:0.284 L29:0.256 L8:0.234 L7:0.233
+ -- moe_cpu prof (11776 jobs, us/job): prep_gu 0.0 | gemv_gu 325.9 (30.1 GB/s) | act+prep_d 0.0 | gemv_d 177.3 (27.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (11776 jobs, ms/job avg|max): gap 0.193|11.053 spin 0.144|0.739 compute 0.200|0.305 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (11840 jobs, ms/job avg|max): gap 0.020|0.791 spin 0.122|0.449 compute 0.186|0.276 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (11904 jobs, ms/job avg|max): gap 0.037|0.944 spin 0.120|0.736 compute 0.190|0.255 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (11968 jobs, ms/job avg|max): gap 0.017|0.795 spin 0.128|0.558 compute 0.198|0.279 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (12032 jobs, ms/job avg|max): gap 0.038|1.041 spin 0.126|0.421 compute 0.192|0.257 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (12096 jobs, ms/job avg|max): gap 0.032|0.737 spin 0.102|0.287 compute 0.176|0.256 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (12160 jobs, ms/job avg|max): gap 0.017|0.757 spin 0.142|0.811 compute 0.197|0.278 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (12224 jobs, ms/job avg|max): gap 0.034|0.838 spin 0.138|0.585 compute 0.190|0.282 | empty 0/64, cpu-assign/row 5.73
+ -- moe_cpu prof (12288 jobs, us/job): prep_gu 0.0 | gemv_gu 317.3 (30.2 GB/s) | act+prep_d 0.0 | gemv_d 172.5 (27.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (12288 jobs, ms/job avg|max): gap 0.015|0.745 spin 0.124|0.745 compute 0.185|0.256 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (12352 jobs, ms/job avg|max): gap 0.033|0.763 spin 0.120|0.426 compute 0.193|0.266 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (12416 jobs, ms/job avg|max): gap 0.033|0.770 spin 0.142|0.810 compute 0.199|0.303 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (12480 jobs, ms/job avg|max): gap 0.018|0.756 spin 0.133|0.751 compute 0.196|0.265 | empty 0/64, cpu-assign/row 6.22
+ -- handoff prof (12544 jobs, ms/job avg|max): gap 0.031|0.758 spin 0.130|0.777 compute 0.200|0.386 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (12608 jobs, ms/job avg|max): gap 0.017|0.854 spin 0.134|0.722 compute 0.191|0.289 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (12672 jobs, ms/job avg|max): gap 0.031|0.767 spin 0.129|0.321 compute 0.199|0.292 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (12736 jobs, ms/job avg|max): gap 0.043|1.310 spin 0.122|0.827 compute 0.182|0.245 | empty 0/64, cpu-assign/row 5.64
+ -- moe_cpu prof (12800 jobs, us/job): prep_gu 0.0 | gemv_gu 309.6 (30.3 GB/s) | act+prep_d 0.0 | gemv_d 168.2 (27.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (12800 jobs, ms/job avg|max): gap 0.025|1.337 spin 0.112|0.361 compute 0.200|0.266 | empty 0/64, cpu-assign/row 6.23
+ -- handoff prof (12864 jobs, ms/job avg|max): gap 0.044|1.466 spin 0.126|0.539 compute 0.192|0.265 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (12928 jobs, ms/job avg|max): gap 0.017|0.742 spin 0.129|0.525 compute 0.189|0.298 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (12992 jobs, ms/job avg|max): gap 0.035|0.893 spin 0.127|0.679 compute 0.184|0.258 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (13056 jobs, ms/job avg|max): gap 0.032|0.766 spin 0.131|0.758 compute 0.192|0.293 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (13120 jobs, ms/job avg|max): gap 0.019|0.957 spin 0.134|0.523 compute 0.197|0.290 | empty 0/64, cpu-assign/row 6.12
+ -- handoff prof (13184 jobs, ms/job avg|max): gap 0.037|0.855 spin 0.113|0.380 compute 0.196|0.270 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (13248 jobs, ms/job avg|max): gap 0.053|0.740 spin 0.100|0.482 compute 0.196|0.257 | empty 0/64, cpu-assign/row 6.16
+ -- moe_cpu prof (13312 jobs, us/job): prep_gu 0.0 | gemv_gu 302.4 (30.5 GB/s) | act+prep_d 0.0 | gemv_d 164.1 (28.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (13312 jobs, ms/job avg|max): gap 0.052|0.862 spin 0.097|0.302 compute 0.194|0.250 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (13376 jobs, ms/job avg|max): gap 0.036|0.955 spin 0.134|0.455 compute 0.197|0.281 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (13440 jobs, ms/job avg|max): gap 0.022|0.754 spin 0.108|0.298 compute 0.197|0.302 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (13504 jobs, ms/job avg|max): gap 0.032|0.769 spin 0.113|0.547 compute 0.194|0.273 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (13568 jobs, ms/job avg|max): gap 0.017|0.744 spin 0.125|0.390 compute 0.200|0.327 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (13632 jobs, ms/job avg|max): gap 0.031|0.758 spin 0.121|0.417 compute 0.195|0.276 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (13696 jobs, ms/job avg|max): gap 0.043|0.850 spin 0.114|0.452 compute 0.203|0.272 | empty 0/64, cpu-assign/row 6.19
+ -- handoff prof (13760 jobs, ms/job avg|max): gap 0.026|1.364 spin 0.140|0.748 compute 0.188|0.259 | empty 0/64, cpu-assign/row 5.75
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.067 | worst layers L0:0.014 L3:0.013 L24:0.011 L26:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.145 p90 0.244 max 0.911 | worst layers L25:0.236 L13:0.204 L22:0.201 L7:0.201
+ -- moe_cpu prof (13824 jobs, us/job): prep_gu 0.0 | gemv_gu 295.9 (30.6 GB/s) | act+prep_d 0.0 | gemv_d 160.4 (28.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (13824 jobs, ms/job avg|max): gap 0.236|11.891 spin 0.124|0.362 compute 0.190|0.355 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (13888 jobs, ms/job avg|max): gap 0.019|0.784 spin 0.141|0.709 compute 0.197|0.259 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (13952 jobs, ms/job avg|max): gap 0.029|0.746 spin 0.130|0.722 compute 0.185|0.260 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (14016 jobs, ms/job avg|max): gap 0.033|0.780 spin 0.136|0.631 compute 0.191|0.278 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (14080 jobs, ms/job avg|max): gap 0.018|0.757 spin 0.140|0.785 compute 0.182|0.265 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (14144 jobs, ms/job avg|max): gap 0.033|0.852 spin 0.105|0.303 compute 0.183|0.250 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (14208 jobs, ms/job avg|max): gap 0.018|0.893 spin 0.149|0.785 compute 0.182|0.276 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (14272 jobs, ms/job avg|max): gap 0.035|0.769 spin 0.137|0.439 compute 0.189|0.302 | empty 0/64, cpu-assign/row 5.80
+ -- moe_cpu prof (14336 jobs, us/job): prep_gu 0.0 | gemv_gu 289.6 (30.7 GB/s) | act+prep_d 0.0 | gemv_d 156.9 (28.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (14336 jobs, ms/job avg|max): gap 0.035|0.764 spin 0.118|0.749 compute 0.192|0.274 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (14400 jobs, ms/job avg|max): gap 0.019|0.777 spin 0.121|0.570 compute 0.191|0.263 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (14464 jobs, ms/job avg|max): gap 0.035|0.758 spin 0.152|0.760 compute 0.190|0.269 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (14528 jobs, ms/job avg|max): gap 0.022|0.784 spin 0.120|0.784 compute 0.194|0.263 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (14592 jobs, ms/job avg|max): gap 0.039|0.871 spin 0.117|0.749 compute 0.195|0.273 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (14656 jobs, ms/job avg|max): gap 0.044|1.383 spin 0.130|0.816 compute 0.197|0.313 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (14720 jobs, ms/job avg|max): gap 0.016|0.738 spin 0.127|0.472 compute 0.186|0.259 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (14784 jobs, ms/job avg|max): gap 0.036|0.769 spin 0.129|0.760 compute 0.189|0.265 | empty 0/64, cpu-assign/row 5.80
+ -- moe_cpu prof (14848 jobs, us/job): prep_gu 0.0 | gemv_gu 283.8 (30.8 GB/s) | act+prep_d 0.0 | gemv_d 153.7 (28.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (14848 jobs, ms/job avg|max): gap 0.016|0.727 spin 0.121|0.594 compute 0.187|0.266 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (14912 jobs, ms/job avg|max): gap 0.036|0.869 spin 0.139|0.773 compute 0.193|0.271 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (14976 jobs, ms/job avg|max): gap 0.033|0.779 spin 0.118|0.418 compute 0.181|0.278 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (15040 jobs, ms/job avg|max): gap 0.016|0.744 spin 0.111|0.376 compute 0.186|0.287 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (15104 jobs, ms/job avg|max): gap 0.034|0.999 spin 0.125|0.823 compute 0.184|0.256 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (15168 jobs, ms/job avg|max): gap 0.018|0.866 spin 0.149|0.688 compute 0.192|0.274 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (15232 jobs, ms/job avg|max): gap 0.042|1.327 spin 0.116|0.747 compute 0.185|0.237 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (15296 jobs, ms/job avg|max): gap 0.031|0.745 spin 0.115|0.391 compute 0.200|0.551 | empty 0/64, cpu-assign/row 6.00
+ -- moe_cpu prof (15360 jobs, us/job): prep_gu 0.0 | gemv_gu 278.3 (30.9 GB/s) | act+prep_d 0.0 | gemv_d 150.6 (28.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (15360 jobs, ms/job avg|max): gap 0.021|1.006 spin 0.142|0.820 compute 0.189|0.263 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (15424 jobs, ms/job avg|max): gap 0.037|1.128 spin 0.122|0.373 compute 0.190|0.275 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (15488 jobs, ms/job avg|max): gap 0.018|0.758 spin 0.135|0.753 compute 0.183|0.264 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (15552 jobs, ms/job avg|max): gap 0.032|0.753 spin 0.116|0.494 compute 0.193|0.274 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (15616 jobs, ms/job avg|max): gap 0.032|0.754 spin 0.148|0.758 compute 0.185|0.280 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (15680 jobs, ms/job avg|max): gap 0.017|0.745 spin 0.120|0.527 compute 0.189|0.244 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (15744 jobs, ms/job avg|max): gap 0.034|0.739 spin 0.114|0.564 compute 0.192|0.301 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (15808 jobs, ms/job avg|max): gap 0.015|0.750 spin 0.106|0.118 compute 0.182|0.283 | empty 0/64, cpu-assign/row 5.78
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.262 | worst layers L0:0.017 L12:0.011 L2:0.011 L3:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.141 p90 0.241 max 0.897 | worst layers L17:0.215 L7:0.202 L8:0.193 L10:0.193
+ -- moe_cpu prof (15872 jobs, us/job): prep_gu 0.0 | gemv_gu 273.2 (31.0 GB/s) | act+prep_d 0.0 | gemv_d 147.8 (28.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (15872 jobs, ms/job avg|max): gap 0.207|11.290 spin 0.135|0.445 compute 0.194|0.326 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (15936 jobs, ms/job avg|max): gap 0.031|0.771 spin 0.121|0.615 compute 0.195|0.280 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (16000 jobs, ms/job avg|max): gap 0.015|0.749 spin 0.123|0.522 compute 0.192|0.271 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (16064 jobs, ms/job avg|max): gap 0.029|0.738 spin 0.126|0.296 compute 0.188|0.278 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (16128 jobs, ms/job avg|max): gap 0.016|0.742 spin 0.125|0.399 compute 0.192|0.290 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (16192 jobs, ms/job avg|max): gap 0.029|0.751 spin 0.133|0.755 compute 0.188|0.257 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (16256 jobs, ms/job avg|max): gap 0.032|0.773 spin 0.109|0.340 compute 0.185|0.259 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (16320 jobs, ms/job avg|max): gap 0.020|1.042 spin 0.139|0.491 compute 0.191|0.298 | empty 0/64, cpu-assign/row 5.86
+ -- moe_cpu prof (16384 jobs, us/job): prep_gu 0.0 | gemv_gu 268.5 (31.1 GB/s) | act+prep_d 0.0 | gemv_d 145.1 (28.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (16384 jobs, ms/job avg|max): gap 0.040|1.249 spin 0.123|0.876 compute 0.189|0.281 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (16448 jobs, ms/job avg|max): gap 0.016|0.768 spin 0.110|0.233 compute 0.182|0.257 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (16512 jobs, ms/job avg|max): gap 0.043|0.805 spin 0.127|0.657 compute 0.183|0.268 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (16576 jobs, ms/job avg|max): gap 0.038|0.775 spin 0.151|0.751 compute 0.191|0.266 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (16640 jobs, ms/job avg|max): gap 0.015|0.748 spin 0.134|0.764 compute 0.185|0.257 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (16704 jobs, ms/job avg|max): gap 0.034|0.988 spin 0.109|0.402 compute 0.189|0.281 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (16768 jobs, ms/job avg|max): gap 0.019|0.830 spin 0.146|0.671 compute 0.186|0.262 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (16832 jobs, ms/job avg|max): gap 0.032|0.758 spin 0.124|0.746 compute 0.186|0.258 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (16896 jobs, us/job): prep_gu 0.0 | gemv_gu 263.9 (31.2 GB/s) | act+prep_d 0.0 | gemv_d 142.6 (28.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (16896 jobs, ms/job avg|max): gap 0.034|0.765 spin 0.120|0.659 compute 0.188|0.262 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (16960 jobs, ms/job avg|max): gap 0.017|0.750 spin 0.118|0.414 compute 0.188|0.283 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (17024 jobs, ms/job avg|max): gap 0.034|1.050 spin 0.124|0.366 compute 0.189|0.274 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (17088 jobs, ms/job avg|max): gap 0.017|0.740 spin 0.120|0.583 compute 0.183|0.287 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (17152 jobs, ms/job avg|max): gap 0.032|0.752 spin 0.105|0.359 compute 0.175|0.251 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (17216 jobs, ms/job avg|max): gap 0.034|0.824 spin 0.126|0.566 compute 0.188|0.272 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (17280 jobs, ms/job avg|max): gap 0.016|0.770 spin 0.135|0.340 compute 0.196|0.291 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (17344 jobs, ms/job avg|max): gap 0.034|0.751 spin 0.103|0.298 compute 0.181|0.251 | empty 0/64, cpu-assign/row 5.73
+ -- moe_cpu prof (17408 jobs, us/job): prep_gu 0.0 | gemv_gu 259.6 (31.3 GB/s) | act+prep_d 0.0 | gemv_d 140.2 (29.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (17408 jobs, ms/job avg|max): gap 0.016|0.747 spin 0.119|0.419 compute 0.192|0.347 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (17472 jobs, ms/job avg|max): gap 0.036|0.838 spin 0.127|0.571 compute 0.195|0.312 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (17536 jobs, ms/job avg|max): gap 0.032|0.769 spin 0.110|0.478 compute 0.189|0.262 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (17600 jobs, ms/job avg|max): gap 0.017|0.779 spin 0.120|0.577 compute 0.192|0.293 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (17664 jobs, ms/job avg|max): gap 0.033|0.767 spin 0.111|0.391 compute 0.192|0.250 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (17728 jobs, ms/job avg|max): gap 0.020|1.008 spin 0.127|0.372 compute 0.190|0.274 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (17792 jobs, ms/job avg|max): gap 0.032|0.751 spin 0.116|0.596 compute 0.185|0.278 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (17856 jobs, ms/job avg|max): gap 0.038|1.140 spin 0.122|0.702 compute 0.195|0.260 | empty 0/64, cpu-assign/row 6.06
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.026 | worst layers L0:0.011 L18:0.011 L20:0.011 L4:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.140 p90 0.232 max 0.916 | worst layers L30:0.221 L25:0.208 L13:0.190 L29:0.185
+ -- moe_cpu prof (17920 jobs, us/job): prep_gu 0.0 | gemv_gu 255.7 (31.4 GB/s) | act+prep_d 0.0 | gemv_d 138.0 (29.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (17920 jobs, ms/job avg|max): gap 0.201|11.858 spin 0.125|0.494 compute 0.197|0.271 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (17984 jobs, ms/job avg|max): gap 0.034|0.762 spin 0.108|0.342 compute 0.179|0.255 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (18048 jobs, ms/job avg|max): gap 0.023|0.769 spin 0.116|0.574 compute 0.194|0.287 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (18112 jobs, ms/job avg|max): gap 0.032|0.754 spin 0.103|0.138 compute 0.186|0.256 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (18176 jobs, ms/job avg|max): gap 0.032|0.864 spin 0.140|0.539 compute 0.202|0.275 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (18240 jobs, ms/job avg|max): gap 0.015|0.772 spin 0.131|0.624 compute 0.191|0.410 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (18304 jobs, ms/job avg|max): gap 0.029|0.737 spin 0.108|0.267 compute 0.190|0.254 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (18368 jobs, ms/job avg|max): gap 0.017|0.868 spin 0.128|0.550 compute 0.201|0.277 | empty 0/64, cpu-assign/row 6.05
+ -- moe_cpu prof (18432 jobs, us/job): prep_gu 0.0 | gemv_gu 252.0 (31.5 GB/s) | act+prep_d 0.0 | gemv_d 135.9 (29.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (18432 jobs, ms/job avg|max): gap 0.039|1.150 spin 0.131|0.462 compute 0.197|0.407 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (18496 jobs, ms/job avg|max): gap 0.032|0.875 spin 0.105|0.160 compute 0.185|0.246 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (18560 jobs, ms/job avg|max): gap 0.016|0.737 spin 0.123|0.463 compute 0.193|0.325 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (18624 jobs, ms/job avg|max): gap 0.038|1.265 spin 0.131|0.551 compute 0.198|0.314 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (18688 jobs, ms/job avg|max): gap 0.016|0.780 spin 0.113|0.493 compute 0.195|0.264 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (18752 jobs, ms/job avg|max): gap 0.087|0.822 spin 0.079|0.313 compute 0.203|0.299 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (18816 jobs, ms/job avg|max): gap 0.038|0.801 spin 0.099|0.119 compute 0.203|0.293 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (18880 jobs, ms/job avg|max): gap 0.017|0.758 spin 0.155|0.723 compute 0.199|0.273 | empty 0/64, cpu-assign/row 5.88
+ -- moe_cpu prof (18944 jobs, us/job): prep_gu 0.0 | gemv_gu 248.6 (31.5 GB/s) | act+prep_d 0.0 | gemv_d 134.0 (29.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (18944 jobs, ms/job avg|max): gap 0.034|0.803 spin 0.118|0.431 compute 0.201|0.265 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (19008 jobs, ms/job avg|max): gap 0.099|0.956 spin 0.071|0.404 compute 0.201|0.262 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (19072 jobs, ms/job avg|max): gap 0.057|1.043 spin 0.127|0.870 compute 0.212|0.292 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (19136 jobs, ms/job avg|max): gap 0.046|1.291 spin 0.111|0.483 compute 0.209|0.280 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (19200 jobs, ms/job avg|max): gap 0.029|0.863 spin 0.115|0.366 compute 0.239|0.470 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (19264 jobs, ms/job avg|max): gap 0.041|0.832 spin 0.103|0.299 compute 0.226|0.344 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (19328 jobs, ms/job avg|max): gap 0.019|0.862 spin 0.134|0.550 compute 0.216|0.415 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (19392 jobs, ms/job avg|max): gap 0.049|0.833 spin 0.113|0.506 compute 0.214|0.297 | empty 0/64, cpu-assign/row 6.09
+ -- moe_cpu prof (19456 jobs, us/job): prep_gu 0.0 | gemv_gu 245.7 (31.6 GB/s) | act+prep_d 0.0 | gemv_d 132.4 (29.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (19456 jobs, ms/job avg|max): gap 0.042|0.843 spin 0.139|0.638 compute 0.211|0.318 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (19520 jobs, ms/job avg|max): gap 0.037|1.081 spin 0.134|0.697 compute 0.214|0.306 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (19584 jobs, ms/job avg|max): gap 0.038|1.026 spin 0.243|1.194 compute 0.218|0.303 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (19648 jobs, ms/job avg|max): gap 0.021|1.043 spin 0.306|1.976 compute 0.237|1.983 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (19712 jobs, ms/job avg|max): gap 0.083|2.952 spin 0.329|1.719 compute 0.195|0.301 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (19776 jobs, ms/job avg|max): gap 0.038|1.266 spin 0.256|1.857 compute 0.195|0.292 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (19840 jobs, ms/job avg|max): gap 0.023|1.035 spin 0.320|2.105 compute 0.204|0.615 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (19904 jobs, ms/job avg|max): gap 0.041|1.338 spin 0.125|0.715 compute 0.188|0.267 | empty 0/64, cpu-assign/row 5.77
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.737 | worst layers L0:0.025 L11:0.025 L3:0.014 L4:0.014
+ -- split prof [wait] (2048 brackets, stream ms): med 0.156 p90 0.286 max 2.101 | worst layers L10:0.252 L26:0.251 L11:0.240 L7:0.232
+ -- moe_cpu prof (19968 jobs, us/job): prep_gu 0.0 | gemv_gu 242.8 (31.6 GB/s) | act+prep_d 0.0 | gemv_d 130.7 (29.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (19968 jobs, ms/job avg|max): gap 0.176|10.321 spin 0.132|0.815 compute 0.202|0.299 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (20032 jobs, ms/job avg|max): gap 0.037|0.771 spin 0.125|0.616 compute 0.193|0.287 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (20096 jobs, ms/job avg|max): gap 0.031|0.762 spin 0.135|0.722 compute 0.189|0.256 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (20160 jobs, ms/job avg|max): gap 0.016|0.755 spin 0.111|0.364 compute 0.186|0.249 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (20224 jobs, ms/job avg|max): gap 0.030|0.785 spin 0.160|1.140 compute 0.205|0.331 | empty 0/64, cpu-assign/row 6.23
+ -- handoff prof (20288 jobs, ms/job avg|max): gap 0.017|0.741 spin 0.120|0.467 compute 0.189|0.260 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (20352 jobs, ms/job avg|max): gap 0.032|0.756 spin 0.128|0.719 compute 0.189|0.275 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (20416 jobs, ms/job avg|max): gap 0.034|0.936 spin 0.121|0.544 compute 0.192|0.264 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (20480 jobs, us/job): prep_gu 0.0 | gemv_gu 239.7 (31.7 GB/s) | act+prep_d 0.0 | gemv_d 129.0 (29.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (20480 jobs, ms/job avg|max): gap 0.016|0.759 spin 0.147|0.744 compute 0.191|0.268 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (20544 jobs, ms/job avg|max): gap 0.031|0.858 spin 0.117|0.421 compute 0.189|0.264 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (20608 jobs, ms/job avg|max): gap 0.018|0.853 spin 0.130|0.694 compute 0.196|0.276 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (20672 jobs, ms/job avg|max): gap 0.037|1.153 spin 0.138|0.551 compute 0.202|0.313 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (20736 jobs, ms/job avg|max): gap 0.035|0.803 spin 0.114|0.677 compute 0.198|0.263 | empty 0/64, cpu-assign/row 6.22
+ -- handoff prof (20800 jobs, ms/job avg|max): gap 0.015|0.780 spin 0.141|0.726 compute 0.199|0.292 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (20864 jobs, ms/job avg|max): gap 0.034|0.877 spin 0.111|0.460 compute 0.192|0.265 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (20928 jobs, ms/job avg|max): gap 0.017|0.741 spin 0.148|0.763 compute 0.199|0.433 | empty 0/64, cpu-assign/row 6.12
+ -- moe_cpu prof (20992 jobs, us/job): prep_gu 0.0 | gemv_gu 236.9 (31.8 GB/s) | act+prep_d 0.0 | gemv_d 127.5 (29.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (20992 jobs, ms/job avg|max): gap 0.035|0.755 spin 0.121|0.643 compute 0.193|0.322 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (21056 jobs, ms/job avg|max): gap 0.043|1.328 spin 0.119|0.679 compute 0.194|0.269 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (21120 jobs, ms/job avg|max): gap 0.017|0.830 spin 0.141|0.698 compute 0.205|0.306 | empty 0/64, cpu-assign/row 6.30
+ -- handoff prof (21184 jobs, ms/job avg|max): gap 0.033|0.910 spin 0.128|0.610 compute 0.202|0.263 | empty 0/64, cpu-assign/row 6.28
+ -- handoff prof (21248 jobs, ms/job avg|max): gap 0.019|0.982 spin 0.142|0.800 compute 0.197|0.271 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (21312 jobs, ms/job avg|max): gap 3.237|205.592 spin 0.112|0.402 compute 0.202|0.308 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (21376 jobs, ms/job avg|max): gap 0.034|0.825 spin 0.121|0.730 compute 0.189|0.277 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (21440 jobs, ms/job avg|max): gap 0.019|0.772 spin 0.132|0.531 compute 0.195|0.260 | empty 0/64, cpu-assign/row 5.81
+ -- moe_cpu prof (21504 jobs, us/job): prep_gu 0.0 | gemv_gu 234.3 (31.9 GB/s) | act+prep_d 0.0 | gemv_d 126.0 (29.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (21504 jobs, ms/job avg|max): gap 0.038|0.968 spin 0.146|0.814 compute 0.186|0.271 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (21568 jobs, ms/job avg|max): gap 0.019|0.764 spin 0.127|0.845 compute 0.180|0.243 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (21632 jobs, ms/job avg|max): gap 0.034|0.913 spin 0.123|0.705 compute 0.187|0.266 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (21696 jobs, ms/job avg|max): gap 0.038|1.008 spin 0.141|0.519 compute 0.192|0.275 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (21760 jobs, ms/job avg|max): gap 0.018|0.870 spin 0.112|0.458 compute 0.174|0.292 | empty 0/64, cpu-assign/row 5.42
+ -- handoff prof (21824 jobs, ms/job avg|max): gap 0.042|1.218 spin 0.134|0.882 compute 0.189|0.296 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (21888 jobs, ms/job avg|max): gap 0.017|0.743 spin 0.136|0.679 compute 0.202|0.274 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (21952 jobs, ms/job avg|max): gap 0.033|0.805 spin 0.133|0.696 compute 0.193|0.259 | empty 0/64, cpu-assign/row 5.91
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.053 | worst layers L0:0.011 L3:0.011 L4:0.011 L6:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.147 p90 0.240 max 1.161 | worst layers L14:0.218 L29:0.203 L13:0.197 L33:0.197
+ -- moe_cpu prof (22016 jobs, us/job): prep_gu 0.0 | gemv_gu 231.6 (31.9 GB/s) | act+prep_d 0.0 | gemv_d 124.5 (29.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (22016 jobs, ms/job avg|max): gap 0.204|11.764 spin 0.117|0.610 compute 0.193|0.269 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (22080 jobs, ms/job avg|max): gap 0.089|0.838 spin 0.098|0.389 compute 0.198|0.272 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (22144 jobs, ms/job avg|max): gap 0.039|0.894 spin 0.133|0.729 compute 0.195|0.265 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (22208 jobs, ms/job avg|max): gap 0.022|0.930 spin 0.109|0.234 compute 0.183|0.255 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (22272 jobs, ms/job avg|max): gap 0.034|0.852 spin 0.131|0.769 compute 0.182|0.272 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (22336 jobs, ms/job avg|max): gap 0.036|0.790 spin 0.142|0.750 compute 0.187|0.260 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (22400 jobs, ms/job avg|max): gap 0.017|0.768 spin 0.129|0.745 compute 0.184|0.248 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (22464 jobs, ms/job avg|max): gap 0.040|0.854 spin 0.128|0.737 compute 0.182|0.256 | empty 0/64, cpu-assign/row 5.61
+ -- moe_cpu prof (22528 jobs, us/job): prep_gu 0.0 | gemv_gu 229.1 (32.0 GB/s) | act+prep_d 0.0 | gemv_d 123.1 (29.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (22528 jobs, ms/job avg|max): gap 0.016|0.758 spin 0.118|0.700 compute 0.185|0.255 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (22592 jobs, ms/job avg|max): gap 0.035|0.857 spin 0.142|1.003 compute 0.188|0.259 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (22656 jobs, ms/job avg|max): gap 0.033|0.766 spin 0.116|0.618 compute 0.183|0.251 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (22720 jobs, ms/job avg|max): gap 0.045|0.752 spin 0.122|0.749 compute 0.184|0.257 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (22784 jobs, ms/job avg|max): gap 0.041|0.960 spin 0.121|0.330 compute 0.189|0.272 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (22848 jobs, ms/job avg|max): gap 0.024|1.162 spin 0.117|0.319 compute 0.190|0.288 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (22912 jobs, ms/job avg|max): gap 0.035|0.867 spin 0.115|0.427 compute 0.189|0.258 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (22976 jobs, ms/job avg|max): gap 0.033|0.757 spin 0.107|0.359 compute 0.180|0.248 | empty 0/64, cpu-assign/row 5.73
+ -- moe_cpu prof (23040 jobs, us/job): prep_gu 0.0 | gemv_gu 226.6 (32.1 GB/s) | act+prep_d 0.0 | gemv_d 121.7 (29.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (23040 jobs, ms/job avg|max): gap 0.017|0.766 spin 0.147|0.681 compute 0.201|0.277 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (23104 jobs, ms/job avg|max): gap 0.058|0.843 spin 0.106|0.709 compute 0.181|0.261 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (23168 jobs, ms/job avg|max): gap 0.036|0.751 spin 0.114|0.644 compute 0.173|0.251 | empty 0/64, cpu-assign/row 5.42
+ -- handoff prof (23232 jobs, ms/job avg|max): gap 0.060|1.331 spin 0.115|0.610 compute 0.188|0.408 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (23296 jobs, ms/job avg|max): gap 0.037|0.964 spin 0.140|0.532 compute 0.189|0.278 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (23360 jobs, ms/job avg|max): gap 0.016|0.750 spin 0.117|0.375 compute 0.187|0.256 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (23424 jobs, ms/job avg|max): gap 0.042|1.459 spin 0.128|0.672 compute 0.186|0.268 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (23488 jobs, ms/job avg|max): gap 0.016|0.735 spin 0.146|0.767 compute 0.190|0.274 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (23552 jobs, us/job): prep_gu 0.0 | gemv_gu 224.3 (32.2 GB/s) | act+prep_d 0.0 | gemv_d 120.4 (30.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (23552 jobs, ms/job avg|max): gap 0.057|0.867 spin 0.099|0.403 compute 0.183|0.250 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (23616 jobs, ms/job avg|max): gap 0.052|0.759 spin 0.103|0.354 compute 0.195|0.271 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (23680 jobs, ms/job avg|max): gap 0.017|0.762 spin 0.108|0.124 compute 0.185|0.269 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (23744 jobs, ms/job avg|max): gap 0.037|1.099 spin 0.137|0.514 compute 0.192|0.260 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (23808 jobs, ms/job avg|max): gap 0.039|1.288 spin 0.133|0.543 compute 0.189|0.254 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (23872 jobs, ms/job avg|max): gap 0.063|1.352 spin 0.112|0.585 compute 0.190|0.326 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (23936 jobs, ms/job avg|max): gap 0.064|1.041 spin 0.107|0.453 compute 0.190|0.275 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (24000 jobs, ms/job avg|max): gap 0.017|0.881 spin 0.137|0.512 compute 0.199|0.263 | empty 0/64, cpu-assign/row 6.03
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.705 | worst layers L24:0.024 L11:0.023 L4:0.022 L35:0.015
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.226 max 1.037 | worst layers L7:0.196 L32:0.193 L14:0.189 L26:0.186
+ -- moe_cpu prof (24064 jobs, us/job): prep_gu 0.0 | gemv_gu 222.1 (32.2 GB/s) | act+prep_d 0.0 | gemv_d 119.1 (30.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (24064 jobs, ms/job avg|max): gap 0.216|11.668 spin 0.119|0.714 compute 0.189|0.311 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (24128 jobs, ms/job avg|max): gap 0.016|0.795 spin 0.141|0.695 compute 0.204|0.280 | empty 0/64, cpu-assign/row 6.16
+ -- handoff prof (24192 jobs, ms/job avg|max): gap 0.030|0.768 spin 0.142|0.797 compute 0.194|0.269 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (24256 jobs, ms/job avg|max): gap 0.087|1.145 spin 0.089|0.376 compute 0.194|0.275 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (24320 jobs, ms/job avg|max): gap 0.015|0.756 spin 0.133|0.415 compute 0.199|0.301 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (24384 jobs, ms/job avg|max): gap 0.034|0.882 spin 0.134|0.459 compute 0.183|0.291 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (24448 jobs, ms/job avg|max): gap 0.014|0.742 spin 0.132|0.413 compute 0.196|0.290 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (24512 jobs, ms/job avg|max): gap 0.038|1.023 spin 0.120|0.442 compute 0.188|0.276 | empty 0/64, cpu-assign/row 5.83
+ -- moe_cpu prof (24576 jobs, us/job): prep_gu 0.0 | gemv_gu 220.0 (32.3 GB/s) | act+prep_d 0.0 | gemv_d 118.0 (30.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (24576 jobs, ms/job avg|max): gap 0.036|0.874 spin 0.126|0.407 compute 0.190|0.261 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (24640 jobs, ms/job avg|max): gap 0.017|0.763 spin 0.133|0.764 compute 0.190|0.253 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (24704 jobs, ms/job avg|max): gap 0.032|0.880 spin 0.116|0.568 compute 0.191|0.280 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (24768 jobs, ms/job avg|max): gap 0.017|0.739 spin 0.110|0.288 compute 0.179|0.248 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (24832 jobs, ms/job avg|max): gap 0.029|0.747 spin 0.132|0.473 compute 0.193|0.268 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (24896 jobs, ms/job avg|max): gap 0.032|0.743 spin 0.132|0.463 compute 0.190|0.291 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (24960 jobs, ms/job avg|max): gap 0.017|0.864 spin 0.112|0.296 compute 0.180|0.259 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (25024 jobs, ms/job avg|max): gap 0.074|0.795 spin 0.085|0.367 compute 0.189|0.315 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (25088 jobs, us/job): prep_gu 0.0 | gemv_gu 218.0 (32.4 GB/s) | act+prep_d 0.0 | gemv_d 116.8 (30.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (25088 jobs, ms/job avg|max): gap 0.017|0.954 spin 0.147|0.675 compute 0.193|0.268 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (25152 jobs, ms/job avg|max): gap 0.045|0.828 spin 0.104|0.362 compute 0.180|0.244 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (25216 jobs, ms/job avg|max): gap 0.031|0.761 spin 0.122|0.624 compute 0.184|0.256 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (25280 jobs, ms/job avg|max): gap 0.015|0.728 spin 0.111|0.206 compute 0.188|0.281 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (25344 jobs, ms/job avg|max): gap 0.032|0.748 spin 0.138|0.679 compute 0.190|0.270 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (25408 jobs, ms/job avg|max): gap 0.075|0.825 spin 0.087|0.586 compute 0.189|0.273 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (25472 jobs, ms/job avg|max): gap 0.030|0.748 spin 0.109|0.303 compute 0.186|0.259 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (25536 jobs, ms/job avg|max): gap 0.052|0.846 spin 0.127|0.350 compute 0.187|0.301 | empty 0/64, cpu-assign/row 5.58
+ -- moe_cpu prof (25600 jobs, us/job): prep_gu 0.0 | gemv_gu 216.0 (32.4 GB/s) | act+prep_d 0.0 | gemv_d 115.7 (30.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (25600 jobs, ms/job avg|max): gap 0.024|1.005 spin 0.121|0.412 compute 0.182|0.293 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (25664 jobs, ms/job avg|max): gap 0.035|0.759 spin 0.105|0.313 compute 0.174|0.258 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (25728 jobs, ms/job avg|max): gap 0.016|0.757 spin 0.149|0.739 compute 0.178|0.239 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (25792 jobs, ms/job avg|max): gap 0.075|0.850 spin 0.120|0.718 compute 0.180|0.262 | empty 0/64, cpu-assign/row 5.50
+
+[33;1mGeneration[0m
+ -- handoff prof (25856 jobs, ms/job avg|max): gap 0.059|1.808 spin 0.110|0.750 compute 0.192|0.255 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (25920 jobs, ms/job avg|max): gap 0.045|0.745 spin 0.103|0.430 compute 0.201|0.258 | empty 0/64, cpu-assign/row 6.23
+ -- handoff prof (25984 jobs, ms/job avg|max): gap 0.035|0.862 spin 0.142|0.832 compute 0.196|0.268 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (26048 jobs, ms/job avg|max): gap 0.017|0.740 spin 0.123|0.434 compute 0.182|0.287 | empty 0/64, cpu-assign/row 5.58
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.460 | worst layers L26:0.019 L0:0.018 L14:0.015 L20:0.015
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.229 max 0.845 | worst layers L27:0.190 L26:0.185 L10:0.180 L5:0.179
+ -- moe_cpu prof (26112 jobs, us/job): prep_gu 0.0 | gemv_gu 214.1 (32.5 GB/s) | act+prep_d 0.0 | gemv_d 114.6 (30.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (26112 jobs, ms/job avg|max): gap 0.240|13.119 spin 0.136|0.752 compute 0.191|0.402 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (26176 jobs, ms/job avg|max): gap 0.045|1.355 spin 0.103|0.220 compute 0.193|0.279 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (26240 jobs, ms/job avg|max): gap 0.038|1.302 spin 0.128|0.697 compute 0.189|0.262 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (26304 jobs, ms/job avg|max): gap 0.034|0.754 spin 0.111|0.660 compute 0.191|0.296 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (26368 jobs, ms/job avg|max): gap 0.016|0.742 spin 0.127|0.720 compute 0.189|0.259 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (26432 jobs, ms/job avg|max): gap 0.048|1.387 spin 0.129|0.532 compute 0.194|0.277 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (26496 jobs, ms/job avg|max): gap 0.047|1.671 spin 0.129|0.769 compute 0.192|0.267 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (26560 jobs, ms/job avg|max): gap 0.019|0.748 spin 0.109|0.334 compute 0.191|0.262 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (26624 jobs, us/job): prep_gu 0.0 | gemv_gu 212.4 (32.5 GB/s) | act+prep_d 0.0 | gemv_d 113.7 (30.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (26624 jobs, ms/job avg|max): gap 0.066|0.821 spin 0.090|0.395 compute 0.199|0.246 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (26688 jobs, ms/job avg|max): gap 0.016|0.760 spin 0.140|0.529 compute 0.205|0.276 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (26752 jobs, ms/job avg|max): gap 0.034|0.760 spin 0.117|0.654 compute 0.195|0.305 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (26816 jobs, ms/job avg|max): gap 0.032|0.764 spin 0.116|0.438 compute 0.208|0.290 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (26880 jobs, ms/job avg|max): gap 0.041|1.136 spin 0.134|0.731 compute 0.219|0.334 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (26944 jobs, ms/job avg|max): gap 0.050|1.357 spin 0.113|0.426 compute 0.205|0.294 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (27008 jobs, ms/job avg|max): gap 0.020|0.824 spin 0.125|0.670 compute 0.207|0.283 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (27072 jobs, ms/job avg|max): gap 0.036|0.808 spin 0.138|0.662 compute 0.195|0.297 | empty 0/64, cpu-assign/row 5.73
+ -- moe_cpu prof (27136 jobs, us/job): prep_gu 0.0 | gemv_gu 210.8 (32.6 GB/s) | act+prep_d 0.0 | gemv_d 112.8 (30.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (27136 jobs, ms/job avg|max): gap 0.036|0.787 spin 0.129|0.321 compute 0.186|0.284 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (27200 jobs, ms/job avg|max): gap 0.018|0.768 spin 0.134|0.753 compute 0.179|0.266 | empty 0/64, cpu-assign/row 5.44
+ -- handoff prof (27264 jobs, ms/job avg|max): gap 0.059|2.458 spin 0.198|1.163 compute 0.192|0.311 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (27328 jobs, ms/job avg|max): gap 0.024|1.056 spin 0.338|1.869 compute 0.216|1.318 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (27392 jobs, ms/job avg|max): gap 0.052|1.373 spin 0.290|1.839 compute 0.197|0.289 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (27456 jobs, ms/job avg|max): gap 0.046|1.410 spin 0.309|1.964 compute 0.198|0.351 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (27520 jobs, ms/job avg|max): gap 0.018|0.789 spin 0.284|1.882 compute 0.198|0.618 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (27584 jobs, ms/job avg|max): gap 0.047|1.802 spin 0.127|0.772 compute 0.195|0.269 | empty 0/64, cpu-assign/row 5.92
+ -- moe_cpu prof (27648 jobs, us/job): prep_gu 0.0 | gemv_gu 209.2 (32.6 GB/s) | act+prep_d 0.0 | gemv_d 111.8 (30.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (27648 jobs, ms/job avg|max): gap 0.018|0.777 spin 0.125|0.308 compute 0.201|0.269 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (27712 jobs, ms/job avg|max): gap 0.034|0.844 spin 0.118|0.498 compute 0.182|0.249 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (27776 jobs, ms/job avg|max): gap 0.032|0.756 spin 0.112|0.449 compute 0.193|0.264 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (27840 jobs, ms/job avg|max): gap 0.017|0.753 spin 0.109|0.252 compute 0.189|0.272 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (27904 jobs, ms/job avg|max): gap 0.036|1.173 spin 0.133|0.700 compute 0.186|0.261 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (27968 jobs, ms/job avg|max): gap 0.015|0.753 spin 0.116|0.385 compute 0.195|0.277 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (28032 jobs, ms/job avg|max): gap 0.036|0.900 spin 0.099|0.126 compute 0.188|0.258 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (28096 jobs, ms/job avg|max): gap 0.032|0.751 spin 0.128|0.426 compute 0.202|0.291 | empty 0/64, cpu-assign/row 6.11
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.584 | worst layers L0:0.025 L3:0.022 L7:0.016 L5:0.012
+ -- split prof [wait] (2048 brackets, stream ms): med 0.149 p90 0.290 max 2.040 | worst layers L17:0.256 L22:0.255 L13:0.234 L9:0.232
+ -- moe_cpu prof (28160 jobs, us/job): prep_gu 0.0 | gemv_gu 207.7 (32.7 GB/s) | act+prep_d 0.0 | gemv_d 111.0 (30.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (28160 jobs, ms/job avg|max): gap 0.178|10.421 spin 0.127|0.627 compute 0.205|0.290 | empty 0/64, cpu-assign/row 6.20
+ -- handoff prof (28224 jobs, ms/job avg|max): gap 0.035|0.799 spin 0.114|0.608 compute 0.192|0.290 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (28288 jobs, ms/job avg|max): gap 0.016|0.754 spin 0.127|0.376 compute 0.194|0.284 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (28352 jobs, ms/job avg|max): gap 0.072|1.005 spin 0.090|0.377 compute 0.190|0.271 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (28416 jobs, ms/job avg|max): gap 0.032|0.874 spin 0.115|0.483 compute 0.190|0.274 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (28480 jobs, ms/job avg|max): gap 0.016|0.739 spin 0.108|0.294 compute 0.185|0.242 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (28544 jobs, ms/job avg|max): gap 0.034|0.755 spin 0.134|0.588 compute 0.185|0.260 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (28608 jobs, ms/job avg|max): gap 0.015|0.743 spin 0.112|0.406 compute 0.186|0.257 | empty 0/64, cpu-assign/row 5.94
+ -- moe_cpu prof (28672 jobs, us/job): prep_gu 0.0 | gemv_gu 206.1 (32.7 GB/s) | act+prep_d 0.0 | gemv_d 110.1 (30.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (28672 jobs, ms/job avg|max): gap 0.031|0.746 spin 0.118|0.407 compute 0.189|0.267 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (28736 jobs, ms/job avg|max): gap 0.070|0.844 spin 0.085|0.468 compute 0.192|0.323 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (28800 jobs, ms/job avg|max): gap 0.017|0.753 spin 0.129|0.329 compute 0.181|0.256 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (28864 jobs, ms/job avg|max): gap 0.032|0.841 spin 0.115|0.417 compute 0.188|0.290 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (28928 jobs, ms/job avg|max): gap 0.017|0.733 spin 0.116|0.591 compute 0.188|0.260 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (28992 jobs, ms/job avg|max): gap 0.030|0.764 spin 0.104|0.261 compute 0.189|0.264 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (29056 jobs, ms/job avg|max): gap 0.037|1.254 spin 0.138|0.667 compute 0.193|0.263 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (29120 jobs, ms/job avg|max): gap 0.050|0.734 spin 0.094|0.562 compute 0.186|0.288 | empty 0/64, cpu-assign/row 5.86
+ -- moe_cpu prof (29184 jobs, us/job): prep_gu 0.0 | gemv_gu 204.6 (32.8 GB/s) | act+prep_d 0.0 | gemv_d 109.2 (30.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (29184 jobs, ms/job avg|max): gap 0.045|1.037 spin 0.093|0.117 compute 0.177|0.244 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (29248 jobs, ms/job avg|max): gap 0.017|0.762 spin 0.126|0.303 compute 0.196|0.383 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (29312 jobs, ms/job avg|max): gap 0.031|0.740 spin 0.119|0.348 compute 0.183|0.267 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (29376 jobs, ms/job avg|max): gap 0.036|0.921 spin 0.110|0.303 compute 0.188|0.270 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (29440 jobs, ms/job avg|max): gap 0.016|0.855 spin 0.116|0.338 compute 0.193|0.314 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (29504 jobs, ms/job avg|max): gap 0.032|0.740 spin 0.121|0.318 compute 0.185|0.268 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (29568 jobs, ms/job avg|max): gap 0.036|1.076 spin 0.108|0.364 compute 0.183|0.284 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (29632 jobs, ms/job avg|max): gap 0.047|0.857 spin 0.104|0.526 compute 0.178|0.259 | empty 0/64, cpu-assign/row 5.48
+ -- moe_cpu prof (29696 jobs, us/job): prep_gu 0.0 | gemv_gu 203.1 (32.8 GB/s) | act+prep_d 0.0 | gemv_d 108.4 (30.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (29696 jobs, ms/job avg|max): gap 0.034|0.750 spin 0.102|0.317 compute 0.173|0.241 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (29760 jobs, ms/job avg|max): gap 0.015|0.741 spin 0.138|0.537 compute 0.184|0.268 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (29824 jobs, ms/job avg|max): gap 0.037|1.102 spin 0.107|0.377 compute 0.186|0.283 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (29888 jobs, ms/job avg|max): gap 0.018|0.838 spin 0.137|0.411 compute 0.199|0.308 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (29952 jobs, ms/job avg|max): gap 0.034|0.744 spin 0.111|0.538 compute 0.196|0.272 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (30016 jobs, ms/job avg|max): gap 0.039|0.837 spin 0.137|0.529 compute 0.190|0.281 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (30080 jobs, ms/job avg|max): gap 0.016|0.728 spin 0.115|0.361 compute 0.183|0.256 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (30144 jobs, ms/job avg|max): gap 0.037|0.764 spin 0.120|0.442 compute 0.194|0.265 | empty 0/64, cpu-assign/row 5.94
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.070 | worst layers L0:0.014 L3:0.013 L7:0.012 L11:0.012
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.225 max 0.708 | worst layers L26:0.186 L22:0.186 L21:0.178 L5:0.173
+ -- moe_cpu prof (30208 jobs, us/job): prep_gu 0.0 | gemv_gu 201.7 (32.9 GB/s) | act+prep_d 0.0 | gemv_d 107.6 (30.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (30208 jobs, ms/job avg|max): gap 0.199|10.955 spin 0.112|0.354 compute 0.190|0.249 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (30272 jobs, ms/job avg|max): gap 0.031|0.752 spin 0.104|0.341 compute 0.189|0.282 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (30336 jobs, ms/job avg|max): gap 0.034|0.743 spin 0.111|0.586 compute 0.190|0.272 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (30400 jobs, ms/job avg|max): gap 0.017|0.752 spin 0.117|0.627 compute 0.190|0.272 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (30464 jobs, ms/job avg|max): gap 0.035|0.874 spin 0.132|0.515 compute 0.189|0.258 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (30528 jobs, ms/job avg|max): gap 0.016|0.747 spin 0.113|0.468 compute 0.185|0.256 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (30592 jobs, ms/job avg|max): gap 0.036|0.734 spin 0.112|0.550 compute 0.191|0.244 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (30656 jobs, ms/job avg|max): gap 0.036|1.047 spin 0.130|0.592 compute 0.187|0.278 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (30720 jobs, us/job): prep_gu 0.0 | gemv_gu 200.3 (32.9 GB/s) | act+prep_d 0.0 | gemv_d 106.9 (30.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (30720 jobs, ms/job avg|max): gap 0.016|0.737 spin 0.113|0.404 compute 0.186|0.258 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (30784 jobs, ms/job avg|max): gap 0.034|0.856 spin 0.111|0.420 compute 0.190|0.288 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (30848 jobs, ms/job avg|max): gap 0.017|0.757 spin 0.104|0.149 compute 0.184|0.257 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (30912 jobs, ms/job avg|max): gap 0.037|0.852 spin 0.133|0.422 compute 0.191|0.266 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (30976 jobs, ms/job avg|max): gap 0.035|0.939 spin 0.117|0.397 compute 0.184|0.306 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (31040 jobs, ms/job avg|max): gap 0.017|0.734 spin 0.106|0.209 compute 0.187|0.265 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (31104 jobs, ms/job avg|max): gap 0.039|0.771 spin 0.108|0.322 compute 0.185|0.258 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (31168 jobs, ms/job avg|max): gap 0.019|0.868 spin 0.144|0.600 compute 0.175|0.251 | empty 0/64, cpu-assign/row 5.33
+ -- moe_cpu prof (31232 jobs, us/job): prep_gu 0.0 | gemv_gu 199.0 (33.0 GB/s) | act+prep_d 0.0 | gemv_d 106.1 (30.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (31232 jobs, ms/job avg|max): gap 0.057|0.837 spin 0.091|0.280 compute 0.184|0.267 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (31296 jobs, ms/job avg|max): gap 0.032|0.763 spin 0.116|0.660 compute 0.183|0.265 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (31360 jobs, ms/job avg|max): gap 0.017|0.823 spin 0.106|0.220 compute 0.191|0.257 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (31424 jobs, ms/job avg|max): gap 0.032|0.866 spin 0.138|0.523 compute 0.188|0.270 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (31488 jobs, ms/job avg|max): gap 0.018|0.750 spin 0.118|0.421 compute 0.186|0.263 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (31552 jobs, ms/job avg|max): gap 0.035|0.759 spin 0.100|0.203 compute 0.181|0.257 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (31616 jobs, ms/job avg|max): gap 0.032|0.872 spin 0.126|0.360 compute 0.201|0.269 | empty 0/64, cpu-assign/row 6.14
+ -- handoff prof (31680 jobs, ms/job avg|max): gap 0.021|0.936 spin 0.117|0.331 compute 0.192|0.270 | empty 0/64, cpu-assign/row 5.94
+ -- moe_cpu prof (31744 jobs, us/job): prep_gu 0.0 | gemv_gu 197.7 (33.0 GB/s) | act+prep_d 0.0 | gemv_d 105.4 (31.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (31744 jobs, ms/job avg|max): gap 0.030|0.741 spin 0.115|0.663 compute 0.189|0.267 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (31808 jobs, ms/job avg|max): gap 0.014|0.753 spin 0.120|0.394 compute 0.193|0.273 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (31872 jobs, ms/job avg|max): gap 0.035|0.868 spin 0.130|0.746 compute 0.192|0.338 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (31936 jobs, ms/job avg|max): gap 0.031|0.771 spin 0.106|0.279 compute 0.185|0.262 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (32000 jobs, ms/job avg|max): gap 0.019|0.763 spin 0.114|0.405 compute 0.200|0.266 | empty 0/64, cpu-assign/row 6.14
+ -- handoff prof (32064 jobs, ms/job avg|max): gap 0.037|0.751 spin 0.109|0.465 compute 0.184|0.286 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (32128 jobs, ms/job avg|max): gap 0.021|0.968 spin 0.128|0.394 compute 0.205|0.274 | empty 0/64, cpu-assign/row 6.34
+ -- handoff prof (32192 jobs, ms/job avg|max): gap 0.032|0.882 spin 0.115|0.545 compute 0.195|0.271 | empty 0/64, cpu-assign/row 6.00
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.216 | worst layers L2:0.014 L0:0.014 L3:0.011 L1:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.140 p90 0.222 max 0.746 | worst layers L22:0.186 L14:0.186 L26:0.180 L2:0.176
+ -- moe_cpu prof (32256 jobs, us/job): prep_gu 0.0 | gemv_gu 196.5 (33.1 GB/s) | act+prep_d 0.0 | gemv_d 104.7 (31.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (32256 jobs, ms/job avg|max): gap 0.222|12.670 spin 0.099|0.235 compute 0.184|0.250 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (32320 jobs, ms/job avg|max): gap 0.018|0.885 spin 0.136|0.553 compute 0.204|0.297 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (32384 jobs, ms/job avg|max): gap 0.039|1.092 spin 0.102|0.304 compute 0.181|0.267 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (32448 jobs, ms/job avg|max): gap 0.016|0.743 spin 0.117|0.404 compute 0.191|0.262 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (32512 jobs, ms/job avg|max): gap 0.034|0.773 spin 0.102|0.350 compute 0.182|0.267 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (32576 jobs, ms/job avg|max): gap 0.034|0.943 spin 0.137|0.691 compute 0.188|0.283 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (32640 jobs, ms/job avg|max): gap 0.019|0.946 spin 0.111|0.405 compute 0.192|0.272 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (32704 jobs, ms/job avg|max): gap 0.032|0.755 spin 0.113|0.387 compute 0.184|0.248 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (32768 jobs, us/job): prep_gu 0.0 | gemv_gu 195.3 (33.1 GB/s) | act+prep_d 0.0 | gemv_d 104.1 (31.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (32768 jobs, ms/job avg|max): gap 0.016|0.733 spin 0.120|0.603 compute 0.189|0.300 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (32832 jobs, ms/job avg|max): gap 0.037|0.930 spin 0.127|0.328 compute 0.189|0.277 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (32896 jobs, ms/job avg|max): gap 0.033|0.754 spin 0.128|0.537 compute 0.190|0.274 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (32960 jobs, ms/job avg|max): gap 0.015|0.734 spin 0.121|0.468 compute 0.186|0.249 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (33024 jobs, ms/job avg|max): gap 0.031|0.754 spin 0.122|0.471 compute 0.194|0.272 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (33088 jobs, ms/job avg|max): gap 0.015|0.768 spin 0.138|0.601 compute 0.193|0.282 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (33152 jobs, ms/job avg|max): gap 0.038|0.756 spin 0.103|0.228 compute 0.187|0.259 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (33216 jobs, ms/job avg|max): gap 0.037|0.751 spin 0.102|0.327 compute 0.183|0.267 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (33280 jobs, us/job): prep_gu 0.0 | gemv_gu 194.2 (33.2 GB/s) | act+prep_d 0.0 | gemv_d 103.4 (31.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (33280 jobs, ms/job avg|max): gap 0.019|0.757 spin 0.141|0.557 compute 0.191|0.408 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (33344 jobs, ms/job avg|max): gap 0.031|0.753 spin 0.103|0.230 compute 0.195|0.634 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (33408 jobs, ms/job avg|max): gap 0.015|0.744 spin 0.120|0.428 compute 0.189|0.263 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (33472 jobs, ms/job avg|max): gap 0.030|0.759 spin 0.115|0.413 compute 0.187|0.263 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (33536 jobs, ms/job avg|max): gap 0.041|1.139 spin 0.129|0.501 compute 0.183|0.257 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (33600 jobs, ms/job avg|max): gap 0.018|0.750 spin 0.107|0.277 compute 0.176|0.238 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (33664 jobs, ms/job avg|max): gap 0.034|0.744 spin 0.112|0.623 compute 0.176|0.255 | empty 0/64, cpu-assign/row 5.41
+ -- handoff prof (33728 jobs, ms/job avg|max): gap 0.018|0.736 spin 0.103|0.117 compute 0.177|0.249 | empty 0/64, cpu-assign/row 5.56
+ -- moe_cpu prof (33792 jobs, us/job): prep_gu 0.0 | gemv_gu 193.0 (33.2 GB/s) | act+prep_d 0.0 | gemv_d 102.8 (31.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (33792 jobs, ms/job avg|max): gap 0.034|0.750 spin 0.134|0.764 compute 0.180|0.266 | empty 0/64, cpu-assign/row 5.52
+Context      0: S=[37;1m1 [32;1m     71.34[0m tokens/s [37;1m[69.06 - 73.61][0m
+ -- handoff prof (33856 jobs, ms/job avg|max): gap 0.040|1.157 spin 0.111|0.441 compute 0.197|0.266 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (33920 jobs, ms/job avg|max): gap 0.026|0.748 spin 0.105|0.336 compute 0.181|0.250 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (33984 jobs, ms/job avg|max): gap 0.035|0.869 spin 0.122|0.461 compute 0.193|0.275 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (34048 jobs, ms/job avg|max): gap 0.017|0.740 spin 0.132|0.419 compute 0.193|0.322 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (34112 jobs, ms/job avg|max): gap 0.037|0.941 spin 0.101|0.217 compute 0.172|0.244 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (34176 jobs, ms/job avg|max): gap 0.033|0.769 spin 0.113|0.567 compute 0.188|0.274 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (34240 jobs, ms/job avg|max): gap 0.018|0.816 spin 0.127|0.313 compute 0.189|0.263 | empty 0/64, cpu-assign/row 5.78
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.249 | worst layers L1:0.014 L3:0.012 L0:0.011 L26:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.229 max 0.754 | worst layers L5:0.183 L33:0.179 L29:0.174 L10:0.170
+ -- moe_cpu prof (34304 jobs, us/job): prep_gu 0.0 | gemv_gu 191.9 (33.3 GB/s) | act+prep_d 0.0 | gemv_d 102.1 (31.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (34304 jobs, ms/job avg|max): gap 0.236|12.683 spin 0.115|0.553 compute 0.185|0.369 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (34368 jobs, ms/job avg|max): gap 0.019|0.802 spin 0.116|0.571 compute 0.186|0.283 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (34432 jobs, ms/job avg|max): gap 0.043|1.398 spin 0.122|0.361 compute 0.187|0.293 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (34496 jobs, ms/job avg|max): gap 0.040|0.925 spin 0.104|0.259 compute 0.182|0.264 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (34560 jobs, ms/job avg|max): gap 0.036|0.835 spin 0.106|0.540 compute 0.187|0.256 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (34624 jobs, ms/job avg|max): gap 0.042|1.321 spin 0.103|0.309 compute 0.181|0.254 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (34688 jobs, ms/job avg|max): gap 0.017|0.828 spin 0.133|0.353 compute 0.184|0.248 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (34752 jobs, ms/job avg|max): gap 0.033|0.753 spin 0.115|0.625 compute 0.188|0.269 | empty 0/64, cpu-assign/row 5.91
+ -- moe_cpu prof (34816 jobs, us/job): prep_gu 0.0 | gemv_gu 190.8 (33.3 GB/s) | act+prep_d 0.0 | gemv_d 101.5 (31.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (34816 jobs, ms/job avg|max): gap 0.033|0.836 spin 0.106|0.338 compute 0.186|0.286 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (34880 jobs, ms/job avg|max): gap 0.016|0.753 spin 0.114|0.282 compute 0.186|0.250 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (34944 jobs, ms/job avg|max): gap 0.047|0.770 spin 0.130|0.709 compute 0.187|0.280 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (35008 jobs, ms/job avg|max): gap 0.017|0.745 spin 0.109|0.407 compute 0.196|0.260 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (35072 jobs, ms/job avg|max): gap 0.035|0.868 spin 0.112|0.619 compute 0.177|0.246 | empty 0/64, cpu-assign/row 5.33
+ -- handoff prof (35136 jobs, ms/job avg|max): gap 0.035|0.854 spin 0.112|0.445 compute 0.193|0.289 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (35200 jobs, ms/job avg|max): gap 0.016|0.751 spin 0.127|0.277 compute 0.197|0.268 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (35264 jobs, ms/job avg|max): gap 0.040|1.299 spin 0.108|0.298 compute 0.197|0.260 | empty 0/64, cpu-assign/row 6.00
+ -- moe_cpu prof (35328 jobs, us/job): prep_gu 0.0 | gemv_gu 189.8 (33.3 GB/s) | act+prep_d 0.0 | gemv_d 101.0 (31.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (35328 jobs, ms/job avg|max): gap 0.065|0.834 spin 0.086|0.243 compute 0.199|0.275 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (35392 jobs, ms/job avg|max): gap 0.039|0.875 spin 0.117|0.305 compute 0.200|0.309 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (35456 jobs, ms/job avg|max): gap 0.036|0.834 spin 0.118|0.542 compute 0.204|0.288 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (35520 jobs, ms/job avg|max): gap 0.074|1.053 spin 0.084|0.614 compute 0.207|0.290 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (35584 jobs, ms/job avg|max): gap 0.053|0.812 spin 0.085|0.116 compute 0.204|0.280 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (35648 jobs, ms/job avg|max): gap 0.031|0.813 spin 0.129|0.643 compute 0.202|0.280 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (35712 jobs, ms/job avg|max): gap 0.094|0.983 spin 0.076|0.475 compute 0.192|0.280 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (35776 jobs, ms/job avg|max): gap 0.035|0.779 spin 0.128|0.425 compute 0.199|0.279 | empty 0/64, cpu-assign/row 5.95
+ -- moe_cpu prof (35840 jobs, us/job): prep_gu 0.0 | gemv_gu 189.0 (33.4 GB/s) | act+prep_d 0.0 | gemv_d 100.5 (31.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (35840 jobs, ms/job avg|max): gap 0.014|0.749 spin 0.135|0.456 compute 0.195|0.268 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (35904 jobs, ms/job avg|max): gap 0.036|0.779 spin 0.209|1.081 compute 0.188|0.312 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (35968 jobs, ms/job avg|max): gap 0.040|2.220 spin 0.313|1.219 compute 0.194|0.280 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (36032 jobs, ms/job avg|max): gap 0.043|1.426 spin 0.301|1.797 compute 0.194|0.272 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (36096 jobs, ms/job avg|max): gap 0.037|0.921 spin 0.290|1.995 compute 0.205|1.129 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (36160 jobs, ms/job avg|max): gap 0.021|0.954 spin 0.307|2.116 compute 0.203|0.591 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (36224 jobs, ms/job avg|max): gap 0.032|0.773 spin 0.172|1.208 compute 0.189|0.400 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (36288 jobs, ms/job avg|max): gap 0.017|0.755 spin 0.127|0.569 compute 0.182|0.249 | empty 0/64, cpu-assign/row 5.56
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.290 | worst layers L6:0.016 L3:0.014 L0:0.013 L39:0.012
+ -- split prof [wait] (2048 brackets, stream ms): med 0.145 p90 0.271 max 2.081 | worst layers L14:0.246 L16:0.226 L29:0.221 L12:0.220
+ -- moe_cpu prof (36352 jobs, us/job): prep_gu 0.0 | gemv_gu 188.1 (33.4 GB/s) | act+prep_d 0.0 | gemv_d 99.9 (31.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (36352 jobs, ms/job avg|max): gap 0.225|12.314 spin 0.110|0.558 compute 0.183|0.321 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (36416 jobs, ms/job avg|max): gap 0.040|1.097 spin 0.101|0.270 compute 0.179|0.250 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (36480 jobs, ms/job avg|max): gap 0.020|0.988 spin 0.117|0.536 compute 0.183|0.275 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (36544 jobs, ms/job avg|max): gap 0.033|0.746 spin 0.100|0.131 compute 0.179|0.248 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (36608 jobs, ms/job avg|max): gap 0.027|0.851 spin 0.139|0.444 compute 0.186|0.263 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (36672 jobs, ms/job avg|max): gap 0.032|0.761 spin 0.104|0.355 compute 0.185|0.249 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (36736 jobs, ms/job avg|max): gap 0.031|0.749 spin 0.117|0.328 compute 0.180|0.251 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (36800 jobs, ms/job avg|max): gap 0.016|0.731 spin 0.120|0.406 compute 0.188|0.295 | empty 0/64, cpu-assign/row 5.78
+ -- moe_cpu prof (36864 jobs, us/job): prep_gu 0.0 | gemv_gu 187.1 (33.4 GB/s) | act+prep_d 0.0 | gemv_d 99.4 (31.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (36864 jobs, ms/job avg|max): gap 0.053|1.130 spin 0.126|0.333 compute 0.180|0.256 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (36928 jobs, ms/job avg|max): gap 0.016|0.738 spin 0.110|0.290 compute 0.174|0.257 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (36992 jobs, ms/job avg|max): gap 0.073|0.812 spin 0.089|0.512 compute 0.185|0.260 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (37056 jobs, ms/job avg|max): gap 0.034|0.925 spin 0.117|0.322 compute 0.184|0.271 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (37120 jobs, ms/job avg|max): gap 0.015|0.741 spin 0.126|0.564 compute 0.176|0.249 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (37184 jobs, ms/job avg|max): gap 0.034|0.784 spin 0.113|0.323 compute 0.188|0.270 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (37248 jobs, ms/job avg|max): gap 0.016|0.743 spin 0.106|0.132 compute 0.184|0.285 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (37312 jobs, ms/job avg|max): gap 0.038|0.878 spin 0.131|0.377 compute 0.182|0.267 | empty 0/64, cpu-assign/row 5.45
+ -- moe_cpu prof (37376 jobs, us/job): prep_gu 0.0 | gemv_gu 186.1 (33.5 GB/s) | act+prep_d 0.0 | gemv_d 98.8 (31.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (37376 jobs, ms/job avg|max): gap 0.050|0.912 spin 0.108|0.402 compute 0.190|0.275 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (37440 jobs, ms/job avg|max): gap 0.022|0.742 spin 0.108|0.322 compute 0.179|0.265 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (37504 jobs, ms/job avg|max): gap 0.029|0.744 spin 0.117|0.385 compute 0.196|0.307 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (37568 jobs, ms/job avg|max): gap 0.018|0.869 spin 0.135|0.426 compute 0.194|0.281 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (37632 jobs, ms/job avg|max): gap 0.031|0.780 spin 0.107|0.317 compute 0.189|0.276 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (37696 jobs, ms/job avg|max): gap 0.036|0.768 spin 0.112|0.370 compute 0.182|0.272 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (37760 jobs, ms/job avg|max): gap 0.015|0.731 spin 0.106|0.116 compute 0.191|0.256 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (37824 jobs, ms/job avg|max): gap 0.050|1.178 spin 0.126|0.415 compute 0.194|0.305 | empty 0/64, cpu-assign/row 5.92
+ -- moe_cpu prof (37888 jobs, us/job): prep_gu 0.0 | gemv_gu 185.2 (33.5 GB/s) | act+prep_d 0.0 | gemv_d 98.3 (31.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (37888 jobs, ms/job avg|max): gap 0.015|0.742 spin 0.120|0.462 compute 0.190|0.259 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (37952 jobs, ms/job avg|max): gap 0.031|0.745 spin 0.106|0.241 compute 0.192|0.266 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (38016 jobs, ms/job avg|max): gap 0.036|0.829 spin 0.136|0.381 compute 0.191|0.269 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (38080 jobs, ms/job avg|max): gap 0.021|0.942 spin 0.118|0.624 compute 0.186|0.251 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (38144 jobs, ms/job avg|max): gap 0.035|0.775 spin 0.101|0.272 compute 0.177|0.276 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (38208 jobs, ms/job avg|max): gap 0.045|0.831 spin 0.099|0.376 compute 0.190|0.258 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (38272 jobs, ms/job avg|max): gap 0.053|1.090 spin 0.119|0.815 compute 0.190|0.301 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (38336 jobs, ms/job avg|max): gap 0.034|0.752 spin 0.109|0.441 compute 0.178|0.269 | empty 0/64, cpu-assign/row 5.58
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.341 | worst layers L27:0.022 L2:0.017 L0:0.014 L10:0.014
+ -- split prof [wait] (2048 brackets, stream ms): med 0.138 p90 0.221 max 0.604 | worst layers L33:0.185 L25:0.182 L5:0.178 L10:0.177
+ -- moe_cpu prof (38400 jobs, us/job): prep_gu 0.0 | gemv_gu 184.3 (33.5 GB/s) | act+prep_d 0.0 | gemv_d 97.8 (31.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (38400 jobs, ms/job avg|max): gap 0.198|11.556 spin 0.121|0.443 compute 0.187|0.274 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (38464 jobs, ms/job avg|max): gap 0.041|0.889 spin 0.120|0.528 compute 0.192|0.285 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (38528 jobs, ms/job avg|max): gap 0.026|1.116 spin 0.140|0.543 compute 0.196|0.283 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (38592 jobs, ms/job avg|max): gap 0.032|0.762 spin 0.111|0.403 compute 0.180|0.249 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (38656 jobs, ms/job avg|max): gap 0.033|0.743 spin 0.111|0.398 compute 0.183|0.261 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (38720 jobs, ms/job avg|max): gap 0.020|0.863 spin 0.146|0.565 compute 0.193|0.305 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (38784 jobs, ms/job avg|max): gap 0.035|0.764 spin 0.106|0.367 compute 0.185|0.254 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (38848 jobs, ms/job avg|max): gap 0.023|0.750 spin 0.113|0.317 compute 0.192|0.331 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (38912 jobs, us/job): prep_gu 0.0 | gemv_gu 183.5 (33.6 GB/s) | act+prep_d 0.0 | gemv_d 97.4 (31.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (38912 jobs, ms/job avg|max): gap 0.034|0.736 spin 0.098|0.118 compute 0.183|0.277 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (38976 jobs, ms/job avg|max): gap 0.040|1.017 spin 0.130|0.411 compute 0.188|0.262 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (39040 jobs, ms/job avg|max): gap 0.018|0.894 spin 0.121|0.570 compute 0.186|0.256 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (39104 jobs, ms/job avg|max): gap 0.033|0.743 spin 0.103|0.312 compute 0.168|0.250 | empty 0/64, cpu-assign/row 5.30
+ -- handoff prof (39168 jobs, ms/job avg|max): gap 0.017|0.738 spin 0.121|0.565 compute 0.185|0.274 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (39232 jobs, ms/job avg|max): gap 0.030|0.856 spin 0.147|0.725 compute 0.192|0.268 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (39296 jobs, ms/job avg|max): gap 0.032|0.746 spin 0.112|0.680 compute 0.185|0.282 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (39360 jobs, ms/job avg|max): gap 0.016|0.753 spin 0.132|0.769 compute 0.192|0.264 | empty 0/64, cpu-assign/row 5.83
+ -- moe_cpu prof (39424 jobs, us/job): prep_gu 0.0 | gemv_gu 182.6 (33.6 GB/s) | act+prep_d 0.0 | gemv_d 96.9 (31.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (39424 jobs, ms/job avg|max): gap 0.046|1.140 spin 0.120|0.753 compute 0.188|0.299 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (39488 jobs, ms/job avg|max): gap 0.016|0.735 spin 0.125|0.351 compute 0.185|0.262 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (39552 jobs, ms/job avg|max): gap 0.039|0.754 spin 0.108|0.405 compute 0.188|0.258 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (39616 jobs, ms/job avg|max): gap 0.037|0.760 spin 0.110|0.588 compute 0.179|0.266 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (39680 jobs, ms/job avg|max): gap 0.018|0.821 spin 0.129|0.287 compute 0.186|0.289 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (39744 jobs, ms/job avg|max): gap 0.059|1.292 spin 0.119|0.772 compute 0.191|0.264 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (39808 jobs, ms/job avg|max): gap 0.016|0.735 spin 0.108|0.295 compute 0.195|0.276 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (39872 jobs, ms/job avg|max): gap 0.044|1.359 spin 0.104|0.335 compute 0.179|0.254 | empty 0/64, cpu-assign/row 5.62
+ -- moe_cpu prof (39936 jobs, us/job): prep_gu 0.0 | gemv_gu 181.8 (33.7 GB/s) | act+prep_d 0.0 | gemv_d 96.4 (31.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (39936 jobs, ms/job avg|max): gap 0.038|0.879 spin 0.141|0.689 compute 0.185|0.265 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (40000 jobs, ms/job avg|max): gap 0.016|0.746 spin 0.125|0.842 compute 0.184|0.254 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (40064 jobs, ms/job avg|max): gap 0.043|1.438 spin 0.114|0.589 compute 0.187|0.289 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (40128 jobs, ms/job avg|max): gap 0.016|0.755 spin 0.116|0.721 compute 0.179|0.279 | empty 0/64, cpu-assign/row 5.41
+ -- handoff prof (40192 jobs, ms/job avg|max): gap 0.047|1.145 spin 0.131|0.568 compute 0.188|0.271 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (40256 jobs, ms/job avg|max): gap 0.035|0.739 spin 0.123|0.716 compute 0.182|0.268 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (40320 jobs, ms/job avg|max): gap 0.017|0.854 spin 0.135|0.841 compute 0.176|0.247 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (40384 jobs, ms/job avg|max): gap 0.033|0.823 spin 0.127|0.335 compute 0.182|0.261 | empty 0/64, cpu-assign/row 5.78
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.031 | worst layers L3:0.011 L4:0.010 L0:0.010 L1:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.226 max 0.865 | worst layers L5:0.206 L26:0.203 L33:0.195 L25:0.192
+ -- moe_cpu prof (40448 jobs, us/job): prep_gu 0.0 | gemv_gu 181.0 (33.7 GB/s) | act+prep_d 0.0 | gemv_d 96.0 (31.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (40448 jobs, ms/job avg|max): gap 0.198|11.213 spin 0.124|0.735 compute 0.187|0.264 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (40512 jobs, ms/job avg|max): gap 0.036|0.888 spin 0.115|0.534 compute 0.183|0.267 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (40576 jobs, ms/job avg|max): gap 0.038|1.066 spin 0.126|0.707 compute 0.193|0.296 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (40640 jobs, ms/job avg|max): gap 0.016|0.762 spin 0.138|0.814 compute 0.183|0.285 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (40704 jobs, ms/job avg|max): gap 0.034|0.769 spin 0.123|0.554 compute 0.185|0.255 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (40768 jobs, ms/job avg|max): gap 0.025|1.324 spin 0.132|0.596 compute 0.188|0.265 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (40832 jobs, ms/job avg|max): gap 0.034|0.756 spin 0.123|0.442 compute 0.183|0.265 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (40896 jobs, ms/job avg|max): gap 0.033|0.746 spin 0.131|0.834 compute 0.181|0.287 | empty 0/64, cpu-assign/row 5.50
+ -- moe_cpu prof (40960 jobs, us/job): prep_gu 0.0 | gemv_gu 180.2 (33.7 GB/s) | act+prep_d 0.0 | gemv_d 95.5 (31.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (40960 jobs, ms/job avg|max): gap 0.017|0.738 spin 0.111|0.363 compute 0.183|0.261 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (41024 jobs, ms/job avg|max): gap 0.033|0.743 spin 0.125|0.717 compute 0.184|0.258 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (41088 jobs, ms/job avg|max): gap 0.024|1.354 spin 0.138|0.934 compute 0.180|0.248 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (41152 jobs, ms/job avg|max): gap 0.032|0.761 spin 0.120|0.760 compute 0.182|0.275 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (41216 jobs, ms/job avg|max): gap 0.031|0.766 spin 0.119|0.420 compute 0.187|0.257 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (41280 jobs, ms/job avg|max): gap 0.027|1.460 spin 0.136|0.688 compute 0.181|0.270 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (41344 jobs, ms/job avg|max): gap 0.037|0.751 spin 0.116|0.329 compute 0.184|0.257 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (41408 jobs, ms/job avg|max): gap 0.028|1.365 spin 0.143|0.772 compute 0.191|0.295 | empty 0/64, cpu-assign/row 5.69
+ -- moe_cpu prof (41472 jobs, us/job): prep_gu 0.0 | gemv_gu 179.4 (33.8 GB/s) | act+prep_d 0.0 | gemv_d 95.1 (31.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (41472 jobs, ms/job avg|max): gap 0.036|0.948 spin 0.116|0.381 compute 0.195|0.260 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (41536 jobs, ms/job avg|max): gap 0.034|0.860 spin 0.122|0.374 compute 0.192|0.262 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (41600 jobs, ms/job avg|max): gap 0.015|0.775 spin 0.142|0.765 compute 0.205|0.307 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (41664 jobs, ms/job avg|max): gap 0.074|0.942 spin 0.101|0.385 compute 0.191|0.277 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (41728 jobs, ms/job avg|max): gap 0.019|0.730 spin 0.127|0.759 compute 0.194|0.254 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (41792 jobs, ms/job avg|max): gap 0.515|31.641 spin 0.137|0.750 compute 0.208|0.309 | empty 0/64, cpu-assign/row 6.11
+Context    256: S=[37;1m1 [32;1m     70.43[0m tokens/s [37;1m[69.99 - 70.87][0m
+ -- handoff prof (41856 jobs, ms/job avg|max): gap 0.046|1.206 spin 0.126|0.722 compute 0.203|0.351 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (41920 jobs, ms/job avg|max): gap 0.029|1.147 spin 0.128|0.445 compute 0.200|0.290 | empty 0/64, cpu-assign/row 5.84
+ -- moe_cpu prof (41984 jobs, us/job): prep_gu 0.0 | gemv_gu 178.8 (33.8 GB/s) | act+prep_d 0.0 | gemv_d 94.7 (31.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (41984 jobs, ms/job avg|max): gap 0.036|0.795 spin 0.116|0.738 compute 0.190|0.266 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (42048 jobs, ms/job avg|max): gap 0.017|0.885 spin 0.121|0.340 compute 0.199|0.276 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (42112 jobs, ms/job avg|max): gap 0.037|0.893 spin 0.143|0.617 compute 0.193|0.303 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (42176 jobs, ms/job avg|max): gap 0.049|0.807 spin 0.109|0.446 compute 0.194|0.271 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (42240 jobs, ms/job avg|max): gap 0.016|0.754 spin 0.117|0.432 compute 0.205|0.282 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (42304 jobs, ms/job avg|max): gap 0.039|0.763 spin 0.129|0.648 compute 0.197|0.315 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (42368 jobs, ms/job avg|max): gap 0.015|0.770 spin 0.135|0.440 compute 0.198|0.269 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (42432 jobs, ms/job avg|max): gap 0.034|0.895 spin 0.128|0.724 compute 0.192|0.245 | empty 0/64, cpu-assign/row 5.95
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.320 | worst layers L9:0.016 L19:0.016 L5:0.014 L3:0.013
+ -- split prof [wait] (2048 brackets, stream ms): med 0.143 p90 0.245 max 0.908 | worst layers L22:0.216 L33:0.193 L25:0.189 L9:0.188
+ -- moe_cpu prof (42496 jobs, us/job): prep_gu 0.0 | gemv_gu 178.1 (33.8 GB/s) | act+prep_d 0.0 | gemv_d 94.4 (31.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (42496 jobs, ms/job avg|max): gap 0.205|11.760 spin 0.102|0.236 compute 0.184|0.237 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (42560 jobs, ms/job avg|max): gap 0.018|0.933 spin 0.147|0.718 compute 0.194|0.280 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (42624 jobs, ms/job avg|max): gap 0.031|0.754 spin 0.130|0.831 compute 0.193|0.271 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (42688 jobs, ms/job avg|max): gap 0.016|0.776 spin 0.119|0.399 compute 0.193|0.295 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (42752 jobs, ms/job avg|max): gap 0.040|0.740 spin 0.118|0.812 compute 0.191|0.276 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (42816 jobs, ms/job avg|max): gap 0.031|0.738 spin 0.152|1.009 compute 0.184|0.338 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (42880 jobs, ms/job avg|max): gap 0.016|0.743 spin 0.127|0.745 compute 0.173|0.246 | empty 0/64, cpu-assign/row 5.39
+ -- handoff prof (42944 jobs, ms/job avg|max): gap 0.032|0.879 spin 0.102|0.117 compute 0.190|0.270 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (43008 jobs, us/job): prep_gu 0.0 | gemv_gu 177.4 (33.8 GB/s) | act+prep_d 0.0 | gemv_d 94.0 (31.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (43008 jobs, ms/job avg|max): gap 0.017|0.756 spin 0.140|0.595 compute 0.190|0.296 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (43072 jobs, ms/job avg|max): gap 0.032|0.760 spin 0.130|0.723 compute 0.187|0.308 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (43136 jobs, ms/job avg|max): gap 0.036|0.773 spin 0.107|0.687 compute 0.190|0.260 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (43200 jobs, ms/job avg|max): gap 0.021|0.834 spin 0.128|0.717 compute 0.182|0.284 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (43264 jobs, ms/job avg|max): gap 0.048|1.332 spin 0.125|0.535 compute 0.192|0.310 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (43328 jobs, ms/job avg|max): gap 0.016|0.749 spin 0.123|0.755 compute 0.170|0.223 | empty 0/64, cpu-assign/row 5.27
+ -- handoff prof (43392 jobs, ms/job avg|max): gap 0.030|0.745 spin 0.125|0.827 compute 0.189|0.299 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (43456 jobs, ms/job avg|max): gap 0.039|1.336 spin 0.131|0.647 compute 0.187|0.337 | empty 0/64, cpu-assign/row 5.53
+ -- moe_cpu prof (43520 jobs, us/job): prep_gu 0.0 | gemv_gu 176.7 (33.9 GB/s) | act+prep_d 0.0 | gemv_d 93.6 (32.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (43520 jobs, ms/job avg|max): gap 0.020|0.768 spin 0.129|0.473 compute 0.188|0.267 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (43584 jobs, ms/job avg|max): gap 0.033|0.884 spin 0.114|0.545 compute 0.189|0.252 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (43648 jobs, ms/job avg|max): gap 0.019|0.756 spin 0.115|0.441 compute 0.188|0.270 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (43712 jobs, ms/job avg|max): gap 0.031|0.754 spin 0.124|0.300 compute 0.192|0.280 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (43776 jobs, ms/job avg|max): gap 0.050|1.007 spin 0.120|0.417 compute 0.197|0.284 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (43840 jobs, ms/job avg|max): gap 0.015|0.753 spin 0.117|0.484 compute 0.195|0.295 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (43904 jobs, ms/job avg|max): gap 0.049|0.870 spin 0.116|0.553 compute 0.197|0.297 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (43968 jobs, ms/job avg|max): gap 0.038|0.862 spin 0.137|0.565 compute 0.205|0.326 | empty 0/64, cpu-assign/row 5.47
+ -- moe_cpu prof (44032 jobs, us/job): prep_gu 0.0 | gemv_gu 176.1 (33.9 GB/s) | act+prep_d 0.0 | gemv_d 93.3 (32.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (44032 jobs, ms/job avg|max): gap 0.063|0.869 spin 0.115|0.798 compute 0.208|0.282 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (44096 jobs, ms/job avg|max): gap 0.070|1.558 spin 0.108|0.774 compute 0.202|0.271 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (44160 jobs, ms/job avg|max): gap 0.017|0.841 spin 0.134|0.590 compute 0.189|0.265 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (44224 jobs, ms/job avg|max): gap 0.038|1.062 spin 0.130|0.421 compute 0.190|0.281 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (44288 jobs, ms/job avg|max): gap 0.017|0.749 spin 0.123|0.770 compute 0.190|0.269 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (44352 jobs, ms/job avg|max): gap 0.059|1.616 spin 0.325|1.832 compute 0.208|0.960 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (44416 jobs, ms/job avg|max): gap 0.055|2.131 spin 0.278|1.708 compute 0.197|0.707 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (44480 jobs, ms/job avg|max): gap 0.021|1.006 spin 0.281|1.773 compute 0.216|1.571 | empty 0/64, cpu-assign/row 5.72
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.360 | worst layers L3:0.021 L8:0.015 L0:0.014 L11:0.014
+ -- split prof [wait] (2048 brackets, stream ms): med 0.144 p90 0.280 max 2.003 | worst layers L26:0.234 L21:0.226 L22:0.224 L25:0.218
+ -- moe_cpu prof (44544 jobs, us/job): prep_gu 0.0 | gemv_gu 175.6 (33.9 GB/s) | act+prep_d 0.0 | gemv_d 92.9 (32.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (44544 jobs, ms/job avg|max): gap 0.239|11.990 spin 0.317|1.969 compute 0.196|0.708 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (44608 jobs, ms/job avg|max): gap 0.033|1.131 spin 0.169|1.796 compute 0.191|0.343 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (44672 jobs, ms/job avg|max): gap 0.035|0.812 spin 0.151|0.847 compute 0.193|0.306 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (44736 jobs, ms/job avg|max): gap 0.031|0.782 spin 0.112|0.404 compute 0.182|0.264 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (44800 jobs, ms/job avg|max): gap 0.018|0.751 spin 0.133|0.724 compute 0.192|0.306 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (44864 jobs, ms/job avg|max): gap 0.035|0.886 spin 0.101|0.157 compute 0.181|0.270 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (44928 jobs, ms/job avg|max): gap 0.021|0.916 spin 0.142|0.402 compute 0.183|0.263 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (44992 jobs, ms/job avg|max): gap 0.031|0.758 spin 0.107|0.351 compute 0.180|0.280 | empty 0/64, cpu-assign/row 5.44
+ -- moe_cpu prof (45056 jobs, us/job): prep_gu 0.0 | gemv_gu 174.9 (33.9 GB/s) | act+prep_d 0.0 | gemv_d 92.5 (32.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (45056 jobs, ms/job avg|max): gap 0.038|0.756 spin 0.114|0.570 compute 0.185|0.281 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (45120 jobs, ms/job avg|max): gap 0.016|0.738 spin 0.120|0.573 compute 0.189|0.267 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (45184 jobs, ms/job avg|max): gap 0.036|0.996 spin 0.139|0.492 compute 0.178|0.259 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (45248 jobs, ms/job avg|max): gap 0.017|0.733 spin 0.113|0.327 compute 0.175|0.263 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (45312 jobs, ms/job avg|max): gap 0.036|0.973 spin 0.111|0.603 compute 0.192|0.273 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (45376 jobs, ms/job avg|max): gap 0.039|1.192 spin 0.126|0.800 compute 0.192|0.284 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (45440 jobs, ms/job avg|max): gap 0.025|1.131 spin 0.107|0.385 compute 0.188|0.253 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (45504 jobs, ms/job avg|max): gap 0.035|0.922 spin 0.112|0.357 compute 0.184|0.276 | empty 0/64, cpu-assign/row 5.55
+ -- moe_cpu prof (45568 jobs, us/job): prep_gu 0.0 | gemv_gu 174.3 (34.0 GB/s) | act+prep_d 0.0 | gemv_d 92.2 (32.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (45568 jobs, ms/job avg|max): gap 0.022|0.756 spin 0.103|0.115 compute 0.193|0.301 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (45632 jobs, ms/job avg|max): gap 0.043|1.323 spin 0.126|0.279 compute 0.192|0.277 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (45696 jobs, ms/job avg|max): gap 0.033|0.751 spin 0.119|0.415 compute 0.181|0.272 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (45760 jobs, ms/job avg|max): gap 0.015|0.742 spin 0.108|0.226 compute 0.180|0.256 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (45824 jobs, ms/job avg|max): gap 0.042|1.086 spin 0.110|0.456 compute 0.196|0.382 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (45888 jobs, ms/job avg|max): gap 0.019|0.928 spin 0.141|0.576 compute 0.199|0.274 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (45952 jobs, ms/job avg|max): gap 0.032|0.771 spin 0.102|0.219 compute 0.184|0.261 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (46016 jobs, ms/job avg|max): gap 0.031|0.860 spin 0.115|0.589 compute 0.190|0.255 | empty 0/64, cpu-assign/row 5.83
+ -- moe_cpu prof (46080 jobs, us/job): prep_gu 0.0 | gemv_gu 173.7 (34.0 GB/s) | act+prep_d 0.0 | gemv_d 91.9 (32.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (46080 jobs, ms/job avg|max): gap 0.016|0.729 spin 0.116|0.390 compute 0.191|0.264 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (46144 jobs, ms/job avg|max): gap 0.034|0.769 spin 0.133|0.502 compute 0.178|0.260 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (46208 jobs, ms/job avg|max): gap 0.025|1.307 spin 0.108|0.263 compute 0.186|0.279 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (46272 jobs, ms/job avg|max): gap 0.031|0.755 spin 0.113|0.422 compute 0.194|0.296 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (46336 jobs, ms/job avg|max): gap 0.036|0.865 spin 0.116|0.322 compute 0.196|0.258 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (46400 jobs, ms/job avg|max): gap 0.015|0.746 spin 0.128|0.669 compute 0.194|0.269 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (46464 jobs, ms/job avg|max): gap 0.034|0.868 spin 0.100|0.117 compute 0.184|0.247 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (46528 jobs, ms/job avg|max): gap 0.017|0.756 spin 0.117|0.421 compute 0.185|0.261 | empty 0/64, cpu-assign/row 5.88
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.601 | worst layers L0:0.023 L3:0.012 L4:0.011 L35:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.140 p90 0.225 max 1.756 | worst layers L5:0.197 L36:0.182 L17:0.180 L37:0.178
+ -- moe_cpu prof (46592 jobs, us/job): prep_gu 0.0 | gemv_gu 173.1 (34.0 GB/s) | act+prep_d 0.0 | gemv_d 91.5 (32.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (46592 jobs, ms/job avg|max): gap 0.232|11.948 spin 0.103|0.287 compute 0.196|0.328 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (46656 jobs, ms/job avg|max): gap 0.035|0.805 spin 0.107|0.390 compute 0.203|0.310 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (46720 jobs, ms/job avg|max): gap 0.017|0.762 spin 0.117|0.371 compute 0.185|0.255 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (46784 jobs, ms/job avg|max): gap 0.046|0.923 spin 0.138|0.749 compute 0.191|0.262 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (46848 jobs, ms/job avg|max): gap 0.016|0.739 spin 0.120|0.597 compute 0.178|0.270 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (46912 jobs, ms/job avg|max): gap 0.034|0.856 spin 0.140|0.831 compute 0.181|0.256 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (46976 jobs, ms/job avg|max): gap 0.032|0.757 spin 0.123|0.548 compute 0.191|0.282 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (47040 jobs, ms/job avg|max): gap 0.015|0.746 spin 0.158|0.773 compute 0.189|0.266 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (47104 jobs, us/job): prep_gu 0.0 | gemv_gu 172.5 (34.0 GB/s) | act+prep_d 0.0 | gemv_d 91.2 (32.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (47104 jobs, ms/job avg|max): gap 0.034|0.897 spin 0.118|0.657 compute 0.192|0.295 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (47168 jobs, ms/job avg|max): gap 0.017|0.747 spin 0.128|0.697 compute 0.188|0.267 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (47232 jobs, ms/job avg|max): gap 0.056|2.427 spin 0.136|0.756 compute 0.188|0.305 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (47296 jobs, ms/job avg|max): gap 0.030|0.741 spin 0.112|0.394 compute 0.180|0.251 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (47360 jobs, ms/job avg|max): gap 0.014|0.719 spin 0.124|0.394 compute 0.181|0.256 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (47424 jobs, ms/job avg|max): gap 0.039|0.874 spin 0.106|0.464 compute 0.179|0.270 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (47488 jobs, ms/job avg|max): gap 0.017|0.750 spin 0.147|0.695 compute 0.183|0.270 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (47552 jobs, ms/job avg|max): gap 0.038|1.035 spin 0.111|0.424 compute 0.188|0.280 | empty 0/64, cpu-assign/row 5.73
+ -- moe_cpu prof (47616 jobs, us/job): prep_gu 0.0 | gemv_gu 171.9 (34.1 GB/s) | act+prep_d 0.0 | gemv_d 90.9 (32.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (47616 jobs, ms/job avg|max): gap 0.041|1.330 spin 0.125|0.757 compute 0.187|0.269 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (47680 jobs, ms/job avg|max): gap 0.018|0.730 spin 0.112|0.329 compute 0.188|0.250 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (47744 jobs, ms/job avg|max): gap 0.030|0.749 spin 0.149|0.859 compute 0.191|0.321 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (47808 jobs, ms/job avg|max): gap 0.021|0.731 spin 0.129|0.710 compute 0.188|0.261 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (47872 jobs, ms/job avg|max): gap 0.031|0.742 spin 0.111|0.567 compute 0.182|0.277 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (47936 jobs, ms/job avg|max): gap 0.033|0.838 spin 0.130|0.779 compute 0.185|0.294 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (48000 jobs, ms/job avg|max): gap 0.018|0.931 spin 0.131|0.826 compute 0.181|0.293 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (48064 jobs, ms/job avg|max): gap 0.030|0.736 spin 0.116|0.473 compute 0.183|0.261 | empty 0/64, cpu-assign/row 5.67
+ -- moe_cpu prof (48128 jobs, us/job): prep_gu 0.0 | gemv_gu 171.4 (34.1 GB/s) | act+prep_d 0.0 | gemv_d 90.6 (32.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (48128 jobs, ms/job avg|max): gap 0.016|0.723 spin 0.120|0.552 compute 0.189|0.299 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (48192 jobs, ms/job avg|max): gap 0.045|0.897 spin 0.121|0.692 compute 0.176|0.259 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (48256 jobs, ms/job avg|max): gap 0.035|0.767 spin 0.124|0.682 compute 0.187|0.297 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (48320 jobs, ms/job avg|max): gap 0.017|0.729 spin 0.140|0.752 compute 0.182|0.259 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (48384 jobs, ms/job avg|max): gap 0.049|1.007 spin 0.101|0.252 compute 0.180|0.285 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (48448 jobs, ms/job avg|max): gap 0.029|0.991 spin 0.148|1.029 compute 0.192|0.318 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (48512 jobs, ms/job avg|max): gap 0.035|0.776 spin 0.101|0.290 compute 0.184|0.253 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (48576 jobs, ms/job avg|max): gap 0.034|0.753 spin 0.115|0.415 compute 0.177|0.273 | empty 0/64, cpu-assign/row 5.48
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.028 | worst layers L0:0.012 L3:0.011 L2:0.010 L1:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.231 max 1.178 | worst layers L5:0.204 L26:0.202 L2:0.182 L29:0.178
+ -- moe_cpu prof (48640 jobs, us/job): prep_gu 0.0 | gemv_gu 170.8 (34.1 GB/s) | act+prep_d 0.0 | gemv_d 90.2 (32.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (48640 jobs, ms/job avg|max): gap 0.196|11.439 spin 0.125|0.451 compute 0.202|1.288 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (48704 jobs, ms/job avg|max): gap 0.031|0.768 spin 0.123|0.421 compute 0.191|0.272 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (48768 jobs, ms/job avg|max): gap 0.016|0.758 spin 0.116|0.547 compute 0.194|0.273 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (48832 jobs, ms/job avg|max): gap 0.034|0.744 spin 0.101|0.282 compute 0.178|0.274 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (48896 jobs, ms/job avg|max): gap 0.039|1.082 spin 0.127|0.780 compute 0.190|0.348 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (48960 jobs, ms/job avg|max): gap 0.019|0.921 spin 0.109|0.312 compute 0.177|0.254 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (49024 jobs, ms/job avg|max): gap 0.036|0.776 spin 0.115|0.415 compute 0.184|0.285 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (49088 jobs, ms/job avg|max): gap 0.016|0.723 spin 0.119|0.561 compute 0.190|0.286 | empty 0/64, cpu-assign/row 5.89
+ -- moe_cpu prof (49152 jobs, us/job): prep_gu 0.0 | gemv_gu 170.3 (34.2 GB/s) | act+prep_d 0.0 | gemv_d 89.9 (32.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (49152 jobs, ms/job avg|max): gap 0.038|0.987 spin 0.124|0.308 compute 0.184|0.258 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (49216 jobs, ms/job avg|max): gap 0.032|0.770 spin 0.130|0.776 compute 0.182|0.258 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (49280 jobs, ms/job avg|max): gap 0.016|0.737 spin 0.115|0.768 compute 0.185|0.264 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (49344 jobs, ms/job avg|max): gap 0.039|1.137 spin 0.132|0.781 compute 0.189|0.318 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (49408 jobs, ms/job avg|max): gap 0.015|0.743 spin 0.142|0.869 compute 0.196|0.283 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (49472 jobs, ms/job avg|max): gap 0.034|0.736 spin 0.110|0.418 compute 0.175|0.264 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (49536 jobs, ms/job avg|max): gap 0.032|0.756 spin 0.103|0.300 compute 0.188|0.250 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (49600 jobs, ms/job avg|max): gap 0.019|0.827 spin 0.128|0.492 compute 0.201|0.297 | empty 0/64, cpu-assign/row 6.02
+ -- moe_cpu prof (49664 jobs, us/job): prep_gu 0.0 | gemv_gu 169.7 (34.2 GB/s) | act+prep_d 0.0 | gemv_d 89.6 (32.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (49664 jobs, ms/job avg|max): gap 0.036|0.933 spin 0.127|0.626 compute 0.185|0.252 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (49728 jobs, ms/job avg|max): gap 0.016|0.736 spin 0.118|0.704 compute 0.180|0.248 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (49792 jobs, ms/job avg|max): gap 0.030|0.745 spin 0.125|0.694 compute 0.186|0.303 | empty 0/64, cpu-assign/row 5.62
+Context    512: S=[37;1m1 [32;1m     70.88[0m tokens/s [37;1m[68.89 - 72.88][0m
+ -- handoff prof (49856 jobs, ms/job avg|max): gap 0.058|1.376 spin 0.144|0.848 compute 0.196|0.281 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (49920 jobs, ms/job avg|max): gap 0.045|0.825 spin 0.115|0.688 compute 0.197|0.272 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (49984 jobs, ms/job avg|max): gap 0.032|0.734 spin 0.128|0.741 compute 0.190|0.333 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (50048 jobs, ms/job avg|max): gap 0.016|0.751 spin 0.135|0.772 compute 0.177|0.269 | empty 0/64, cpu-assign/row 5.41
+ -- handoff prof (50112 jobs, ms/job avg|max): gap 0.033|0.754 spin 0.119|0.376 compute 0.179|0.249 | empty 0/64, cpu-assign/row 5.61
+ -- moe_cpu prof (50176 jobs, us/job): prep_gu 0.0 | gemv_gu 169.2 (34.2 GB/s) | act+prep_d 0.0 | gemv_d 89.4 (32.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (50176 jobs, ms/job avg|max): gap 0.034|0.732 spin 0.130|0.883 compute 0.184|0.294 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (50240 jobs, ms/job avg|max): gap 0.017|0.733 spin 0.111|0.359 compute 0.178|0.242 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (50304 jobs, ms/job avg|max): gap 0.055|0.806 spin 0.123|0.747 compute 0.180|0.260 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (50368 jobs, ms/job avg|max): gap 0.020|0.974 spin 0.138|0.707 compute 0.185|0.330 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (50432 jobs, ms/job avg|max): gap 0.032|0.771 spin 0.128|0.736 compute 0.174|0.261 | empty 0/64, cpu-assign/row 5.44
+ -- handoff prof (50496 jobs, ms/job avg|max): gap 0.033|0.733 spin 0.116|0.441 compute 0.176|0.291 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (50560 jobs, ms/job avg|max): gap 0.035|1.949 spin 0.145|0.805 compute 0.179|0.273 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (50624 jobs, ms/job avg|max): gap 0.032|0.747 spin 0.104|0.289 compute 0.172|0.248 | empty 0/64, cpu-assign/row 5.42
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.272 | worst layers L0:0.019 L3:0.013 L11:0.012 L7:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.138 p90 0.226 max 1.305 | worst layers L22:0.199 L5:0.186 L10:0.185 L28:0.183
+ -- moe_cpu prof (50688 jobs, us/job): prep_gu 0.0 | gemv_gu 168.7 (34.2 GB/s) | act+prep_d 0.0 | gemv_d 89.0 (32.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (50688 jobs, ms/job avg|max): gap 0.225|11.431 spin 0.123|0.944 compute 0.186|0.322 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (50752 jobs, ms/job avg|max): gap 0.043|0.789 spin 0.145|1.036 compute 0.202|0.315 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (50816 jobs, ms/job avg|max): gap 0.033|0.754 spin 0.118|0.418 compute 0.193|0.290 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (50880 jobs, ms/job avg|max): gap 0.020|0.730 spin 0.105|0.267 compute 0.179|0.250 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (50944 jobs, ms/job avg|max): gap 0.030|0.759 spin 0.120|0.533 compute 0.186|0.304 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (51008 jobs, ms/job avg|max): gap 0.018|0.766 spin 0.146|0.514 compute 0.189|0.277 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (51072 jobs, ms/job avg|max): gap 0.047|0.834 spin 0.106|0.769 compute 0.184|0.258 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (51136 jobs, ms/job avg|max): gap 0.087|0.832 spin 0.089|0.745 compute 0.188|0.262 | empty 0/64, cpu-assign/row 5.75
+ -- moe_cpu prof (51200 jobs, us/job): prep_gu 0.0 | gemv_gu 168.2 (34.3 GB/s) | act+prep_d 0.0 | gemv_d 88.8 (32.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (51200 jobs, ms/job avg|max): gap 0.015|0.734 spin 0.150|0.963 compute 0.185|0.286 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (51264 jobs, ms/job avg|max): gap 0.035|0.767 spin 0.114|0.485 compute 0.176|0.256 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (51328 jobs, ms/job avg|max): gap 0.014|0.729 spin 0.140|1.230 compute 0.189|0.281 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (51392 jobs, ms/job avg|max): gap 0.068|0.753 spin 0.079|0.205 compute 0.184|0.262 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (51456 jobs, ms/job avg|max): gap 0.051|0.915 spin 0.142|0.983 compute 0.188|0.267 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (51520 jobs, ms/job avg|max): gap 0.018|0.737 spin 0.124|0.600 compute 0.187|0.315 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (51584 jobs, ms/job avg|max): gap 0.040|1.005 spin 0.127|0.785 compute 0.181|0.281 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (51648 jobs, ms/job avg|max): gap 0.016|0.865 spin 0.110|0.195 compute 0.190|0.278 | empty 0/64, cpu-assign/row 5.86
+ -- moe_cpu prof (51712 jobs, us/job): prep_gu 0.0 | gemv_gu 167.7 (34.3 GB/s) | act+prep_d 0.0 | gemv_d 88.5 (32.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (51712 jobs, ms/job avg|max): gap 0.044|1.268 spin 0.132|0.412 compute 0.191|0.262 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (51776 jobs, ms/job avg|max): gap 0.043|0.825 spin 0.099|0.315 compute 0.178|0.253 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (51840 jobs, ms/job avg|max): gap 0.043|0.740 spin 0.101|0.542 compute 0.187|0.264 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (51904 jobs, ms/job avg|max): gap 0.045|1.759 spin 0.111|0.284 compute 0.192|0.271 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (51968 jobs, ms/job avg|max): gap 0.019|0.934 spin 0.131|0.422 compute 0.191|0.294 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (52032 jobs, ms/job avg|max): gap 0.031|0.746 spin 0.106|0.311 compute 0.186|0.249 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (52096 jobs, ms/job avg|max): gap 0.032|0.755 spin 0.116|0.411 compute 0.191|0.260 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (52160 jobs, ms/job avg|max): gap 0.021|0.945 spin 0.124|0.320 compute 0.188|0.266 | empty 0/64, cpu-assign/row 5.58
+ -- moe_cpu prof (52224 jobs, us/job): prep_gu 0.0 | gemv_gu 167.2 (34.3 GB/s) | act+prep_d 0.0 | gemv_d 88.2 (32.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (52224 jobs, ms/job avg|max): gap 0.069|0.832 spin 0.093|0.440 compute 0.194|0.271 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (52288 jobs, ms/job avg|max): gap 0.019|0.730 spin 0.116|0.521 compute 0.200|0.274 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (52352 jobs, ms/job avg|max): gap 0.030|0.751 spin 0.103|0.122 compute 0.193|0.267 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (52416 jobs, ms/job avg|max): gap 0.037|0.762 spin 0.141|0.712 compute 0.193|0.301 | empty 0/64, cpu-assign/row 5.38
+ -- handoff prof (52480 jobs, ms/job avg|max): gap 0.021|0.739 spin 0.105|0.263 compute 0.208|0.286 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (52544 jobs, ms/job avg|max): gap 0.036|0.933 spin 0.114|0.453 compute 0.203|0.292 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (52608 jobs, ms/job avg|max): gap 0.019|0.855 spin 0.127|0.528 compute 0.205|0.288 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (52672 jobs, ms/job avg|max): gap 0.037|0.748 spin 0.126|0.420 compute 0.192|0.331 | empty 0/64, cpu-assign/row 5.69
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.263 | worst layers L0:0.017 L17:0.016 L9:0.015 L3:0.015
+ -- split prof [wait] (2048 brackets, stream ms): med 0.141 p90 0.232 max 1.240 | worst layers L10:0.207 L33:0.197 L26:0.189 L22:0.185
+ -- moe_cpu prof (52736 jobs, us/job): prep_gu 0.0 | gemv_gu 166.8 (34.3 GB/s) | act+prep_d 0.0 | gemv_d 88.0 (32.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (52736 jobs, ms/job avg|max): gap 0.213|11.365 spin 0.123|0.382 compute 0.199|0.809 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (52800 jobs, ms/job avg|max): gap 0.023|0.975 spin 0.249|1.621 compute 0.202|0.361 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (52864 jobs, ms/job avg|max): gap 0.073|1.999 spin 0.286|2.142 compute 0.213|1.612 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (52928 jobs, ms/job avg|max): gap 0.035|1.758 spin 0.269|1.669 compute 0.222|2.234 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (52992 jobs, ms/job avg|max): gap 0.051|1.404 spin 0.244|1.873 compute 0.196|0.462 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (53056 jobs, ms/job avg|max): gap 0.063|1.899 spin 0.256|1.959 compute 0.197|0.598 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (53120 jobs, ms/job avg|max): gap 0.019|0.739 spin 0.159|1.006 compute 0.185|0.269 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (53184 jobs, ms/job avg|max): gap 0.033|0.757 spin 0.127|0.732 compute 0.186|0.251 | empty 0/64, cpu-assign/row 5.73
+ -- moe_cpu prof (53248 jobs, us/job): prep_gu 0.0 | gemv_gu 166.5 (34.3 GB/s) | act+prep_d 0.0 | gemv_d 87.8 (32.5 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (53248 jobs, ms/job avg|max): gap 0.023|0.768 spin 0.132|0.684 compute 0.189|0.294 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (53312 jobs, ms/job avg|max): gap 0.035|0.789 spin 0.102|0.263 compute 0.187|0.250 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (53376 jobs, ms/job avg|max): gap 0.035|0.862 spin 0.135|0.534 compute 0.187|0.260 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (53440 jobs, ms/job avg|max): gap 0.028|1.028 spin 0.116|0.426 compute 0.184|0.313 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (53504 jobs, ms/job avg|max): gap 0.035|0.755 spin 0.103|0.315 compute 0.176|0.239 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (53568 jobs, ms/job avg|max): gap 0.016|0.731 spin 0.123|0.460 compute 0.184|0.250 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (53632 jobs, ms/job avg|max): gap 0.035|0.897 spin 0.135|0.409 compute 0.199|0.263 | empty 0/64, cpu-assign/row 6.14
+ -- handoff prof (53696 jobs, ms/job avg|max): gap 0.033|0.751 spin 0.106|0.309 compute 0.178|0.249 | empty 0/64, cpu-assign/row 5.69
+ -- moe_cpu prof (53760 jobs, us/job): prep_gu 0.0 | gemv_gu 166.0 (34.3 GB/s) | act+prep_d 0.0 | gemv_d 87.5 (32.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (53760 jobs, ms/job avg|max): gap 0.019|0.748 spin 0.141|0.687 compute 0.189|0.263 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (53824 jobs, ms/job avg|max): gap 0.038|1.113 spin 0.133|0.636 compute 0.190|0.292 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (53888 jobs, ms/job avg|max): gap 0.018|0.775 spin 0.123|0.714 compute 0.194|0.258 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (53952 jobs, ms/job avg|max): gap 0.042|0.978 spin 0.126|0.809 compute 0.188|0.278 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (54016 jobs, ms/job avg|max): gap 0.033|0.751 spin 0.102|0.220 compute 0.178|0.244 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (54080 jobs, ms/job avg|max): gap 0.026|1.348 spin 0.144|0.716 compute 0.181|0.274 | empty 0/64, cpu-assign/row 5.39
+ -- handoff prof (54144 jobs, ms/job avg|max): gap 0.037|0.740 spin 0.117|0.716 compute 0.186|0.334 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (54208 jobs, ms/job avg|max): gap 0.023|0.857 spin 0.139|0.755 compute 0.179|0.256 | empty 0/64, cpu-assign/row 5.55
+ -- moe_cpu prof (54272 jobs, us/job): prep_gu 0.0 | gemv_gu 165.5 (34.4 GB/s) | act+prep_d 0.0 | gemv_d 87.3 (32.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (54272 jobs, ms/job avg|max): gap 0.037|0.773 spin 0.100|0.264 compute 0.187|0.293 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (54336 jobs, ms/job avg|max): gap 2.558|160.661 spin 0.124|0.719 compute 0.184|0.330 | empty 0/64, cpu-assign/row 5.41
+ -- handoff prof (54400 jobs, ms/job avg|max): gap 0.020|0.776 spin 0.122|0.596 compute 0.183|0.262 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (54464 jobs, ms/job avg|max): gap 0.052|1.035 spin 0.119|0.831 compute 0.173|0.295 | empty 0/64, cpu-assign/row 5.25
+ -- handoff prof (54528 jobs, ms/job avg|max): gap 0.018|0.917 spin 0.116|0.377 compute 0.185|0.269 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (54592 jobs, ms/job avg|max): gap 0.044|1.294 spin 0.134|0.740 compute 0.173|0.262 | empty 0/64, cpu-assign/row 5.33
+ -- handoff prof (54656 jobs, ms/job avg|max): gap 0.031|0.753 spin 0.116|0.658 compute 0.180|0.258 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (54720 jobs, ms/job avg|max): gap 0.016|0.776 spin 0.109|0.265 compute 0.183|0.250 | empty 0/64, cpu-assign/row 5.80
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.069 | worst layers L3:0.013 L0:0.012 L6:0.011 L4:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.266 max 2.254 | worst layers L2:0.256 L37:0.252 L32:0.228 L28:0.213
+ -- moe_cpu prof (54784 jobs, us/job): prep_gu 0.0 | gemv_gu 165.1 (34.4 GB/s) | act+prep_d 0.0 | gemv_d 87.0 (32.6 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (54784 jobs, ms/job avg|max): gap 0.232|12.190 spin 0.115|0.421 compute 0.200|0.277 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (54848 jobs, ms/job avg|max): gap 0.020|0.887 spin 0.121|0.373 compute 0.201|0.284 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (54912 jobs, ms/job avg|max): gap 0.101|1.013 spin 0.089|0.593 compute 0.190|0.297 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (54976 jobs, ms/job avg|max): gap 0.036|0.799 spin 0.136|0.619 compute 0.184|0.262 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (55040 jobs, ms/job avg|max): gap 0.028|1.377 spin 0.125|0.456 compute 0.192|0.323 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (55104 jobs, ms/job avg|max): gap 0.048|1.361 spin 0.109|0.733 compute 0.186|0.284 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (55168 jobs, ms/job avg|max): gap 0.024|0.967 spin 0.120|0.454 compute 0.184|0.286 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (55232 jobs, ms/job avg|max): gap 0.037|0.799 spin 0.153|0.757 compute 0.187|0.277 | empty 0/64, cpu-assign/row 5.59
+ -- moe_cpu prof (55296 jobs, us/job): prep_gu 0.0 | gemv_gu 164.7 (34.4 GB/s) | act+prep_d 0.0 | gemv_d 86.8 (32.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (55296 jobs, ms/job avg|max): gap 0.034|0.768 spin 0.111|0.592 compute 0.188|0.266 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (55360 jobs, ms/job avg|max): gap 0.020|0.788 spin 0.129|0.837 compute 0.185|0.262 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (55424 jobs, ms/job avg|max): gap 0.038|0.954 spin 0.125|0.566 compute 0.188|0.272 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (55488 jobs, ms/job avg|max): gap 0.019|0.815 spin 0.141|0.703 compute 0.198|0.289 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (55552 jobs, ms/job avg|max): gap 0.041|0.915 spin 0.103|0.296 compute 0.180|0.250 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (55616 jobs, ms/job avg|max): gap 0.036|0.782 spin 0.129|0.755 compute 0.192|0.300 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (55680 jobs, ms/job avg|max): gap 0.020|0.954 spin 0.140|0.746 compute 0.198|0.295 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (55744 jobs, ms/job avg|max): gap 0.037|0.775 spin 0.118|0.817 compute 0.178|0.251 | empty 0/64, cpu-assign/row 5.47
+ -- moe_cpu prof (55808 jobs, us/job): prep_gu 0.0 | gemv_gu 164.3 (34.4 GB/s) | act+prep_d 0.0 | gemv_d 86.6 (32.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (55808 jobs, ms/job avg|max): gap 0.018|0.875 spin 0.120|0.458 compute 0.187|0.253 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (55872 jobs, ms/job avg|max): gap 0.035|0.789 spin 0.109|0.391 compute 0.193|0.272 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (55936 jobs, ms/job avg|max): gap 0.036|0.783 spin 0.128|0.437 compute 0.189|0.264 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (56000 jobs, ms/job avg|max): gap 0.017|0.749 spin 0.121|0.403 compute 0.184|0.257 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (56064 jobs, ms/job avg|max): gap 0.031|0.755 spin 0.115|0.447 compute 0.191|0.261 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (56128 jobs, ms/job avg|max): gap 0.019|0.756 spin 0.112|0.265 compute 0.186|0.285 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (56192 jobs, ms/job avg|max): gap 0.042|1.084 spin 0.139|0.673 compute 0.183|0.266 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (56256 jobs, ms/job avg|max): gap 0.041|0.764 spin 0.108|0.571 compute 0.186|0.275 | empty 0/64, cpu-assign/row 5.81
+ -- moe_cpu prof (56320 jobs, us/job): prep_gu 0.0 | gemv_gu 163.9 (34.5 GB/s) | act+prep_d 0.0 | gemv_d 86.3 (32.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (56320 jobs, ms/job avg|max): gap 0.016|0.761 spin 0.129|0.788 compute 0.185|0.254 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (56384 jobs, ms/job avg|max): gap 0.039|0.794 spin 0.136|0.708 compute 0.179|0.259 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (56448 jobs, ms/job avg|max): gap 0.018|0.744 spin 0.139|0.758 compute 0.181|0.266 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (56512 jobs, ms/job avg|max): gap 0.045|0.881 spin 0.108|0.677 compute 0.180|0.248 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (56576 jobs, ms/job avg|max): gap 0.090|0.938 spin 0.086|0.690 compute 0.185|0.262 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (56640 jobs, ms/job avg|max): gap 0.023|0.858 spin 0.148|0.685 compute 0.191|0.341 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (56704 jobs, ms/job avg|max): gap 0.042|0.789 spin 0.106|0.699 compute 0.187|0.255 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (56768 jobs, ms/job avg|max): gap 0.018|0.828 spin 0.137|0.673 compute 0.187|0.275 | empty 0/64, cpu-assign/row 5.77
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.082 | worst layers L0:0.015 L3:0.014 L7:0.012 L5:0.012
+ -- split prof [wait] (2048 brackets, stream ms): med 0.141 p90 0.237 max 0.925 | worst layers L33:0.204 L37:0.204 L22:0.202 L25:0.202
+ -- moe_cpu prof (56832 jobs, us/job): prep_gu 0.0 | gemv_gu 163.4 (34.5 GB/s) | act+prep_d 0.0 | gemv_d 86.1 (32.7 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (56832 jobs, ms/job avg|max): gap 0.222|10.578 spin 0.115|0.765 compute 0.183|0.285 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (56896 jobs, ms/job avg|max): gap 0.040|0.821 spin 0.103|0.315 compute 0.178|0.258 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (56960 jobs, ms/job avg|max): gap 0.038|0.757 spin 0.117|0.664 compute 0.193|0.264 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (57024 jobs, ms/job avg|max): gap 0.041|0.792 spin 0.134|0.741 compute 0.185|0.340 | empty 0/64, cpu-assign/row 5.39
+ -- handoff prof (57088 jobs, ms/job avg|max): gap 0.018|0.772 spin 0.126|0.394 compute 0.190|0.255 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (57152 jobs, ms/job avg|max): gap 0.032|0.769 spin 0.107|0.313 compute 0.183|0.252 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (57216 jobs, ms/job avg|max): gap 0.035|0.986 spin 0.132|0.813 compute 0.191|0.263 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (57280 jobs, ms/job avg|max): gap 0.017|0.737 spin 0.144|0.570 compute 0.181|0.251 | empty 0/64, cpu-assign/row 5.55
+ -- moe_cpu prof (57344 jobs, us/job): prep_gu 0.0 | gemv_gu 163.0 (34.5 GB/s) | act+prep_d 0.0 | gemv_d 85.9 (32.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (57344 jobs, ms/job avg|max): gap 0.050|1.486 spin 0.111|0.848 compute 0.194|0.245 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (57408 jobs, ms/job avg|max): gap 0.027|1.376 spin 0.110|0.288 compute 0.184|0.289 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (57472 jobs, ms/job avg|max): gap 0.034|0.758 spin 0.100|0.126 compute 0.184|0.267 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (57536 jobs, ms/job avg|max): gap 0.034|0.839 spin 0.138|0.435 compute 0.182|0.274 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (57600 jobs, ms/job avg|max): gap 0.018|0.884 spin 0.123|0.401 compute 0.188|0.269 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (57664 jobs, ms/job avg|max): gap 0.035|0.764 spin 0.101|0.235 compute 0.181|0.267 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (57728 jobs, ms/job avg|max): gap 0.016|0.730 spin 0.120|0.392 compute 0.187|0.284 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (57792 jobs, ms/job avg|max): gap 0.033|0.781 spin 0.125|0.364 compute 0.195|0.274 | empty 0/64, cpu-assign/row 5.83
+Context   1024: S=[37;1m1 [32;1m     66.88[0m tokens/s [37;1m[64.60 - 69.16][0m
+ -- moe_cpu prof (57856 jobs, us/job): prep_gu 0.0 | gemv_gu 162.7 (34.5 GB/s) | act+prep_d 0.0 | gemv_d 85.7 (32.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (57856 jobs, ms/job avg|max): gap 0.045|1.543 spin 0.127|0.454 compute 0.201|0.294 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (57920 jobs, ms/job avg|max): gap 0.014|0.739 spin 0.126|0.596 compute 0.198|0.282 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (57984 jobs, ms/job avg|max): gap 0.033|0.899 spin 0.130|0.356 compute 0.205|0.309 | empty 0/64, cpu-assign/row 6.20
+ -- handoff prof (58048 jobs, ms/job avg|max): gap 0.016|0.744 spin 0.122|0.386 compute 0.196|0.287 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (58112 jobs, ms/job avg|max): gap 0.035|1.020 spin 0.118|0.415 compute 0.207|0.290 | empty 0/64, cpu-assign/row 6.17
+ -- handoff prof (58176 jobs, ms/job avg|max): gap 0.035|0.744 spin 0.101|0.119 compute 0.185|0.273 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (58240 jobs, ms/job avg|max): gap 0.019|0.770 spin 0.144|0.433 compute 0.195|0.273 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (58304 jobs, ms/job avg|max): gap 0.035|0.863 spin 0.116|0.420 compute 0.190|0.319 | empty 0/64, cpu-assign/row 5.78
+ -- moe_cpu prof (58368 jobs, us/job): prep_gu 0.0 | gemv_gu 162.3 (34.5 GB/s) | act+prep_d 0.0 | gemv_d 85.5 (32.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (58368 jobs, ms/job avg|max): gap 0.016|0.746 spin 0.120|0.416 compute 0.199|0.282 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (58432 jobs, ms/job avg|max): gap 0.049|0.779 spin 0.089|0.202 compute 0.194|0.265 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (58496 jobs, ms/job avg|max): gap 0.108|0.937 spin 0.100|0.725 compute 0.192|0.268 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (58560 jobs, ms/job avg|max): gap 0.145|1.055 spin 0.038|0.584 compute 0.195|0.267 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (58624 jobs, ms/job avg|max): gap 0.155|0.926 spin 0.032|0.115 compute 0.194|0.273 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (58688 jobs, ms/job avg|max): gap 0.028|1.460 spin 0.132|0.441 compute 0.199|0.315 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (58752 jobs, ms/job avg|max): gap 0.034|0.924 spin 0.114|0.473 compute 0.205|0.345 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (58816 jobs, ms/job avg|max): gap 0.048|0.986 spin 0.104|0.333 compute 0.200|0.282 | empty 0/64, cpu-assign/row 5.95
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.011 max 0.300 | worst layers L0:0.019 L3:0.019 L18:0.018 L1:0.015
+ -- split prof [wait] (2048 brackets, stream ms): med 0.139 p90 0.232 max 0.875 | worst layers L22:0.206 L23:0.198 L10:0.189 L25:0.181
+ -- moe_cpu prof (58880 jobs, us/job): prep_gu 0.0 | gemv_gu 162.0 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 85.3 (32.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (58880 jobs, ms/job avg|max): gap 0.254|12.540 spin 0.092|0.225 compute 0.249|2.779 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (58944 jobs, ms/job avg|max): gap 0.123|0.907 spin 0.051|0.319 compute 0.198|0.265 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (59008 jobs, ms/job avg|max): gap 0.101|0.902 spin 0.067|0.429 compute 0.201|0.278 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (59072 jobs, ms/job avg|max): gap 0.036|0.843 spin 0.134|0.412 compute 0.192|0.312 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (59136 jobs, ms/job avg|max): gap 0.035|0.782 spin 0.121|0.438 compute 0.196|0.314 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (59200 jobs, ms/job avg|max): gap 0.019|0.749 spin 0.108|0.298 compute 0.195|0.279 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (59264 jobs, ms/job avg|max): gap 0.039|0.770 spin 0.111|0.489 compute 0.190|0.276 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (59328 jobs, ms/job avg|max): gap 0.021|1.050 spin 0.126|0.326 compute 0.191|0.268 | empty 0/64, cpu-assign/row 5.67
+ -- moe_cpu prof (59392 jobs, us/job): prep_gu 0.0 | gemv_gu 161.7 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 85.1 (32.8 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (59392 jobs, ms/job avg|max): gap 0.043|1.057 spin 0.113|0.271 compute 0.185|0.263 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (59456 jobs, ms/job avg|max): gap 0.034|0.754 spin 0.117|0.335 compute 0.178|0.298 | empty 0/64, cpu-assign/row 5.34
+ -- handoff prof (59520 jobs, ms/job avg|max): gap 0.018|0.747 spin 0.106|0.162 compute 0.179|0.250 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (59584 jobs, ms/job avg|max): gap 0.039|0.997 spin 0.140|1.017 compute 0.184|0.340 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (59648 jobs, ms/job avg|max): gap 0.017|0.754 spin 0.119|0.305 compute 0.189|0.318 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (59712 jobs, ms/job avg|max): gap 0.035|0.753 spin 0.106|0.268 compute 0.184|0.252 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (59776 jobs, ms/job avg|max): gap 0.040|0.957 spin 0.129|0.422 compute 0.197|0.271 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (59840 jobs, ms/job avg|max): gap 0.016|0.748 spin 0.123|0.415 compute 0.200|0.261 | empty 0/64, cpu-assign/row 6.19
+ -- moe_cpu prof (59904 jobs, us/job): prep_gu 0.0 | gemv_gu 161.4 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 84.9 (32.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (59904 jobs, ms/job avg|max): gap 0.034|0.795 spin 0.117|0.358 compute 0.196|0.271 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (59968 jobs, ms/job avg|max): gap 0.015|0.765 spin 0.139|0.780 compute 0.193|0.271 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (60032 jobs, ms/job avg|max): gap 0.034|0.760 spin 0.126|0.342 compute 0.192|0.264 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (60096 jobs, ms/job avg|max): gap 0.034|0.768 spin 0.136|0.856 compute 0.196|0.375 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (60160 jobs, ms/job avg|max): gap 0.019|0.746 spin 0.127|0.688 compute 0.197|0.271 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (60224 jobs, ms/job avg|max): gap 0.033|0.771 spin 0.114|0.715 compute 0.186|0.269 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (60288 jobs, ms/job avg|max): gap 0.020|0.996 spin 0.146|0.997 compute 0.198|0.309 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (60352 jobs, ms/job avg|max): gap 0.037|0.860 spin 0.115|0.741 compute 0.202|0.265 | empty 0/64, cpu-assign/row 5.72
+ -- moe_cpu prof (60416 jobs, us/job): prep_gu 0.0 | gemv_gu 161.0 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 84.8 (32.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (60416 jobs, ms/job avg|max): gap 0.065|0.948 spin 0.085|0.378 compute 0.203|0.308 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (60480 jobs, ms/job avg|max): gap 0.057|1.272 spin 0.108|0.462 compute 0.214|0.339 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (60544 jobs, ms/job avg|max): gap 0.038|0.957 spin 0.134|0.778 compute 0.203|0.310 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (60608 jobs, ms/job avg|max): gap 0.018|0.756 spin 0.110|0.265 compute 0.193|0.325 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (60672 jobs, ms/job avg|max): gap 0.043|1.202 spin 0.144|0.714 compute 0.194|0.282 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (60736 jobs, ms/job avg|max): gap 0.037|0.762 spin 0.125|0.486 compute 0.203|0.286 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (60800 jobs, ms/job avg|max): gap 0.017|0.791 spin 0.286|1.666 compute 0.213|0.580 | empty 0/64, cpu-assign/row 6.12
+ -- handoff prof (60864 jobs, ms/job avg|max): gap 0.045|1.279 spin 0.331|1.936 compute 0.213|0.868 | empty 0/64, cpu-assign/row 5.89
+ -- split prof [issue] (2035 brackets, stream ms): med 0.010 p90 0.010 max 0.280 | worst layers L0:0.023 L1:0.014 L3:0.012 L2:0.012
+ -- split prof [wait] (2048 brackets, stream ms): med 0.148 p90 0.271 max 2.730 | worst layers L25:0.239 L7:0.225 L33:0.223 L16:0.214
+ -- moe_cpu prof (60928 jobs, us/job): prep_gu 0.0 | gemv_gu 160.8 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 84.6 (32.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (60928 jobs, ms/job avg|max): gap 0.113|6.145 spin 0.273|1.752 compute 0.199|0.410 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (60992 jobs, ms/job avg|max): gap 0.079|2.698 spin 0.290|1.964 compute 0.214|0.846 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (61056 jobs, ms/job avg|max): gap 0.035|0.779 spin 0.194|1.228 compute 0.221|2.007 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (61120 jobs, ms/job avg|max): gap 0.020|0.863 spin 0.134|0.732 compute 0.187|0.276 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (61184 jobs, ms/job avg|max): gap 0.034|0.757 spin 0.136|0.643 compute 0.216|1.982 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (61248 jobs, ms/job avg|max): gap 0.015|0.753 spin 0.123|0.440 compute 0.180|0.247 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (61312 jobs, ms/job avg|max): gap 0.042|1.348 spin 0.124|0.723 compute 0.192|0.253 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (61376 jobs, ms/job avg|max): gap 0.040|0.731 spin 0.119|0.765 compute 0.181|0.253 | empty 0/64, cpu-assign/row 5.62
+ -- moe_cpu prof (61440 jobs, us/job): prep_gu 0.0 | gemv_gu 160.5 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 84.4 (32.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (61440 jobs, ms/job avg|max): gap 0.021|0.878 spin 0.136|0.327 compute 0.190|0.306 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (61504 jobs, ms/job avg|max): gap 0.042|1.345 spin 0.128|0.759 compute 0.178|0.273 | empty 0/64, cpu-assign/row 5.42
+ -- handoff prof (61568 jobs, ms/job avg|max): gap 0.018|0.757 spin 0.106|0.223 compute 0.175|0.268 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (61632 jobs, ms/job avg|max): gap 0.037|0.782 spin 0.138|0.853 compute 0.182|0.281 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (61696 jobs, ms/job avg|max): gap 0.039|1.020 spin 0.135|0.371 compute 0.192|0.628 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (61760 jobs, ms/job avg|max): gap 0.018|0.758 spin 0.121|0.685 compute 0.187|0.251 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (61824 jobs, ms/job avg|max): gap 0.041|1.497 spin 0.116|0.325 compute 0.201|0.815 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (61888 jobs, ms/job avg|max): gap 0.019|0.752 spin 0.152|0.823 compute 0.202|0.329 | empty 0/64, cpu-assign/row 6.03
+ -- moe_cpu prof (61952 jobs, us/job): prep_gu 0.0 | gemv_gu 160.2 (34.6 GB/s) | act+prep_d 0.0 | gemv_d 84.3 (32.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (61952 jobs, ms/job avg|max): gap 0.034|0.819 spin 0.138|0.660 compute 0.205|0.324 | empty 0/64, cpu-assign/row 6.17
+ -- handoff prof (62016 jobs, ms/job avg|max): gap 0.032|0.743 spin 0.110|0.256 compute 0.189|0.263 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (62080 jobs, ms/job avg|max): gap 0.016|0.751 spin 0.139|0.802 compute 0.200|0.326 | empty 0/64, cpu-assign/row 6.22
+ -- handoff prof (62144 jobs, ms/job avg|max): gap 0.045|0.738 spin 0.129|0.302 compute 0.197|0.262 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (62208 jobs, ms/job avg|max): gap 0.016|0.731 spin 0.115|0.452 compute 0.180|0.245 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (62272 jobs, ms/job avg|max): gap 0.500|30.590 spin 0.119|0.383 compute 0.187|0.324 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (62336 jobs, ms/job avg|max): gap 0.032|0.743 spin 0.106|0.347 compute 0.188|0.259 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (62400 jobs, ms/job avg|max): gap 0.017|0.867 spin 0.118|0.414 compute 0.199|0.272 | empty 0/64, cpu-assign/row 6.06
+ -- moe_cpu prof (62464 jobs, us/job): prep_gu 0.0 | gemv_gu 159.9 (34.7 GB/s) | act+prep_d 0.0 | gemv_d 84.1 (32.9 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (62464 jobs, ms/job avg|max): gap 0.032|0.839 spin 0.134|0.729 compute 0.188|0.272 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (62528 jobs, ms/job avg|max): gap 0.018|0.909 spin 0.129|0.313 compute 0.189|0.265 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (62592 jobs, ms/job avg|max): gap 0.041|0.739 spin 0.128|0.736 compute 0.186|0.257 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (62656 jobs, ms/job avg|max): gap 0.030|0.739 spin 0.115|0.398 compute 0.191|0.324 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (62720 jobs, ms/job avg|max): gap 0.015|0.729 spin 0.141|0.843 compute 0.190|0.252 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (62784 jobs, ms/job avg|max): gap 0.046|1.549 spin 0.132|0.701 compute 0.195|0.265 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (62848 jobs, ms/job avg|max): gap 0.016|0.745 spin 0.118|0.751 compute 0.192|0.263 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (62912 jobs, ms/job avg|max): gap 0.033|0.852 spin 0.125|0.693 compute 0.193|0.260 | empty 0/64, cpu-assign/row 5.95
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.597 | worst layers L0:0.024 L6:0.014 L1:0.014 L3:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.141 p90 0.249 max 2.733 | worst layers L5:0.221 L7:0.220 L23:0.211 L10:0.209
+ -- moe_cpu prof (62976 jobs, us/job): prep_gu 0.0 | gemv_gu 159.6 (34.7 GB/s) | act+prep_d 0.0 | gemv_d 83.9 (33.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (62976 jobs, ms/job avg|max): gap 0.192|10.834 spin 0.132|0.720 compute 0.188|0.248 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (63040 jobs, ms/job avg|max): gap 0.016|0.767 spin 0.123|0.517 compute 0.196|0.278 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (63104 jobs, ms/job avg|max): gap 0.033|0.757 spin 0.117|0.779 compute 0.188|0.310 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (63168 jobs, ms/job avg|max): gap 0.019|0.763 spin 0.147|0.857 compute 0.196|0.272 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (63232 jobs, ms/job avg|max): gap 0.037|1.035 spin 0.135|0.440 compute 0.192|0.274 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (63296 jobs, ms/job avg|max): gap 0.029|0.747 spin 0.111|0.377 compute 0.184|0.264 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (63360 jobs, ms/job avg|max): gap 0.019|0.853 spin 0.118|0.427 compute 0.186|0.299 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (63424 jobs, ms/job avg|max): gap 0.036|0.777 spin 0.139|0.782 compute 0.184|0.282 | empty 0/64, cpu-assign/row 5.44
+ -- moe_cpu prof (63488 jobs, us/job): prep_gu 0.0 | gemv_gu 159.2 (34.7 GB/s) | act+prep_d 0.0 | gemv_d 83.7 (33.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (63488 jobs, ms/job avg|max): gap 0.016|0.752 spin 0.118|0.447 compute 0.179|0.271 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (63552 jobs, ms/job avg|max): gap 0.035|0.873 spin 0.114|0.392 compute 0.177|0.262 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (63616 jobs, ms/job avg|max): gap 0.035|0.938 spin 0.113|0.563 compute 0.187|0.305 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (63680 jobs, ms/job avg|max): gap 0.014|0.742 spin 0.132|0.396 compute 0.182|0.270 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (63744 jobs, ms/job avg|max): gap 0.038|1.302 spin 0.115|0.295 compute 0.193|0.286 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (63808 jobs, ms/job avg|max): gap 0.015|0.749 spin 0.124|0.610 compute 0.197|0.285 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (63872 jobs, ms/job avg|max): gap 0.030|0.749 spin 0.123|0.306 compute 0.195|0.260 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (63936 jobs, ms/job avg|max): gap 0.032|0.799 spin 0.126|0.707 compute 0.189|0.250 | empty 0/64, cpu-assign/row 5.83
+ -- moe_cpu prof (64000 jobs, us/job): prep_gu 0.0 | gemv_gu 158.9 (34.7 GB/s) | act+prep_d 0.0 | gemv_d 83.6 (33.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (64000 jobs, ms/job avg|max): gap 0.017|0.768 spin 0.121|0.663 compute 0.192|0.262 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (64064 jobs, ms/job avg|max): gap 0.032|0.749 spin 0.105|0.253 compute 0.182|0.257 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (64128 jobs, ms/job avg|max): gap 0.020|0.753 spin 0.128|0.495 compute 0.194|0.322 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (64192 jobs, ms/job avg|max): gap 0.039|1.145 spin 0.122|0.457 compute 0.189|0.244 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (64256 jobs, ms/job avg|max): gap 0.031|0.754 spin 0.107|0.328 compute 0.179|0.269 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (64320 jobs, ms/job avg|max): gap 0.015|0.752 spin 0.122|0.432 compute 0.190|0.272 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (64384 jobs, ms/job avg|max): gap 0.029|0.758 spin 0.142|0.453 compute 0.183|0.260 | empty 0/64, cpu-assign/row 5.50
+ -- handoff prof (64448 jobs, ms/job avg|max): gap 0.016|0.738 spin 0.115|0.304 compute 0.185|0.276 | empty 0/64, cpu-assign/row 5.77
+ -- moe_cpu prof (64512 jobs, us/job): prep_gu 0.0 | gemv_gu 158.6 (34.7 GB/s) | act+prep_d 0.0 | gemv_d 83.4 (33.0 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (64512 jobs, ms/job avg|max): gap 0.032|0.744 spin 0.116|0.404 compute 0.190|0.269 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (64576 jobs, ms/job avg|max): gap 0.032|0.754 spin 0.126|0.725 compute 0.188|0.264 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (64640 jobs, ms/job avg|max): gap 0.016|0.729 spin 0.144|0.722 compute 0.180|0.314 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (64704 jobs, ms/job avg|max): gap 0.032|0.762 spin 0.117|0.416 compute 0.192|0.276 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (64768 jobs, ms/job avg|max): gap 0.016|0.763 spin 0.107|0.120 compute 0.193|0.250 | empty 0/64, cpu-assign/row 6.16
+ -- handoff prof (64832 jobs, ms/job avg|max): gap 0.034|0.830 spin 0.135|0.473 compute 0.199|0.298 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (64896 jobs, ms/job avg|max): gap 0.035|0.785 spin 0.118|0.392 compute 0.189|0.262 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (64960 jobs, ms/job avg|max): gap 0.020|0.755 spin 0.108|0.353 compute 0.183|0.247 | empty 0/64, cpu-assign/row 5.88
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.035 | worst layers L0:0.011 L2:0.010 L3:0.010 L15:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.140 p90 0.233 max 0.906 | worst layers L21:0.198 L25:0.190 L23:0.190 L16:0.188
+ -- moe_cpu prof (65024 jobs, us/job): prep_gu 0.0 | gemv_gu 158.3 (34.8 GB/s) | act+prep_d 0.0 | gemv_d 83.2 (33.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (65024 jobs, ms/job avg|max): gap 0.235|12.595 spin 0.112|0.398 compute 0.187|0.269 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (65088 jobs, ms/job avg|max): gap 0.019|0.817 spin 0.128|0.440 compute 0.197|0.294 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (65152 jobs, ms/job avg|max): gap 0.052|1.354 spin 0.114|0.778 compute 0.184|0.248 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (65216 jobs, ms/job avg|max): gap 0.035|0.862 spin 0.115|0.716 compute 0.184|0.261 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (65280 jobs, ms/job avg|max): gap 0.017|0.892 spin 0.149|0.745 compute 0.193|0.259 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (65344 jobs, ms/job avg|max): gap 0.030|0.739 spin 0.126|0.423 compute 0.184|0.252 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (65408 jobs, ms/job avg|max): gap 0.015|0.734 spin 0.128|0.756 compute 0.183|0.274 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (65472 jobs, ms/job avg|max): gap 0.037|0.753 spin 0.116|0.564 compute 0.184|0.262 | empty 0/64, cpu-assign/row 5.58
+ -- moe_cpu prof (65536 jobs, us/job): prep_gu 0.0 | gemv_gu 158.0 (34.8 GB/s) | act+prep_d 0.0 | gemv_d 83.0 (33.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (65536 jobs, ms/job avg|max): gap 0.028|0.754 spin 0.164|0.768 compute 0.182|0.306 | empty 0/64, cpu-assign/row 5.45
+ -- handoff prof (65600 jobs, ms/job avg|max): gap 0.016|0.752 spin 0.135|0.770 compute 0.184|0.270 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (65664 jobs, ms/job avg|max): gap 0.033|0.859 spin 0.112|0.463 compute 0.181|0.300 | empty 0/64, cpu-assign/row 5.48
+ -- handoff prof (65728 jobs, ms/job avg|max): gap 0.015|0.746 spin 0.153|0.758 compute 0.185|0.320 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (65792 jobs, ms/job avg|max): gap 0.033|0.782 spin 0.120|0.370 compute 0.190|0.252 | empty 0/64, cpu-assign/row 5.98
+Context   2048: S=[37;1m1 [32;1m     69.15[0m tokens/s [37;1m[67.72 - 70.58][0m
+ -- handoff prof (65856 jobs, ms/job avg|max): gap 0.041|1.153 spin 0.120|0.385 compute 0.202|0.294 | empty 0/64, cpu-assign/row 6.16
+ -- handoff prof (65920 jobs, ms/job avg|max): gap 0.015|0.743 spin 0.121|0.561 compute 0.199|0.326 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (65984 jobs, ms/job avg|max): gap 0.045|1.297 spin 0.131|0.652 compute 0.197|0.272 | empty 0/64, cpu-assign/row 5.97
+ -- moe_cpu prof (66048 jobs, us/job): prep_gu 0.0 | gemv_gu 157.7 (34.8 GB/s) | act+prep_d 0.0 | gemv_d 82.9 (33.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (66048 jobs, ms/job avg|max): gap 0.015|0.761 spin 0.131|0.558 compute 0.191|0.264 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (66112 jobs, ms/job avg|max): gap 0.031|0.748 spin 0.116|0.552 compute 0.186|0.268 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (66176 jobs, ms/job avg|max): gap 0.037|1.052 spin 0.134|0.379 compute 0.188|0.269 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (66240 jobs, ms/job avg|max): gap 0.015|0.752 spin 0.135|0.834 compute 0.183|0.269 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (66304 jobs, ms/job avg|max): gap 0.037|0.745 spin 0.110|0.420 compute 0.179|0.264 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (66368 jobs, ms/job avg|max): gap 0.016|0.759 spin 0.129|0.520 compute 0.190|0.267 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (66432 jobs, ms/job avg|max): gap 0.033|0.852 spin 0.138|0.731 compute 0.189|0.255 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (66496 jobs, ms/job avg|max): gap 0.033|0.757 spin 0.112|0.428 compute 0.178|0.265 | empty 0/64, cpu-assign/row 5.61
+ -- moe_cpu prof (66560 jobs, us/job): prep_gu 0.0 | gemv_gu 157.4 (34.8 GB/s) | act+prep_d 0.0 | gemv_d 82.7 (33.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (66560 jobs, ms/job avg|max): gap 0.016|0.743 spin 0.125|0.588 compute 0.178|0.268 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (66624 jobs, ms/job avg|max): gap 0.032|0.759 spin 0.119|0.436 compute 0.190|0.313 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (66688 jobs, ms/job avg|max): gap 0.020|0.872 spin 0.143|0.727 compute 0.187|0.276 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (66752 jobs, ms/job avg|max): gap 0.031|0.874 spin 0.126|0.525 compute 0.194|0.290 | empty 0/64, cpu-assign/row 6.06
+ -- handoff prof (66816 jobs, ms/job avg|max): gap 0.029|0.745 spin 0.136|0.722 compute 0.199|0.327 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (66880 jobs, ms/job avg|max): gap 0.015|0.742 spin 0.136|0.707 compute 0.195|0.277 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (66944 jobs, ms/job avg|max): gap 0.034|0.773 spin 0.137|0.788 compute 0.196|0.284 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (67008 jobs, ms/job avg|max): gap 0.031|1.487 spin 0.132|0.708 compute 0.194|0.265 | empty 0/64, cpu-assign/row 5.94
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.041 | worst layers L0:0.012 L14:0.010 L15:0.010 L5:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.141 p90 0.236 max 0.812 | worst layers L5:0.190 L25:0.188 L30:0.185 L28:0.181
+ -- moe_cpu prof (67072 jobs, us/job): prep_gu 0.0 | gemv_gu 157.1 (34.8 GB/s) | act+prep_d 0.0 | gemv_d 82.6 (33.1 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (67072 jobs, ms/job avg|max): gap 0.217|11.759 spin 0.103|0.126 compute 0.186|0.253 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (67136 jobs, ms/job avg|max): gap 0.037|0.948 spin 0.135|0.711 compute 0.184|0.281 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (67200 jobs, ms/job avg|max): gap 0.018|0.747 spin 0.123|0.758 compute 0.190|0.270 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (67264 jobs, ms/job avg|max): gap 0.033|0.749 spin 0.126|0.788 compute 0.182|0.259 | empty 0/64, cpu-assign/row 5.56
+ -- handoff prof (67328 jobs, ms/job avg|max): gap 0.016|0.747 spin 0.150|0.851 compute 0.190|0.268 | empty 0/64, cpu-assign/row 5.83
+ -- handoff prof (67392 jobs, ms/job avg|max): gap 0.038|0.982 spin 0.121|0.856 compute 0.183|0.251 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (67456 jobs, ms/job avg|max): gap 0.036|0.766 spin 0.116|0.395 compute 0.181|0.252 | empty 0/64, cpu-assign/row 5.53
+ -- handoff prof (67520 jobs, ms/job avg|max): gap 0.015|0.733 spin 0.110|0.126 compute 0.198|0.282 | empty 0/64, cpu-assign/row 6.34
+ -- moe_cpu prof (67584 jobs, us/job): prep_gu 0.0 | gemv_gu 156.9 (34.8 GB/s) | act+prep_d 0.0 | gemv_d 82.4 (33.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (67584 jobs, ms/job avg|max): gap 0.034|0.844 spin 0.155|1.263 compute 0.197|0.613 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (67648 jobs, ms/job avg|max): gap 0.015|0.758 spin 0.134|0.926 compute 0.195|0.308 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (67712 jobs, ms/job avg|max): gap 0.033|0.757 spin 0.115|0.626 compute 0.181|0.251 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (67776 jobs, ms/job avg|max): gap 0.039|0.848 spin 0.127|0.470 compute 0.185|0.268 | empty 0/64, cpu-assign/row 5.55
+ -- handoff prof (67840 jobs, ms/job avg|max): gap 0.020|0.985 spin 0.134|0.592 compute 0.183|0.291 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (67904 jobs, ms/job avg|max): gap 0.032|0.743 spin 0.119|0.730 compute 0.181|0.256 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (67968 jobs, ms/job avg|max): gap 0.017|0.850 spin 0.132|0.716 compute 0.188|0.263 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (68032 jobs, ms/job avg|max): gap 0.036|0.876 spin 0.123|0.699 compute 0.183|0.269 | empty 0/64, cpu-assign/row 5.56
+ -- moe_cpu prof (68096 jobs, us/job): prep_gu 0.0 | gemv_gu 156.6 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 82.2 (33.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (68096 jobs, ms/job avg|max): gap 0.030|0.741 spin 0.127|0.452 compute 0.179|0.249 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (68160 jobs, ms/job avg|max): gap 0.017|0.766 spin 0.141|0.658 compute 0.191|0.292 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (68224 jobs, ms/job avg|max): gap 0.035|0.979 spin 0.111|0.424 compute 0.192|0.318 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (68288 jobs, ms/job avg|max): gap 0.028|1.572 spin 0.138|0.615 compute 0.196|0.291 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (68352 jobs, ms/job avg|max): gap 0.031|0.759 spin 0.124|0.408 compute 0.191|0.248 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (68416 jobs, ms/job avg|max): gap 0.038|0.767 spin 0.108|0.260 compute 0.195|0.274 | empty 0/64, cpu-assign/row 5.94
+ -- handoff prof (68480 jobs, ms/job avg|max): gap 0.016|0.782 spin 0.114|0.352 compute 0.196|0.273 | empty 0/64, cpu-assign/row 5.98
+ -- handoff prof (68544 jobs, ms/job avg|max): gap 0.047|1.543 spin 0.131|0.549 compute 0.201|0.289 | empty 0/64, cpu-assign/row 5.91
+ -- moe_cpu prof (68608 jobs, us/job): prep_gu 0.0 | gemv_gu 156.3 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 82.1 (33.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (68608 jobs, ms/job avg|max): gap 0.015|0.751 spin 0.122|0.468 compute 0.204|0.300 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (68672 jobs, ms/job avg|max): gap 0.031|0.757 spin 0.108|0.341 compute 0.189|0.270 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (68736 jobs, ms/job avg|max): gap 0.044|1.165 spin 0.140|0.867 compute 0.217|0.318 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (68800 jobs, ms/job avg|max): gap 0.020|0.919 spin 0.121|0.489 compute 0.218|0.303 | empty 0/64, cpu-assign/row 6.11
+ -- handoff prof (68864 jobs, ms/job avg|max): gap 0.033|0.779 spin 0.126|0.709 compute 0.204|0.282 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (68928 jobs, ms/job avg|max): gap 0.018|0.791 spin 0.133|0.447 compute 0.200|0.280 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (68992 jobs, ms/job avg|max): gap 0.046|1.342 spin 0.148|0.616 compute 0.194|0.272 | empty 0/64, cpu-assign/row 5.73
+ -- handoff prof (69056 jobs, ms/job avg|max): gap 0.034|0.885 spin 0.130|0.739 compute 0.197|0.273 | empty 0/64, cpu-assign/row 5.97
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.045 | worst layers L3:0.011 L0:0.011 L4:0.010 L37:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.145 p90 0.238 max 1.270 | worst layers L10:0.201 L26:0.200 L22:0.198 L33:0.194
+ -- moe_cpu prof (69120 jobs, us/job): prep_gu 0.0 | gemv_gu 156.1 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 82.0 (33.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (69120 jobs, ms/job avg|max): gap 0.214|12.473 spin 0.127|0.777 compute 0.199|0.494 | empty 0/64, cpu-assign/row 6.03
+ -- handoff prof (69184 jobs, ms/job avg|max): gap 0.068|2.315 spin 0.235|1.668 compute 0.215|1.507 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (69248 jobs, ms/job avg|max): gap 0.045|2.654 spin 0.278|1.870 compute 0.192|0.422 | empty 0/64, cpu-assign/row 5.69
+ -- handoff prof (69312 jobs, ms/job avg|max): gap 0.062|2.641 spin 0.273|1.762 compute 0.209|0.557 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (69376 jobs, ms/job avg|max): gap 0.039|0.940 spin 0.287|1.808 compute 0.211|1.033 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (69440 jobs, ms/job avg|max): gap 0.015|0.790 spin 0.243|1.876 compute 0.212|0.535 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (69504 jobs, ms/job avg|max): gap 0.039|1.303 spin 0.115|0.746 compute 0.182|0.254 | empty 0/64, cpu-assign/row 5.67
+ -- handoff prof (69568 jobs, ms/job avg|max): gap 0.025|1.370 spin 0.115|0.320 compute 0.187|0.276 | empty 0/64, cpu-assign/row 5.72
+ -- moe_cpu prof (69632 jobs, us/job): prep_gu 0.0 | gemv_gu 155.9 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 81.9 (33.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (69632 jobs, ms/job avg|max): gap 0.036|0.761 spin 0.104|0.333 compute 0.189|0.254 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (69696 jobs, ms/job avg|max): gap 0.038|1.143 spin 0.143|0.622 compute 0.188|0.267 | empty 0/64, cpu-assign/row 5.78
+ -- handoff prof (69760 jobs, ms/job avg|max): gap 0.015|0.764 spin 0.133|0.703 compute 0.198|0.280 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (69824 jobs, ms/job avg|max): gap 0.043|1.099 spin 0.126|0.727 compute 0.188|0.294 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (69888 jobs, ms/job avg|max): gap 0.016|0.776 spin 0.123|0.441 compute 0.196|0.260 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (69952 jobs, ms/job avg|max): gap 0.037|0.932 spin 0.137|0.408 compute 0.199|0.299 | empty 0/64, cpu-assign/row 6.08
+ -- handoff prof (70016 jobs, ms/job avg|max): gap 0.031|0.765 spin 0.138|0.746 compute 0.192|0.323 | empty 0/64, cpu-assign/row 5.95
+ -- handoff prof (70080 jobs, ms/job avg|max): gap 0.017|0.752 spin 0.112|0.360 compute 0.190|0.261 | empty 0/64, cpu-assign/row 5.91
+ -- moe_cpu prof (70144 jobs, us/job): prep_gu 0.0 | gemv_gu 155.7 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 81.7 (33.2 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (70144 jobs, ms/job avg|max): gap 0.038|0.898 spin 0.133|0.364 compute 0.189|0.268 | empty 0/64, cpu-assign/row 5.66
+ -- handoff prof (70208 jobs, ms/job avg|max): gap 0.021|0.739 spin 0.112|0.338 compute 0.183|0.257 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (70272 jobs, ms/job avg|max): gap 0.045|1.456 spin 0.123|0.755 compute 0.178|0.287 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (70336 jobs, ms/job avg|max): gap 0.046|1.323 spin 0.107|0.268 compute 0.189|0.267 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (70400 jobs, ms/job avg|max): gap 0.015|0.739 spin 0.160|0.856 compute 0.189|0.268 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (70464 jobs, ms/job avg|max): gap 0.036|0.767 spin 0.117|0.451 compute 0.178|0.252 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (70528 jobs, ms/job avg|max): gap 0.028|1.415 spin 0.128|0.717 compute 0.185|0.266 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (70592 jobs, ms/job avg|max): gap 0.031|0.746 spin 0.149|1.235 compute 0.185|0.275 | empty 0/64, cpu-assign/row 5.70
+ -- moe_cpu prof (70656 jobs, us/job): prep_gu 0.0 | gemv_gu 155.4 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 81.6 (33.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (70656 jobs, ms/job avg|max): gap 0.038|1.178 spin 0.116|0.350 compute 0.185|0.269 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (70720 jobs, ms/job avg|max): gap 0.015|0.736 spin 0.143|0.791 compute 0.193|0.262 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (70784 jobs, ms/job avg|max): gap 0.031|0.880 spin 0.111|0.377 compute 0.190|0.267 | empty 0/64, cpu-assign/row 6.05
+ -- handoff prof (70848 jobs, ms/job avg|max): gap 0.028|1.401 spin 0.139|0.598 compute 0.196|0.264 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (70912 jobs, ms/job avg|max): gap 0.043|1.421 spin 0.116|0.545 compute 0.199|0.260 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (70976 jobs, ms/job avg|max): gap 0.034|0.870 spin 0.138|0.855 compute 0.193|0.274 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (71040 jobs, ms/job avg|max): gap 0.015|0.734 spin 0.117|0.310 compute 0.194|0.309 | empty 0/64, cpu-assign/row 6.09
+ -- handoff prof (71104 jobs, ms/job avg|max): gap 0.040|0.768 spin 0.141|0.973 compute 0.184|0.258 | empty 0/64, cpu-assign/row 5.62
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.454 | worst layers L3:0.022 L0:0.020 L5:0.011 L6:0.011
+ -- split prof [wait] (2048 brackets, stream ms): med 0.146 p90 0.276 max 1.878 | worst layers L20:0.230 L5:0.228 L15:0.228 L22:0.220
+ -- moe_cpu prof (71168 jobs, us/job): prep_gu 0.0 | gemv_gu 155.2 (34.9 GB/s) | act+prep_d 0.0 | gemv_d 81.4 (33.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (71168 jobs, ms/job avg|max): gap 0.199|11.609 spin 0.110|0.370 compute 0.193|0.276 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (71232 jobs, ms/job avg|max): gap 0.036|0.779 spin 0.101|0.125 compute 0.182|0.272 | empty 0/64, cpu-assign/row 5.47
+ -- handoff prof (71296 jobs, ms/job avg|max): gap 0.038|1.191 spin 0.134|0.589 compute 0.185|0.294 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (71360 jobs, ms/job avg|max): gap 0.019|0.837 spin 0.118|0.443 compute 0.190|0.273 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (71424 jobs, ms/job avg|max): gap 0.035|0.759 spin 0.128|0.779 compute 0.179|0.272 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (71488 jobs, ms/job avg|max): gap 0.015|0.748 spin 0.136|0.606 compute 0.197|0.276 | empty 0/64, cpu-assign/row 6.00
+ -- handoff prof (71552 jobs, ms/job avg|max): gap 0.035|0.766 spin 0.140|0.616 compute 0.195|0.265 | empty 0/64, cpu-assign/row 6.02
+ -- handoff prof (71616 jobs, ms/job avg|max): gap 0.029|0.743 spin 0.133|0.770 compute 0.191|0.286 | empty 0/64, cpu-assign/row 5.92
+ -- moe_cpu prof (71680 jobs, us/job): prep_gu 0.0 | gemv_gu 154.9 (35.0 GB/s) | act+prep_d 0.0 | gemv_d 81.3 (33.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (71680 jobs, ms/job avg|max): gap 0.018|0.755 spin 0.143|0.633 compute 0.187|0.276 | empty 0/64, cpu-assign/row 5.77
+ -- handoff prof (71744 jobs, ms/job avg|max): gap 0.041|1.264 spin 0.137|0.594 compute 0.185|0.260 | empty 0/64, cpu-assign/row 5.62
+ -- handoff prof (71808 jobs, ms/job avg|max): gap 0.018|0.751 spin 0.118|0.775 compute 0.180|0.263 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (71872 jobs, ms/job avg|max): gap 0.042|1.314 spin 0.128|0.723 compute 0.183|0.266 | empty 0/64, cpu-assign/row 5.52
+ -- handoff prof (71936 jobs, ms/job avg|max): gap 0.034|0.905 spin 0.126|0.825 compute 0.182|0.254 | empty 0/64, cpu-assign/row 5.61
+ -- handoff prof (72000 jobs, ms/job avg|max): gap 0.024|0.737 spin 0.128|0.346 compute 0.194|0.301 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (72064 jobs, ms/job avg|max): gap 0.036|0.968 spin 0.117|0.407 compute 0.184|0.271 | empty 0/64, cpu-assign/row 5.59
+ -- handoff prof (72128 jobs, ms/job avg|max): gap 0.016|0.747 spin 0.140|0.616 compute 0.185|0.277 | empty 0/64, cpu-assign/row 5.69
+ -- moe_cpu prof (72192 jobs, us/job): prep_gu 0.0 | gemv_gu 154.7 (35.0 GB/s) | act+prep_d 0.0 | gemv_d 81.1 (33.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (72192 jobs, ms/job avg|max): gap 0.030|0.811 spin 0.128|0.368 compute 0.189|0.277 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (72256 jobs, ms/job avg|max): gap 0.030|0.763 spin 0.125|0.592 compute 0.193|0.257 | empty 0/64, cpu-assign/row 5.91
+ -- handoff prof (72320 jobs, ms/job avg|max): gap 0.018|0.751 spin 0.123|0.659 compute 0.193|0.252 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (72384 jobs, ms/job avg|max): gap 0.043|0.810 spin 0.095|0.127 compute 0.185|0.248 | empty 0/64, cpu-assign/row 5.88
+ -- handoff prof (72448 jobs, ms/job avg|max): gap 0.018|1.016 spin 0.144|0.430 compute 0.191|0.306 | empty 0/64, cpu-assign/row 5.86
+ -- handoff prof (72512 jobs, ms/job avg|max): gap 0.029|0.752 spin 0.112|0.387 compute 0.196|0.270 | empty 0/64, cpu-assign/row 6.16
+ -- handoff prof (72576 jobs, ms/job avg|max): gap 0.031|0.751 spin 0.119|0.413 compute 0.186|0.292 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (72640 jobs, ms/job avg|max): gap 0.015|0.738 spin 0.125|0.568 compute 0.186|0.297 | empty 0/64, cpu-assign/row 5.75
+ -- moe_cpu prof (72704 jobs, us/job): prep_gu 0.0 | gemv_gu 154.4 (35.0 GB/s) | act+prep_d 0.0 | gemv_d 81.0 (33.3 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (72704 jobs, ms/job avg|max): gap 0.038|0.926 spin 0.133|0.447 compute 0.185|0.272 | empty 0/64, cpu-assign/row 5.64
+ -- handoff prof (72768 jobs, ms/job avg|max): gap 0.018|0.732 spin 0.113|0.295 compute 0.197|0.255 | empty 0/64, cpu-assign/row 6.28
+ -- handoff prof (72832 jobs, ms/job avg|max): gap 0.037|0.761 spin 0.137|0.939 compute 0.187|0.270 | empty 0/64, cpu-assign/row 5.72
+ -- handoff prof (72896 jobs, ms/job avg|max): gap 0.034|0.879 spin 0.128|0.746 compute 0.187|0.273 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (72960 jobs, ms/job avg|max): gap 0.017|0.739 spin 0.140|0.784 compute 0.183|0.259 | empty 0/64, cpu-assign/row 5.70
+ -- handoff prof (73024 jobs, ms/job avg|max): gap 0.032|0.858 spin 0.117|0.457 compute 0.192|0.272 | empty 0/64, cpu-assign/row 5.92
+ -- handoff prof (73088 jobs, ms/job avg|max): gap 0.016|0.740 spin 0.124|0.468 compute 0.191|0.268 | empty 0/64, cpu-assign/row 5.97
+ -- handoff prof (73152 jobs, ms/job avg|max): gap 0.033|0.822 spin 0.132|0.377 compute 0.189|0.262 | empty 0/64, cpu-assign/row 5.86
+ -- split prof [issue] (2048 brackets, stream ms): med 0.010 p90 0.010 max 0.051 | worst layers L0:0.012 L6:0.011 L3:0.011 L4:0.010
+ -- split prof [wait] (2048 brackets, stream ms): med 0.140 p90 0.233 max 0.914 | worst layers L33:0.194 L10:0.191 L5:0.191 L26:0.190
+ -- moe_cpu prof (73216 jobs, us/job): prep_gu 0.0 | gemv_gu 154.2 (35.0 GB/s) | act+prep_d 0.0 | gemv_d 80.9 (33.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (73216 jobs, ms/job avg|max): gap 0.196|10.755 spin 0.115|0.568 compute 0.184|0.259 | empty 0/64, cpu-assign/row 5.58
+ -- handoff prof (73280 jobs, ms/job avg|max): gap 0.016|0.747 spin 0.140|0.760 compute 0.193|0.269 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (73344 jobs, ms/job avg|max): gap 0.030|0.743 spin 0.141|0.594 compute 0.192|0.275 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (73408 jobs, ms/job avg|max): gap 0.023|0.739 spin 0.112|0.437 compute 0.192|0.386 | empty 0/64, cpu-assign/row 5.80
+ -- handoff prof (73472 jobs, ms/job avg|max): gap 0.036|0.832 spin 0.125|0.648 compute 0.190|0.276 | empty 0/64, cpu-assign/row 5.81
+ -- handoff prof (73536 jobs, ms/job avg|max): gap 0.036|0.739 spin 0.121|0.701 compute 0.186|0.287 | empty 0/64, cpu-assign/row 5.75
+ -- handoff prof (73600 jobs, ms/job avg|max): gap 0.016|0.742 spin 0.135|0.399 compute 0.194|0.285 | empty 0/64, cpu-assign/row 5.89
+ -- handoff prof (73664 jobs, ms/job avg|max): gap 0.031|0.749 spin 0.121|0.592 compute 0.187|0.264 | empty 0/64, cpu-assign/row 5.78
+ -- moe_cpu prof (73728 jobs, us/job): prep_gu 0.0 | gemv_gu 153.9 (35.0 GB/s) | act+prep_d 0.0 | gemv_d 80.7 (33.4 GB/s) | tf_d/finish 0.0 | accum 0.0
+ -- handoff prof (73728 jobs, ms/job avg|max): gap 0.015|0.738 spin 0.114|0.350 compute 0.181|0.269 | empty 0/64, cpu-assign/row 5.84
+ -- handoff prof (73792 jobs, ms/job avg|max): gap 0.029|0.754 spin 0.131|0.467 compute 0.194|0.278 | empty 0/64, cpu-assign/row 5.92
+Context   3840: S=[37;1m1 [32;1m     69.91[0m tokens/s [37;1m[68.25 - 71.57][0m
+
+

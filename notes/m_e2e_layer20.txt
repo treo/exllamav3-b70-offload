@@ -1,0 +1,49 @@
+ -- Loading /home/treo/projects/vendor/tabbyAPI/models/Qwen3.5-35B-A3B-3bpw-hq2
+ -- CPU-offloaded experts (worker): model.language_model.layers.0.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.1.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.2.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.3.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.4.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.5.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.6.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.7.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.8.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.9.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.10.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.11.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.12.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.13.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.14.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.15.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.16.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.17.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.18.mlp
+ -- CPU-offloaded experts (worker): model.language_model.layers.19.mlp
+
+ -- CPU MoE worker started: 20 layers, avx2, 15 threads
+ -- CPU MoE host affinity: host on LPs [15, 31]
+ -- Warming up...
+
+ -- Loading tokenizer...
+ -- Bitrate: 3.21 bpw / 6.01 bpw (head)
+ -- Chunk size: 4096
+
+
+[33;1mPrefill:[0m
+Length     256: [32;1m    482.23[0m tokens/s
+Length     512: [32;1m    785.38[0m tokens/s
+Length    1024: [32;1m   1271.09[0m tokens/s
+Length    2048: [32;1m   2136.65[0m tokens/s
+Length    4096: [32;1m   3262.89[0m tokens/s
+
+
+
+[33;1mGeneration[0m
+Context      0: S=[37;1m1 [32;1m     79.68[0m tokens/s [37;1m[77.18 - 82.18][0m
+Context    256: S=[37;1m1 [32;1m     79.07[0m tokens/s [37;1m[76.67 - 81.46][0m
+Context    512: S=[37;1m1 [32;1m     79.11[0m tokens/s [37;1m[77.70 - 80.51][0m
+Context   1024: S=[37;1m1 [32;1m     78.44[0m tokens/s [37;1m[76.81 - 80.07][0m
+Context   2048: S=[37;1m1 [32;1m     79.17[0m tokens/s [37;1m[77.10 - 81.24][0m
+Context   3840: S=[37;1m1 [32;1m     80.40[0m tokens/s [37;1m[80.12 - 80.68][0m
+
+
