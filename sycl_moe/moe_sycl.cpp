@@ -23,6 +23,7 @@ using AP_W = expe::annotated_ptr<const uint32_t, decltype(expe::properties{g_rea
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -79,27 +80,60 @@ struct HostProf
 {
     static double now_us()
     { struct timeval tv; gettimeofday(&tv, nullptr); return tv.tv_sec * 1e6 + tv.tv_usec; }
-    double mark = 0.0, gap[12] = {}, sub[12] = {};
-    int idx = 0, n = 0, stages = 0;
+    // Per-stage host attribution of ONE forward, in submission order, KEPT SEPARATE PER JOB CLASS.
+    // "pre" = host work before the region starts (prologue logic, blob packing, whatever runs
+    // between two submits); "enq" = the queue call itself. Classes matter: a decode job (rows=1,
+    // float tier) and a prefill job (rows>1, int8 tier) issue DIFFERENT launch sequences, and with
+    // one shared slot array stage 2 of a prefill forward silently inherits the label of stage 2 of
+    // a decode forward - which is exactly how an early cut of this instrument billed 15 us to
+    // "K1-prep" for a kernel that costs 5 us.
+    static constexpr int NSLOT = 14, NCLS = 3;
+    static const char* cls_name(int c) { return c == 0 ? "decode-float" : c == 1 ? "int8" : "rows>1-float"; }
+    // Per stage we separate THREE numbers: "pre" (host work before the region), "enq" (the whole
+    // queue call) and "body" (the part of it that is OUR handler lambda, i.e. accessor creation +
+    // cgh.parallel_for, which the runtime invokes synchronously inside submit). enq-body is what
+    // the runtime's own bookkeeping costs; a stage whose cost is all "body" is a marshalling or
+    // dispatch cost of THAT kernel, not a queue cost.
+    double mark = 0.0, gap[NCLS][NSLOT] = {}, sub[NCLS][NSLOT] = {}, tailv[NCLS] = {};
+    double body[NCLS][NSLOT] = {};
+    double bmark = 0.0;
+    const char* lbl[NCLS][NSLOT] = {};
+    int idx = 0, cls = 0, n = 0, nsamp[NCLS] = {}, stages[NCLS] = {};
     static HostProf& me() { static HostProf h; return h; }
-    void begin() { mark = now_us(); idx = 0; ++n; }
-    double start_region() { const double t = now_us(); if (idx < 12) gap[idx] += t - mark; return t; }
-    void end_region(double t0) { const double t = now_us(); if (idx < 12) sub[idx] += t - t0; mark = t; ++idx; }
+    void begin(int c) { mark = now_us(); idx = 0; cls = c; ++n; ++nsamp[c]; }
+    double start_region(const char* nm = nullptr)
+    { const double t = now_us(); if (idx < NSLOT) { gap[cls][idx] += t - mark;
+                                                    if (nm && !lbl[cls][idx]) lbl[cls][idx] = nm; }
+      return t; }
+    void end_region(double t0)
+    { const double t = now_us(); if (idx < NSLOT) sub[cls][idx] += t - t0; mark = t; ++idx; }
+    void body_begin() { bmark = now_us(); }
+    void body_end() { if (idx > 0 && idx <= NSLOT) body[cls][idx - 1] += now_us() - bmark; }
     void end()
     {
-        stages = std::max(stages, idx);
+        stages[cls] = std::max(stages[cls], idx);
+        tailv[cls] += now_us() - mark;
         if ((n % 256) != 0) return;
-        double tg = 0.0, ts = 0.0;
-        printf(" -- hostprof (%d fwd, us gap|sub per stage):", n / 256);
-        for (int i = 0; i < 12; ++i)
+        for (int c = 0; c < NCLS; ++c)
         {
-            if (sub[i] + gap[i] <= 0.0) continue;
-            tg += gap[i]; ts += sub[i];
-            printf(" [%d %.2f|%.2f]", i, gap[i] / 256.0, sub[i] / 256.0);
+            if (!nsamp[c]) continue;
+            double tg = 0.0, ts = 0.0;
+            printf(" -- hostprof[%s] (%d fwd; per stage pre|enqueue us):", cls_name(c), nsamp[c]);
+            for (int i = 0; i < NSLOT; ++i)
+            {
+                if (sub[c][i] + gap[c][i] <= 0.0) continue;
+                tg += gap[c][i]; ts += sub[c][i];
+                printf(" [%d %s %.2f|%.2f|b%.2f]", i, lbl[c][i] ? lbl[c][i] : "-",
+                       gap[c][i] / nsamp[c], sub[c][i] / nsamp[c], body[c][i] / nsamp[c]);
+            }
+            printf("  || pre %.2f + enqueue %.2f + tail %.2f = host %.2f us/fwd (%d stages)\n",
+                   tg / nsamp[c], ts / nsamp[c], tailv[c] / nsamp[c],
+                   (tg + ts + tailv[c]) / nsamp[c], stages[c]);
+            fflush(stdout);
+            for (int i = 0; i < NSLOT; ++i)
+            { gap[c][i] = sub[c][i] = body[c][i] = 0.0; lbl[c][i] = nullptr; }
+            tailv[c] = 0.0; nsamp[c] = 0; stages[c] = 0;
         }
-        printf("  || host total %.2f us/fwd (%d stages)\n", (tg + ts) / 256.0, stages);
-        fflush(stdout);
-        for (int i = 0; i < 12; ++i) gap[i] = sub[i] = 0.0;
     }
 };
 struct HpScope
@@ -1642,6 +1676,14 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 {
     const int H = P.hidden, I = P.interm;
     const int k2 = 2 * P.bits + P.hb;
+    // Whole-forward host window: the prologue (tier policy, split-K auto rule, coop eligibility,
+    // workspace rebind, offset maths) is INSIDE the ALLOCLOG `sub` phase, so leaving it outside the
+    // instrument would silently bill it to whoever came last.
+    static const int hpf = []{ const char* e = std::getenv("EXL3_MOE_B70_HOSTPROF");
+                               return e && e[0] == '1'; }();
+    const HpScope hp_scope{hpf != 0};
+    if (hpf) HostProf::me().begin(use8_ ? 1 : (rows > 1 ? 2 : 0));
+    const double hpk0 = hpf ? HostProf::me().start_region("prologue") : 0.0;
     // Tier policy. Sustained-clock A/B (bench_layer, min-of-3 interleaved, iters 1200 —
     // earlier short-run tables were cold-clock garbage and one had the tiers swapped by
     // the auto rule itself, see NOTES): rows=1 float 179 vs int8 222 (float wins: m8
@@ -1802,28 +1844,32 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     }
     h_flip = !h_flip;
     char* hb = h_flip ? h_blob : h_blob2;
+    if (hpf) HostProf::me().start_region("blob-pack");
     std::memcpy(hb + off_chunk, chunks_host, nc * sizeof(ChunkDev));
     std::memcpy(hb + off_tokb, tmap.begin.data(), tmap.begin.size() * sizeof(int));
     std::memcpy(hb + off_toke, tmap.entry.data(), tmap.entry.size() * sizeof(int));
     if (coopD || coopGU) std::memset(hb + off_ctr, 0, ctr_bytes);
+    if (hpf) HostProf::me().end_region(hpk0);
 
     // NOTE: implicit in-order ordering between chained submits/memcpys is NOT enforced on
     // this stack (oneAPI 2026.2 + L0 + Xe2); explicit depends_on chains are required.
-    static const int hpf = []{ const char* e = std::getenv("EXL3_MOE_B70_HOSTPROF");
-                               return e && e[0] == '1'; }();
-    const HpScope hp_scope{hpf != 0};
-    if (hpf) HostProf::me().begin();
-    const double ht0 = hpf ? HostProf::me().start_region() : 0.0;
+    const double ht0 = hpf ? HostProf::me().start_region("blob-h2d") : 0.0;
     sycl::event dep = pre_dep ? q.memcpy(w_chunk, hb, blob_sz, {*pre_dep})
                               : q.memcpy(w_chunk, hb, blob_sz);
     if (hpf) HostProf::me().end_region(ht0);
     if (prof) { pev.clear(); pev.push_back(dep); }
-    auto launch = [&](auto&& fn) {
-        const double htl = hpf ? HostProf::me().start_region() : 0.0;
-        dep = q.submit([&](sycl::handler& cgh) { cgh.depends_on(dep); fn(cgh); });
+    auto launch = [&](auto&& fn, const char* nm = nullptr) {
+        const double htl = hpf ? HostProf::me().start_region(nm) : 0.0;
+        dep = q.submit([&](sycl::handler& cgh) {
+            if (hpf) HostProf::me().body_begin();
+            cgh.depends_on(dep);
+            fn(cgh);
+            if (hpf) HostProf::me().body_end();
+        });
         if (hpf) HostProf::me().end_region(htl);
         if (prof) pev.push_back(dep);
     };
+    auto launchN = [&](const char* nm, auto&& fn) { launch(std::forward<decltype(fn)>(fn), nm); };
 
     const uintptr_t* tab = d_tab;
     const ChunkDev* chunks = w_chunk;
@@ -1855,7 +1901,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const int ctr_cells = coopD || coopGU
             ? (int)(ctrG_n + ctr1_n + ctr2_n) : 0;
         const int clr_rows = ctr_cells ? (ctr_cells + nbk * 128 - 1) / (nbk * 128) : 0;
-        launch([&](sycl::handler& cgh) {
+        launchN("K1-prep", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({128}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)(nc * nm + clr_rows)}, {128, 1}),
                 [=](sycl::nd_item<2> it) {
@@ -1930,7 +1976,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         }();
 
         // Q1 (+K1 fused): rotate, Hadamard, amax-quantize straight from x into the A slab
-        launch([&](sycl::handler& cgh) {
+        launchN("i8-prepq", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
             if (fuse_k1) {
                 sycl::local_accessor<float, 1> sh({256}, cgh);
@@ -1962,7 +2008,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             // wide (NF=I8_FRAGS) launch over the rest. See moe_bucket_chunks() for why.
             if (bucketed) {
                 const int ns_narrow = n_narrow * nm;
-                launch([&](sycl::handler& cgh) {
+                launchN("i8-gemv-gu", [&](sycl::handler& cgh) {
                     sycl::local_accessor<unsigned char, 1> slm({ring ? (size_t)I8_SLM_BYTES : (size_t)I8_SLAB_SUB}, cgh);
                     Gemv8Base g = g8; g.slot_base = 0;
                     const size_t gn = ring ? (size_t)(I / 16 / 8) * 128 * nsl8_gu
@@ -1979,7 +2025,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         } else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
                     });
                 });
-                launch([&](sycl::handler& cgh) {
+                launchN("i8-gemv-gu", [&](sycl::handler& cgh) {
                     sycl::local_accessor<unsigned char, 1> slm({ring ? (size_t)I8_SLM_BYTES : (size_t)I8_SLAB_SUB}, cgh);
                     Gemv8Base g = g8; g.slot_base = ns_narrow;
                     const size_t gw = ring ? (size_t)(I / 16 / 8) * 128 * nsl8_gu
@@ -1997,7 +2043,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     });
                 });
             } else
-            launch([&](sycl::handler& cgh) {
+            launchN("i8-gemv-gu", [&](sycl::handler& cgh) {
                 sycl::local_accessor<unsigned char, 1> slm({ring ? (size_t)I8_SLM_BYTES
                                                           : (wide ? 8u * I8_SLAB_SUB : 1u * I8_SLAB_SUB)}, cgh);
                 if (ring) {
@@ -2040,7 +2086,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         // exactly H*(B*ones)).
         {
             const int nbk = I / 128;
-            launch([&](sycl::handler& cgh) {
+            launchN("i8-gemv-gu", [&](sycl::handler& cgh) {
                 sycl::local_accessor<float, 1> sh({256}, cgh);
                 cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
                     [=](sycl::nd_item<2> it) {
@@ -2135,7 +2181,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         }
 
         // Q2 + K5p: quantize the down input, DPAS gemm over the down matrices
-        launch([&](sycl::handler& cgh) {
+        launchN("i8-k34", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> red({256}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({256, (size_t)I8R * nc}, {256, 1}),
                 QuantIn{ tind, w_a8d, qsxd, chunks, I, 1, 1, slim ? 0 : 1, red });
@@ -2155,7 +2201,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             const size_t g0 = (wide || ring) ? (size_t)(H / 16 / 8) * 128 * nsl8_d
                                    : (size_t)(H / 16) * 16 * nsl8_d;
             if (bucketed) {                                  // see the gu launcher above
-                launch([&](sycl::handler& cgh) {
+                launchN("i8-gemv-dn", [&](sycl::handler& cgh) {
                     sycl::local_accessor<unsigned char, 1> slm({ring ? (size_t)I8_SLM_BYTES : (size_t)I8_SLAB_SUB}, cgh);
                     Gemv8Base g = g8; g.slot_base = 0;
                     const size_t gn = ring ? (size_t)(H / 16 / 8) * 128 * nsl8_d
@@ -2172,7 +2218,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                         } else throw std::logic_error("k2_dpas: tier chosen for an un-specialized rate");
                     });
                 });
-                launch([&](sycl::handler& cgh) {
+                launchN("i8-gemv-dn", [&](sycl::handler& cgh) {
                     sycl::local_accessor<unsigned char, 1> slm({ring ? (size_t)I8_SLM_BYTES : (size_t)I8_SLAB_SUB}, cgh);
                     Gemv8Base g = g8; g.slot_base = n_narrow;
                     const size_t gw = ring ? (size_t)(H / 16 / 8) * 128 * nsl8_d
@@ -2190,7 +2236,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
                     });
                 });
             } else
-            launch([&](sycl::handler& cgh) {
+            launchN("i8-gemv-dn", [&](sycl::handler& cgh) {
                 sycl::local_accessor<unsigned char, 1> slm({ring ? (size_t)I8_SLM_BYTES
                                                           : (wide ? 8u * I8_SLAB_SUB : 1u * I8_SLAB_SUB)}, cgh);
                 if (ring) {
@@ -2238,7 +2284,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             const int nbk = H / 128;
             const int nent = (int)tmap.entry.size();
             if (nent) {
-                launch([&](sycl::handler& cgh) {
+                launchN("i8-gemv-dn", [&](sycl::handler& cgh) {
                     sycl::local_accessor<float, 1> sh({128}, cgh);
                     cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)rows}, {128, 1}),
                         [=](sycl::nd_item<2> it) {
@@ -2319,7 +2365,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
             if (!geo_logged[down ? 1 : 0]) { geo_logged[down ? 1 : 0] = 1;
                 printf(" -- gemv geometry: down=%d single=%d ncwg=%d nbk=%d units=%d nsl=%d gn=%zu\n",
                        down, single, ncwg, gb.nbk, units, gb.nsl, gn); } }
-        launch([&](sycl::handler& cgh) {
+        launchN("gemv", [&](sycl::handler& cgh) {
             k2_float(k2, [&](auto R) {
                 constexpr int V = decltype(R)::value;
                 if constexpr (V > 0) {
@@ -2347,7 +2393,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         int* d_ctrG = (int*)((char*)w_chunk + off_ctr);
         const int a_ = P.activation;
         const float l_ = lim;
-        launch([&](sycl::handler& cgh) {
+        launchN("coopgu", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({256}, cgh);
             sycl::local_accessor<int, 1> flg({2}, cgh);
             k2_float(k2, [&](auto R) {
@@ -2370,7 +2416,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         // 128-column tile while it is in SLM; saves a global roundtrip and a submit)
         {
             const int nbk = I / 128;
-        launch([&](sycl::handler& cgh) {
+        launchN("K34-act", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({256}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)nc}, {128, 1}),
                 [=](sycl::nd_item<2> it) {
@@ -2461,7 +2507,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         float* d_tsw = w_tsw;
         static const int coop_lab = []{ const char* e = getenv("EXL3_MOE_B70_COOP_LAB"); return e ? atoi(e) : 0; }();
         const bool nsl1 = (NSL_D == 1);
-        launch([&](sycl::handler& cgh) {
+        launchN("K56-coopdn", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({128}, cgh);
             sycl::local_accessor<int, 1> flg({2}, cgh);
             k2_float(k2, [&](auto R) {
@@ -2501,7 +2547,7 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const int nbk = H / 128;
         const int nent = (int)tmap.entry.size();
         if (nent) {
-            launch([&](sycl::handler& cgh) {
+            launchN("K6-gather", [&](sycl::handler& cgh) {
                 sycl::local_accessor<float, 1> sh({128}, cgh);
                 cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)rows}, {128, 1}),
                     [=](sycl::nd_item<2> it) {
