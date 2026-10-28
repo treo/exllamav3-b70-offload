@@ -138,7 +138,12 @@ static inline void gemv_unit(const uint32_t* wp, const float* xr, float* outp,
 }
 
 // Unit u within one expert (0..29) -> matrix, k-tiles, source arena, scratch output.
-static inline void do_unit(int u, const uint32_t* gate, const uint32_t* up, const uint32_t* down,
+// SK (LAB_SK) splits each unit's k-range into SK independent units, which is what production does
+// (its decode gu grid is nc*nm*(I/ncwg) with nm=2, i.e. split-K 2, so 40 teams for nc=2 and 80 for
+// down - twice this lab's default). Without SK the lab under-states production's own parallelism.
+static unsigned g_sk = 1;                    // LAB_SK, copied into every functor (.sk)
+static inline void do_unit(int u, int ks, unsigned sk,
+                          const uint32_t* gate, const uint32_t* up, const uint32_t* down,
                           const float* xgu, const float* xdn, float* out, int e, int tid) {
     const uint32_t* src; const float* xr; size_t tiles_k; int TNcols, blk;
     if (u < U_GU)          { src = gate; xr = xgu + (size_t)e * HID; tiles_k = HID / 16; TNcols = INT; blk = u; }
@@ -146,9 +151,23 @@ static inline void do_unit(int u, const uint32_t* gate, const uint32_t* up, cons
     else                   { src = down; xr = xdn + (size_t)e * INT; tiles_k = INT / 16; TNcols = HID; blk = u - 2 * U_GU; }
     const size_t TN = (size_t)TNcols / 16;
     const int tile_n0 = blk * (TEAM / 16);            // 8 tile columns per team
-    const uint32_t* wp = src + ((size_t)e * TN + tile_n0 + (tid >> 4)) * tiles_k * W;
-    float* dst = out + (size_t)e * 4096 + (size_t)u * TEAM;   // scratch, layout irrelevant
-    gemv_unit(wp, xr, dst, tiles_k, tid);
+    size_t k0 = 0, klen = tiles_k;
+    if (sk > 1) {
+        klen = tiles_k / sk;
+        k0 = (size_t)ks * klen;
+        if (ks == (int)sk - 1) klen = tiles_k - k0;   // last slice absorbs the remainder
+    }
+    const uint32_t* wp = src + ((size_t)e * TN + tile_n0 + (tid >> 4)) * tiles_k * W + k0 * W;
+    float* dst = out + (size_t)e * 4096 + (size_t)u * TEAM + (size_t)ks * 128;   // scratch
+    gemv_unit(wp, xr, dst, klen, tid);
+}
+
+// Flat unit index q -> (unit within expert, k slice). `span` is U_PER_E (all units) or 2*U_GU (gu
+// launch) or U_DN (down launch).
+static inline void unit_map(unsigned span, size_t q, unsigned sk, int& u, int& ks) {
+    ks = (int)(q % sk);
+    const size_t v = q / sk;                         // v in [0, nc*span)
+    u = (int)(v % span);
 }
 
 // ---------------------------------------------------------------- counters layout (device)
@@ -159,6 +178,7 @@ enum : unsigned {
     C_ENTER = 0, C_EXIT = 1, C_ARRIVE = 2, C_GO = 3, C_DIAG = 4,
     C_GARR = 64,                                             // two-level fan-in, one line / group
     C_BC = 62,                                               // fout==2 single broadcast line
+    C_DP_GUARD = 63,                                         // dead-protocol guard (never 7777)
     C_RING = 2048,                                           // 4096-entry observe-poll ring
     C_OBS = 8192,                                            // per-team max-alive observation
     C_PUB = C_OBS + MAXTEAMS * 16, C_SLOT = C_PUB + MAXTEAMS * 16,
@@ -241,7 +261,9 @@ struct ResidentLoop {
     unsigned* ctr;
     int E, nc, jobs;
     size_t units_job;
-    unsigned nteams;
+    unsigned nteams, sk;
+    unsigned deadproto;          // 1 = compile the engine's protocol in but never run it
+    Mailbox* mb;                 // only used by the dead-protocol path
 
     void operator()(sycl::nd_item<1> it) const {
         const int tid = (int)it.get_local_id(0);
@@ -273,11 +295,22 @@ struct ResidentLoop {
         const size_t total = units_job * (size_t)jobs;
         for (size_t u = nt; u < total; u += nteams) {
             if (tid == 0) aw.sample();          // 2 relaxed loads per unit: free next to ~2 us work
+            // ATTRIBUTION HACK: the engine's whole protocol, compiled in and live, but guarded by a
+            // value only the device can know, so the compiler cannot DCE it. If this makes mode A as
+            // slow as the engine, the engine's deficit is the protocol's LIVE STATE (register
+            // allocation), not anything it dynamically costs at run time.
+            if (deadproto && ld_rlx<sycl::memory_scope::device>(ctr + C_DP_GUARD) == 7777u) {
+                const unsigned sx = rmw0<sycl::memory_scope::system>(&mb->seq);
+                st_rel<sycl::memory_scope::device>(slotp(ctr, nt), sx);
+                add_a<sycl::memory_scope::device>(ctr + C_ARRIVE, 1u);
+            }
             const size_t jobid = u / units_job;
             const size_t ui = u % units_job;
-            const int sl = (int)(ui / U_PER_E);
+            int uu, ks;
+            unit_map(U_PER_E, ui, sk, uu, ks);
+            const int sl = (int)(ui / sk / U_PER_E);
             const int e = (int)((jobid * (unsigned)nc + (unsigned)sl) % (unsigned)E);
-            do_unit((int)(ui % U_PER_E), gate, up, down, xgu, xdn, out, e, tid);
+            do_unit(uu, ks, sk, gate, up, down, xgu, xdn, out, e, tid);
         }
         if (tid == 0) {
             // Everyone is still inside the kernel here (nobody exits before the gate), so at this
@@ -298,16 +331,21 @@ struct SplitUnits {
     float* out;
     unsigned* ctr;
     int E, nc, phase, job;
+    unsigned sk;
     void operator()(sycl::nd_item<1> it) const {
         const int tid = (int)it.get_local_id(0);
         const unsigned nt = (unsigned)it.get_group(0);
         if (tid == 0) add_a<sycl::memory_scope::device>(ctr + C_ENTER, 1u);   // concurrency stats
-        const unsigned span = phase ? (unsigned)U_DN : 2u * (unsigned)U_GU;
-        const unsigned per = (unsigned)nc * span;
+        const unsigned span = phase == 1 ? (unsigned)U_DN : (phase == 2 ? (unsigned)U_PER_E
+                                                                        : 2u * (unsigned)U_GU);
+        const unsigned per = (unsigned)nc * span * sk;
         if (nt < per) {
-            const unsigned sl = nt / span, u = nt % span;
+            int u, ks;
+            unit_map(span, nt, sk, u, ks);
+            const unsigned sl = nt / sk / span;
             const int e = (int)(((unsigned)job * (unsigned)nc + sl) % (unsigned)E);
-            do_unit(phase ? (2 * U_GU + (int)u) : (int)u, gate, up, down, xgu, xdn, out, e, tid);
+            do_unit((int)((phase == 1 ? 2 * U_GU : 0) + u), ks, sk, gate, up, down, xgu, xdn, out, e,
+                    tid);
         }
         if (tid == 0) {
             const unsigned alive = ld_rlx<sycl::memory_scope::device>(ctr + C_ENTER) -
@@ -328,12 +366,13 @@ struct Engine {
     float* out;
     int E, nc;
     size_t units_job;
-    unsigned nteams;
+    unsigned nteams, sk;
     unsigned group;            // fan-in group size (1 = flat single counter, 8 = two-level)
     unsigned fout;             // fan-OUT: 0 = team 0 writes every slot, 1 = two-level tree
     unsigned trigger;          // TRIG_* above
     unsigned* dflag;           // device-memory doorbell for TRIG_DMA
     unsigned backoff;          // idle-loop iterations between polls (0 = hammer)
+    unsigned per_ping;         // decode JOBS done per doorbell (attribution knob)
     int nowork;                // LAB_NOWORK=1: skip the gemv, measure the protocol alone
 
     void operator()(sycl::nd_item<1> it) const {
@@ -430,12 +469,23 @@ struct Engine {
                 return;
             }
 
-            // ---- the job: this team's units of job s
+            // ---- the job: this team's units of job s.
+            // per_ping > 1 is the ATTRIBUTION knob: the engine does `per_ping` decode jobs' worth of
+            // units per doorbell, amortising the whole trigger/fan-in/completion round trip over
+            // them. per_ping=1 is the real protocol; a large per_ping approaches mode A (same code,
+            // same grid, same bytes). If us/job falls to mode A's number the deficit is the per-job
+            // protocol tail; if it stays high, the engine's compiled BODY is slower per expert than
+            // a normal launch - which is gate G0's stated failure mode.
             if (!nowork)
-            for (size_t u = nt; u < units_job; u += nteams) {
-                const int sl = (int)(u / U_PER_E);
-                const int e = (int)((s * (unsigned)nc + (unsigned)sl) % (unsigned)E);
-                do_unit((int)(u % U_PER_E), gate, up, down, xgu, xdn, out, e, tid);
+            for (size_t uu = nt; uu < units_job * per_ping; uu += nteams) {
+                const size_t sub = uu / units_job;             // which decode job of this ping
+                const size_t qi = uu % units_job;
+                int u, ks;
+                unit_map(U_PER_E, qi, sk, u, ks);
+                const int sl = (int)(qi / sk / U_PER_E);
+                const int e = (int)((((s * (unsigned)per_ping) + sub) * (unsigned)nc + (unsigned)sl) %
+                                    (unsigned)E);
+                do_unit(u, ks, sk, gate, up, down, xgu, xdn, out, e, tid);
             }
 
             // ---- fan-in + completion. Level-triggered (rule 3). Flat = one counter RMW'd by all
@@ -511,6 +561,8 @@ int main(int argc, char** argv) {
     const int nc = argc > 2 ? atoi(argv[2]) : 2;
     const int jobs = argc > 3 ? atoi(argv[3]) : 200;
     const int E = 260;                      // experts registered per layer in the shipped config
+    if (getenv("LAB_SK")) g_sk = (unsigned)atoi(getenv("LAB_SK"));
+    if (g_sk < 1) g_sk = 1;
     const bool wantA = !strcmp(mode, "all") || strchr(mode, 'A') != nullptr;
     const bool wantB = !strcmp(mode, "all") || strchr(mode, 'B') != nullptr;
     const bool wantC = !strcmp(mode, "all") || strchr(mode, 'C') != nullptr;
@@ -546,7 +598,7 @@ int main(int argc, char** argv) {
     q.memset(out, 0, (size_t)(E + 1) * 4096 * sizeof(float)).wait();
     q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
 
-    const size_t units_job = (size_t)U_PER_E * nc;
+    const size_t units_job = (size_t)U_PER_E * nc * g_sk;
     const double job_mb = JOB_BYTES_PER_E * nc / 1e6;
     printf("per job: nc %d experts, %zu units (unit = one %d-thread team), %.3f MB packed\n",
            nc, units_job, TEAM, job_mb);
@@ -563,7 +615,9 @@ int main(int argc, char** argv) {
         printf("  %-7s %-9s %-9s %-9s %-8s %-9s %s\n", "teams", "us/job", "GB/s", "vs 195",
                "alive", "ticketed", "note");
         for (unsigned n : {16u, 32u, 64u, 96u, 128u, 160u, 192u, 256u, 320u, 448u, 576u, 704u}) {
-            ResidentLoop rl{gate, up, down, xgu, xdn, out, ctr, E, nc, jobs, units_job, n};
+            const unsigned dp = getenv("LAB_A_DEADPROTO") ? 1u : 0u;
+            ResidentLoop rl{gate, up, down, xgu, xdn, out, ctr, E, nc, jobs, units_job, n, g_sk,
+                            dp, mb};
             q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
             for (int w = 0; w < 2; ++w)      // clock burn-in with the same grid
                 q.submit([&](sycl::handler& cgh) {
@@ -595,8 +649,8 @@ int main(int argc, char** argv) {
     // ---------------------------------------------------------- mode C
     if (wantC) {
         printf("== C: split path (control arm) - blob H2D + gu launch + down launch + D2H, one wait\n");
-        const size_t gu_teams = (size_t)nc * 2 * U_GU, dn_teams = (size_t)nc * U_DN;
-        SplitUnits su{gate, up, down, xgu, xdn, out, ctr, E, nc, 0, 0};
+        const size_t gu_teams = (size_t)nc * 2 * U_GU * g_sk, dn_teams = (size_t)nc * U_DN * g_sk;
+        SplitUnits su{gate, up, down, xgu, xdn, out, ctr, E, nc, 0, 0, g_sk};
         auto one_job = [&](int j) {
             su.job = j;
             su.phase = 0;
@@ -614,6 +668,53 @@ int main(int argc, char** argv) {
         };
         q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
         for (int j = 0; j < 300; ++j) one_job(j);
+        // ---- idle-gap study (the doc's "measure the first launch after idle separately").
+        // Direct submission (ULLS) keeps a batch running in user space and DROPS IT after idle, so a
+        // workload whose submissions are sporadic can pay the kernel-driver path on the first launch
+        // home. Decode is exactly sporadic for this device: one job per layer, ~48 per 14.7 ms token,
+        // and the whole card idle between tokens. If a gap costs tens of us, the model's 57.6 us of
+        // FIXED cost per layer-step is partly ULLS restart - and a keepalive (or any trick that keeps
+        // the batch alive) is a far cheaper lever than a resident engine.
+        if (getenv("LAB_GAPSCAN")) {
+            const double ka = getenv("LAB_KEEPALIVE_US") ? atof(getenv("LAB_KEEPALIVE_US")) : 0.0;
+            sycl::queue qk{ctx, dev, sycl::property::queue::in_order{}};
+            float* kbuf = sycl::malloc_device<float>(64, qk);
+            printf("  gap scan (host busy-wait before each job; min-of-3 windows p50;"
+                   " keepalive %s us):\n", ka > 0 ? getenv("LAB_KEEPALIVE_US") : "off");
+            for (double gap : {0.0, 200.0, 1000.0, 2000.0, 3000.0, 5000.0, 10000.0, 20000.0,
+                               50000.0, 100000.0}) {
+                const int nj = (int)std::min<double>(jobs, std::max(6.0, 3.0e6 / (gap + 50.0)));
+                std::vector<double> g;
+                long ka_count = 0;
+                for (int w = 0; w < 3; ++w) {
+                    std::vector<double> walls2;
+                    double last_ka = now_us();
+                    for (int j = 0; j < nj; ++j) {
+                        const double tg = now_us();
+                        while (now_us() - tg < gap) {
+                            // Keep the submission path warm WITHOUT touching the measured queue:
+                            // a trivial kernel on another queue of the same context.
+                            if (ka > 0 && now_us() - last_ka >= ka) {
+                                last_ka = now_us();
+                                qk.single_task([=] { kbuf[0] = 1.0f; });
+                                ++ka_count;
+                            }
+                        }
+                        const double tj = now_us();
+                        one_job(j);
+                        walls2.push_back(now_us() - tj);
+                    }
+                    g.push_back(pct(walls2).p50);
+                }
+                if (ka > 0) qk.wait();
+                std::sort(g.begin(), g.end());
+                printf("    gap %9.0f us | jobs %4d | wall p50 %8.1f us | keepalives %ld (%.2f/job)\n",
+                       gap, nj, g[0], ka_count, (double)ka_count / (3.0 * nj));
+            }
+            printf("  (compare: the model's decode forward is p50 66.1 us with sub 27.2 + wait 28.6;\n"
+                   "   decode's own inter-job gap is ~300 us = 48 layer-jobs per 14.7 ms token)\n\n");
+            sycl::free(kbuf, qk);
+        }
         std::vector<double> walls;
         for (int w = 0; w < 3; ++w) {
             walls.clear();
@@ -628,8 +729,35 @@ int main(int argc, char** argv) {
         printf("  teams gu %zu dn %zu | wall p50 %.1f us (min-of-3 %.1f) | %.1f GB/s | p90 %.1f "
                "p99 %.1f | n=%d\n",
                gu_teams, dn_teams, p.p50, split_p50, job_mb * 1e3 / p.p50, p.p90, p.p99, p.n);
-        printf("  NOTE: 4 commands/job vs production's 5-6 and no K1/K34 => a HARDER bar than the\n"
-               "  model, not an easier one. Concurrency check (same sampler): gu+down overlap?\n\n");
+        // ---- A2 control: the SAME work as ONE plain launch (units_job teams, one unit each), no
+        // doorbell, no protocol. This is what a resident grid of that size costs when the work itself
+        // is cold-started per job - the honest lower bound for an engine per_ping cannot beat.
+        {
+            su.phase = 2;
+            const size_t all_teams = units_job;
+            auto one_all = [&](int j) {
+                su.job = j;
+                q.submit([&](sycl::handler& cgh) {
+                    cgh.parallel_for(sycl::nd_range<1>{{all_teams * TEAM}, {TEAM}}, su);
+                });
+                q.wait();
+            };
+            for (int j = 0; j < 300; ++j) one_all(j);
+            double best = 1e30;
+            for (int w = 0; w < 3; ++w) {
+                std::vector<double> wl;
+                for (int j = 0; j < jobs; ++j) {
+                    const double tj = now_us();
+                    one_all(j);
+                    wl.push_back(now_us() - tj);
+                }
+                best = std::min(best, pct(wl).p50);
+            }
+            printf("  A2 work-only, ONE launch of %zu teams + wait: %.1f us/job | %.1f GB/s\n",
+                   all_teams, best, job_mb * 1e3 / best);
+            printf("  NOTE: 4 commands/job vs production's 5-6 and no K1/K34 => a HARDER bar than the\n"
+                   "  model, not an easier one.\n\n");
+        }
     }
 
     // ---------------------------------------------------------- mode B
@@ -641,7 +769,30 @@ int main(int argc, char** argv) {
         *hseq = 0;
         q2.memset(dflag, 0, 16).wait();
         const char* tname[] = {"store", "ntstore", "clflush", "dma", "task"};
+        const double idle_us = getenv("LAB_IDLE_US") ? atof(getenv("LAB_IDLE_US")) : 0.0;
+        const double ka_us = getenv("LAB_KEEPALIVE_US") ? atof(getenv("LAB_KEEPALIVE_US")) : 0.0;
+        double ka_count = 0;
+        sycl::queue qk{ctx, dev, sycl::property::queue::in_order{}};
+        float* kbuf = sycl::malloc_device<float>(64, qk);
         auto ping = [&](unsigned want, unsigned trig) -> double {
+            // Plan §2 arms S1/S2 applied to the ENGINE: optionally idle first (the wake-up cost the
+            // gap scan found: the same 4-command chain costs 56 us warm, 247 us after 20 ms, 410 us
+            // after 100 ms), optionally drip trivial kernels on a THIRD queue during that idle. The
+            // doorbell itself stays a pure host store - no command per job - so if a background drip
+            // keeps it responsive, the engine's cost model survives.
+            if (idle_us > 0.0) {
+                const double tg = now_us();
+                double lastk = tg;
+                for (;;) {
+                    const double nn = now_us();
+                    if (nn - tg >= idle_us) break;
+                    if (ka_us > 0.0 && nn - lastk >= ka_us) {
+                        lastk = nn;
+                        qk.single_task([=] { kbuf[0] = 1.0f; });
+                        ++ka_count;
+                    }
+                }
+            }
             if (trig == TRIG_DMA) {
                 *hseq = want;
                 q2.memcpy(dflag, hseq, 4);           // DMA into device memory: costs an enqueue
@@ -662,12 +813,14 @@ int main(int argc, char** argv) {
                 const unsigned d = __atomic_load_n(&mb->done, __ATOMIC_ACQUIRE);
                 if (d == QUIT) return -2.0;
                 if ((int)(d - want) >= 0) return now_us() - t0;
-                if (now_us() - t0 > 20000.0) return -1.0;   // 20 ms ceiling => counted as a stall
+                if (now_us() - t0 > 5000.0) return -1.0;   // 5 ms ceiling => counted as a stall
                 _mm_pause();
             }
         };
         const int nowork = getenv("LAB_NOWORK") ? atoi(getenv("LAB_NOWORK")) : 0;
         const unsigned backoff = getenv("LAB_BACKOFF") ? (unsigned)atoi(getenv("LAB_BACKOFF")) : 0;
+        const unsigned per_ping = getenv("LAB_PER_PING") ? (unsigned)atoi(getenv("LAB_PER_PING")) : 1;
+        const int nwin = getenv("LAB_WIN") ? atoi(getenv("LAB_WIN")) : 3;
         const char* tl = getenv("LAB_ENG_TEAMS");
         std::vector<unsigned> ts = tl ? parse_list(tl) : std::vector<unsigned>{16u, 64u, 128u};
         const char* gl = getenv("LAB_ENG_FAN");
@@ -687,8 +840,8 @@ int main(int argc, char** argv) {
                 q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
                 q2.memset(dflag, 0, 16).wait();
                 *hseq = 0;
-                Engine eng{mb, ctr, gate, up, down, xgu, xdn, out, E, nc, units_job, n, grp, fo,
-                           trig, dflag, backoff, nowork};
+                Engine eng{mb, ctr, gate, up, down, xgu, xdn, out, E, nc, units_job, n, g_sk, grp,
+                           fo, trig, dflag, backoff, per_ping, nowork};
                 sycl::event resident = q.submit([&](sycl::handler& cgh) {
                     cgh.parallel_for(sycl::nd_range<1>{{(size_t)n * TEAM}, {TEAM}}, eng);
                 });
@@ -706,20 +859,35 @@ int main(int argc, char** argv) {
                     if (!wait_bounded(resident, 4000.0)) printf("    KERNEL WILL NOT EXIT\n");
                     continue;
                 }
-                std::vector<std::pair<unsigned, double>> v; v.emplace_back(1u, first);
-                unsigned want = 1; int dead = 0, tmo = 0;
-                const double t_start = now_us();
-                for (int i = 0; i < jobs; ++i) {
+                std::vector<std::pair<unsigned, double>> v;
+                unsigned want = 1; int dead = 0, stalled = 0;
+                // burn-in: the first window of any Xe2 measurement lies (rule 1). `first` already
+                // proved the engine answers; warm the clocks before scoring anything.
+                for (int i = 0; i < std::max(30, jobs / 2); ++i) {
                     const double t = ping(++want, trig);
-                    if (i < 12 && getenv("LAB_TRACE")) printf("   [job %u -> %.1f us]\n", want, t);
-                    if (t > 0) { v.emplace_back(want, t); tmo = 0; }
-                    else { ++dead; if (++tmo >= 3) break; }
+                    if (t <= 0) ++dead;
+                }
+                const double t_start = now_us();
+                double best_p50 = 1e30;
+                std::vector<double> win_p50;
+                for (int w = 0; w < nwin; ++w) {
+                    std::vector<std::pair<unsigned, double>> vv;
+                    int dd = 0, tt = 0;
+                    for (int i = 0; i < jobs; ++i) {
+                        const double t = ping(++want, trig);
+                        if (t > 0) { vv.emplace_back(want, t / per_ping); tt = 0; }
+                        else { ++dd; ++stalled; if (++tt >= 20) break; }
+                    }
+                    std::vector<double> wl; for (auto& pr : vv) wl.push_back(pr.second);
+                    const double pp = pct(wl).p50;
+                    win_p50.push_back(pp);
+                    if (pp < best_p50 || best_p50 == 1e30) { best_p50 = pp; v = vv; dead = dd; }
                 }
                 const double el = now_us() - t_start;
                 std::vector<double> walls; walls.reserve(v.size());
                 for (auto& pr : v) walls.push_back(pr.second);
                 Pct p = pct(walls);
-                const double gbs = job_mb * 1e6 / (el / (double)std::max(1, p.n + 1));
+                const double gbs = job_mb * 1e6 * per_ping / (el / (double)std::max(1, p.n));
                 if (p.p50 < eng_p50) { eng_p50 = p.p50; eng_gbs = gbs; }
                 __atomic_store_n(&mb->quit, 1u, __ATOMIC_RELEASE);
                 __atomic_store_n(&mb->seq, QUIT, __ATOMIC_RELEASE);
@@ -762,17 +930,19 @@ int main(int argc, char** argv) {
                 std::vector<std::pair<double, unsigned>> slow;
                 for (auto& pr : v) slow.push_back({pr.second, ring[pr.first & 4095u]});
                 std::sort(slow.begin(), slow.end());
-                printf("  %-7u %-8s %-5u %-4u %-8.1f %-8.1f %-8.1f %-10.1f %-9.1f %d/%u%s\n",
+                printf("  %-7u %-8s %-5u %-4u %-8.1f %-8.1f %-8.1f %-10.1f %-9.2f %d/%u%s n=%d\n",
                        n, tname[trig], fo, grp, p.p50, p.p90, p.p99, p.mx,
-                       100.0 * p.over20ms / std::max(1, p.n), dead, alive,
-                       alive >= n ? "" : " NOT-SIMULTANEOUS");
+                       100.0 * stalled / (double)std::max(1, stalled + p.n), dead, alive,
+                       alive >= n ? "" : " NOT-SIMULTANEOUS", p.n);
+                if (ka_us > 0.0)
+                    printf("     keepalive %.0f us: %.2f submits per job\n", ka_us,
+                           ka_count / (double)std::max(1, p.n));
                 if (getenv("LAB_TRACE") && !slow.empty()) {
-                    printf("     polls %.3g (%.3g/s) | fan-out max id %u | slowest team id %u | "
-                           "%d/%u behind | arrive %u | slowest 5 (wall us, team0 polls-at-observe): ",
+                    printf("     windows p50: ");
+                    for (double x : win_p50) printf("%.1f ", x);
+                    printf(" | polls %.3g (%.3g/s) | fan-out max id %u | slowest team id %u | "
+                           "%d/%u behind | arrive %u\n",
                            polls, polls / (el * 1e-6), fan_max, ent_min, laggards, n, arrive_now);
-                    for (size_t i = slow.size() > 5 ? slow.size() - 5 : 0; i < slow.size(); ++i)
-                        printf("(%.1f, %u) ", slow[i].first, slow[i].second);
-                    printf(" | median polls-at-observe %u\n", slow[slow.size() / 2].second);
                 }
               }
             }

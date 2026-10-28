@@ -1,12 +1,21 @@
 # PLAN: persistent B70 worker (kill the per-layer command round trip)
 
-Status: **not started.** Run **gate G0 (§3.0) first** - it is a half-day of lab work that can kill the
-whole idea cheaply, and a measured predecessor already lost this fight once (megakernel: 466 us vs 183
-at rows=1, starvation not barriers). Only if G0 passes does the §2 trigger experiment (~45 min) matter.
-No production code until §5's gates are met. Owner notes: SESSION_20261028.md 2026-10-29
-(08:20-13:05); budget data in `archive/measurements-ledger.md` §"Decode forward budget, IN THE MODEL"
-and `archive/decode-command-latency.md` §2026-10-29 + §"Megakernel experiment". Complements
-`PLAN_L0.md` (see §8 for why that one stays closed).
+Status: **CLOSED by measurement on 2026-10-28 - see §11 for the numbers and §12 for what would
+reopen it.** Gate G0 failed on both of its criteria (a resident grid needs ~256 of the machine's
+~450 thin-WG slots to reach 195 GB/s, and at production's own decode geometry the engine measured
+**84 us/job against the split path's 56 us/job** - it had to beat 36 us). Gate G1 also failed: the
+pinned-USM doorbell - the whole premise - is dependable for only a few pings; the sole trigger that
+completed 60/60 pings with zero stalls was a 4-byte H2D **command** per job, i.e. the cost the
+design exists to remove. Kept above as the reasoning record, because §1-§4 are still the correct
+statement of the prize and of what was already ruled out.
+
+Original status: *not started.* Run **gate G0 (§3.0) first** - it is a half-day of lab work that can
+kill the whole idea cheaply, and a measured predecessor already lost this fight once (megakernel:
+466 us vs 183 at rows=1, starvation not barriers). Only if G0 passes does the §2 trigger experiment
+(~45 min) matter. No production code until §5's gates are met. Owner notes: SESSION_20261028.md
+2026-10-29 (08:20-13:05); budget data in `archive/measurements-ledger.md` §"Decode forward budget,
+IN THE MODEL" and `archive/decode-command-latency.md` §2026-10-29 + §"Megakernel experiment".
+Complements `PLAN_L0.md` (see §8 for why that one stays closed).
 
 ---
 
@@ -267,17 +276,28 @@ Shape of the change, sized honestly at 1-2 days plus a full gate battery:
 
 ---
 
-## 5. Decision gates, restated
+## 5. Decision gates, restated — VERDICTS 2026-10-28 (see §11)
 
 0. **gate G0 (§3.0): a permanently-resident grid of thin float-gemv WGs must sustain >= 195 GB/s of
    packed bytes at a grid the device actually keeps resident, and beat the split path's wall by > 20 us
-   at the same nc** -> else lever 1b is CLOSED (the megakernel already lost this fight once).
-1. gate G1 (§2): a keepalive/wait strategy with stall rate < 1%, p99 < 200 us, cost < 2 us/job -> else
-   STOP and mark 1b closed.
+   at the same nc** -> **FAIL, both halves** (§11.2: 195 GB/s needs >= 256 of ~448-512 resident teams,
+   and 576 collapses 25x; §11.3: engine 84.4 us/job vs split 56.0 us/job, gate was < 36 us).
+   -> **lever 1b CLOSED.**
+1. gate G1 (§2): a keepalive/wait strategy with stall rate < 1%, p99 < 200 us, cost < 2 us/job ->
+   **FAIL** (§11.4): every host-store doorbell flavour loses 68-100% of pings to >5 ms stalls with a
+   resident poller and no keepalive cures it; the only 0-stall trigger is a per-job H2D command.
+   The §2a poll counter located the stall on the host->device leg (the engine polled the line ~1.2e7
+   times during one stalled ping without seeing the store).
 2. §3 gate: bit-identical results **and** child wall p50 ≤ 45 µs at nc≈2 **and** parent host ≤ 8 µs
-   → else STOP (the win is inside the noise floor, see §7).
+   → **not reached** (gates 0 and 1 failed; no engine prototype was built over the real chain).
 3. §4 gate: interleaved model A/B, 3 rounds, both placement layouts, decode ≥ +3% (noise floor ±3%)
    with prefill within ±1% → ship default-on; +1-3% → ship default-off with docs; ≤ +1% → close.
+   → **not reached.**
+
+Side results that ARE kept (§11.5): ULLS/direct submission is active and worth ~78 us per 4-command
+chain (A/B with `NEOReadDebugKeys=1 EnableDirectSubmission=0/1`); and there is a device-idle cliff
+(56 us warm -> 247 us after 20 ms idle -> 410 us after 100 ms) that decode's ~300 us cadence does not
+touch but every post-pause first call does.
 
 ## 6. Risks and the cheapest test for each
 
@@ -370,3 +390,189 @@ Sources: Khronos SYCL_Reference "Interaction with host code" (= SYCL 2020 §4.15
 the driver, which is a deployment cost worth naming); Intel ARK product page for Arc Pro B70;
 arXiv:2512.22219 (MPK), arXiv:2204.02064 (PERKS), arXiv:2606.23521 (Concordia); local
 `/boot/config-$(uname -r)` DRM_{I915,XE} timeout values; local aspect probe and PCIe bandwidth probe.
+---
+
+## 11. Gate results (2026-10-28) — G0 FAIL, G1 FAIL, lever 1b closed
+
+Lab: **`lab_resident_bw.cpp`** (`icpx -fsycl -O2 -ffp-contract=off -w lab_resident_bw.cpp -o
+lab_resident_bw`; arms `A` residency+bandwidth, `C` split-path control, `B` engine+doorbell;
+`LAB_SK=2` reproduces production's decode split-K geometry, `LAB_PER_PING`, `LAB_IDLE_US`,
+`LAB_KEEPALIVE_US`, `LAB_ENG_TRIG/FOUT/FAN`). Capability probe: **`l0_coop_probe.cpp`** (`-lze_loader`).
+All numbers below are min-of-3 windows after burn-in, in one process per arm, no profiler.
+
+### 11.1 G0a — cooperative launch: capability YES, and it would not have saved anything
+
+`l0_coop_probe`: loader exports both entry points; the driver advertises **no** cooperative
+*extension* among its 63, but command-queue **group 0 flags = COMPUTE COPY COOPERATIVE_KERNELS**
+(numQueues 1; group 1 = COPY). So §10's correction stands and NEO's grid-barrier path is at least
+addressable — but the functional probe (own SPIR-V module on the queue's own immediate list, per the
+`t36/t37` recipe in `archive/decode-command-latency.md`, which still carries the unresolved SLM
+binding blocker) was **not** run, because the engine design does not need a grid-wide barrier:
+§3.0's interior is per-expert clusters. What G0 actually turned on was a different failure.
+
+### 11.2 G0 criterion "sustained >= 195 GB/s from a permanently resident grid" — FAIL at any sane grid
+
+Sustained packed-read rate of N co-resident thin float-gemv teams (128 threads = one 128-column
+block, `GemvK<4,false>` inner loop, 2.458 MB = one nc=2 decode job per "job"):
+
+| teams | 16 | 32 | 64 | 96 | 128 | 160 | 192 | **256** | 320 | 448 | 576 | 704 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| GB/s | 20.7 | 41.1 | 79.9 | 100.8 | 144.1 | 157.7 | 177.6 | **207.3** | 214.8 | 215.1 | 8.5 | 4.4 |
+| us/job | 118 | 59.8 | 30.8 | 24.4 | 17.1 | 15.6 | 13.8 | 11.9 | 11.4 | 11.4 | 288 | 558 |
+| residency | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (ceiling)** | ✗ pipelined | ✗ |
+
+* **Co-residency ceiling ≈ 448-512 teams** (57-65 k threads; 1.75-2× the 256 CUs, i.e. the shape
+  fills the machine's thread slots). Tested two ways and they agree: team 0 waits for N entries
+  before opening a release gate, *and* every team independently samples `entered − exited`; at 576
+  teams only 516 are ever alive at once. Crossing the ceiling is not a gentle rolloff, it is a
+  **25× throughput collapse** (11.4 → 288 µs/job) — starvation, exactly the megakernel's epitaph,
+  now measured as a function of grid size instead of inferred.
+* **195 GB/s requires >= 256 resident teams** — 57% of the whole machine's capacity, permanently,
+  for an engine whose jobs need 60-120. The plan's premise that decode's small grid ("~20-40 WGs")
+  sits *below* the co-residency ceiling and is therefore safe from starvation is **true but
+  irrelevant**: the ceiling is not the binding constraint, the *bandwidth per team* is. A small
+  resident grid starves just as surely as a big one; it just starves quietly.
+
+### 11.3 G0 criterion "engine_wall < split_wall − 20 us" — FAIL, the engine is ~1.5× SLOWER
+
+Same bytes, same shapes, same process, production geometry (`LAB_SK=2`: gu 40 teams + down 80 teams
+= 120 units/job, and the split arm issues blob H2D + gu + down + D2H + one wait):
+
+| arm | µs/job | GB/s |
+|---|---|---|
+| **C — split path, 4 commands + wait** (control) | **56.0** | 43.9 |
+| A2 — same work as ONE launch of 120 teams + wait (no protocol at all) | 43.0 | 57.2 |
+| **B — engine, 128 teams, dma trigger, per_ping=1** | **84.4** | 29.1 |
+| B — engine, 64 teams | 111.5 | 22.0 |
+| B — engine, 128 teams, per_ping=4 (not available to real decode) | 44.1 | — |
+| B — engine, 128 teams, per_ping=16 (not available to real decode) | 25.3 | — |
+
+Needed: < 36 µs. Got: 84 µs at the only operating point decode can use — **one job per trigger**,
+because layer k+1's input is layer k's output, so `per_ping` > 1 is available to this lab and to a
+hypothetical batch-of-layers scheduler, **not** to autoregressive decode. (The `per_ping` rows are
+included precisely to show what the gate would have needed: the engine approaches the split path
+only when it is allowed to do work it cannot have.)
+
+Sub-budget at 128 teams, protocol-only (`LAB_NOWORK=1`): 18.9 µs per round trip — i.e. even the
+*pure* trigger+fanned-out-arrival+completion round trip is ~19 µs, close to the 27.2 µs of parent
+`sub` it exists to erase, before any of the work-rate penalty above.
+
+### 11.4 G1 — the doorbell: not a stall to be cured, a mechanism that does not exist here
+
+Protocol-only engine, 16 teams, broadcast fan-out, two-level fan-in, 60 pings, stall = > 5 ms:
+
+| host→device trigger | idle 0 | idle 100 ms | idle 100 ms + keepalive every 2 ms |
+|---|---|---|---|
+| atomic store to pinned USM | p50 14.8 µs, **68% stalled** | **no reply** | **no reply** |
+| non-temporal store (`_mm_stream_si32`+sfence) | p50 12.8 µs, **78% stalled** | **no reply** | **no reply** |
+| store + `clflush` | same class | **no reply** | **no reply** |
+| **4-byte H2D `memcpy` into device memory** | **p50 18.9 µs, 0% stalled** | **p50 38.1 µs, 0% stalled** | (n/a — already a command) |
+| `single_task` writing a device flag | no reply (broken staging; see note) | — | — |
+
+The §2a attribution counter settled the direction that §2 said was "the single most diagnostic number
+we lack": during a stalled ping **team 0's poll counter kept climbing ~12 million** — the engine was
+spinning on the doorbell line the whole time and *not seeing the host's store*. The stall is on the
+host→device leg, not the completion leg. Three consequences:
+
+1. **Rule 1 was half the story.** An atomic RMW fixes the *device's* side of the poll; it does not
+   make the *host's* store visible on a device that advertises neither
+   `usm_atomic_host_allocations` nor `usm_atomic_shared_allocations` (§10). Warm it works for a few
+   dozen pings, then loses the majority. §10's "the engine trigger must not be designed on top of
+   it" is now measured, not inferred — and no host-side store flavour (release / NT / clflush) and no
+   background traffic fixes it.
+2. **The only dependable trigger is a command.** Which means the design's ceiling is not "zero
+   submits per layer" but "**one** submit per layer instead of five": ~4 × 5.4 µs of parent time
+   ≈ 21 µs, against a 19 µs protocol round trip and a 28 µs work-rate penalty at 128 teams. Negative.
+3. **`lab_doorbell`'s 20-75% stall rate is explained** without invoking clock ramp *or* preemption:
+   the ping loop's own waits (up to its 100 ms ceiling, plus the between-mode setup) put the device
+   into the state below, and a store doorbell cannot recover from it.
+
+### 11.5 Independent finding: the idle cliff, and it is not decode's problem
+
+Same split-path chain, preceded by a host busy-wait of `gap` (min-of-3 p50, µs):
+
+| gap | 0 | 0.2 ms | 1 ms | 2 ms | 3 ms | 5 ms | 10 ms | 20 ms | 50 ms | 100 ms |
+|---|---|---|---|---|---|---|---|---|---|---|
+| default | 55.6 | 56.3 | 56.7 | 56.8 | 57.6 | 58.9 | 70.6 | **247** | **404** | **410** |
+| `EnableDirectSubmission=0` | 134 | 127 | 139 | — | — | — | 412 | 413 | 417 | 425 |
+
+* **ULLS/direct submission is ACTIVE and worth ~78 µs per 4-command chain** (55.6 vs 134 µs at gap 0)
+  — the doc's A/B test, run. Forced *on* equals default (96.6 vs 97.7), so there is nothing left on
+  that knob.
+* Beyond ~10 ms of device idleness the chain pays **+280-355 µs regardless of ULLS** (the cliff is
+  still there with direct submission off, so it is device-side idle, not just a dropped ULLS ring).
+  A keepalive drip (trivial `single_task` on a third queue every 0.5-2 ms) flattens it to ~91-105 µs
+  — i.e. it removes the cliff but lands 35-50 µs *above* the warm floor, so it is a cure for long
+  idles, not a win for busy ones.
+* **Decode's own inter-job gap is ~300 µs** (48 layer-jobs per 14.7 ms token), deep inside the flat
+  zone. So this cliff does **not** explain the fixed 57.6 µs/forward, and closing lever 1b does not
+  make it go away. Where it *does* bite: the first B70 job after any pause > ~10 ms — a long prompt's
+  prefill→decode transition, a user think-time gap, or a stream that stalls in python. Worth its own
+  cheap follow-up (see §12.3), separate from this plan.
+
+### 11.6 Two lab traps found the results above (both now documented in NOTES)
+
+* `q.copy(a, b)` is `(Src, Dest)` — the P3/P4/P5 trap, hit *again* in a new lab: my residency readback
+  wrote host zeros into the device counters, so every grid size reported "NON-RESIDENT 0/N" while the
+  bandwidth numbers next to it were perfectly good. A silently inverted readback is the most dangerous
+  kind of instrument error because it agrees with the hypothesis you were afraid of.
+* A poll-**count** bound is not a time bound here. `lab_doorbell` assumed ~1.5-2 µs per sysmem poll;
+  measured on this box it is **~60 ns (1.7e7 polls/s)**. So the plan's "SPIN_MAX_SYS in the 1-3 s
+  range" means **~2e7 polls**, and the first cut's 1e6 was 60 ms — the engine was killing itself mid
+  run and I read that as "the doorbell stalled". Also: the residency test itself must not violate rule
+  2 — the first version had N team leaders *RMW-polling* one ticket line, which both hung for minutes
+  and depressed the throughput it was measuring.
+
+---
+
+## 12. Closure, restart conditions, and the one loose end worth chasing
+
+### 12.1 Closed
+
+**Lever 1b (persistent B70 worker) is CLOSED.** Recorded against the megakernel post-mortem's
+restart condition (b) exactly as §3.0 instructed. Three independent reasons, any one sufficient:
+
+1. **Feeding itself needs the machine.** >= 195 GB/s from this gemv shape requires >= 256 permanently
+   resident 128-thread teams; the co-residency ceiling is ~448-512 and 576 already collapses
+   throughput 25×. An engine sized to feed a decode job (60-120 teams) delivers 80-145 GB/s.
+2. **It loses on wall clock anyway.** 84.4 µs/job (engine, best protocol, reliable trigger) vs
+   56.0 µs/job (split path), same bytes/shapes/process. The gate was "beat it by 20 µs".
+3. **The trigger costs a command.** The only mechanism that completed every ping is an H2D copy —
+   one submit per job, which is ~4×5.4 µs of the 27.2 µs prize handed straight back, on top of a
+   ~19 µs round trip. And the doorbell premise itself (§1-§4) is not supported by this device's
+   advertised capabilities (§10 row 5), now confirmed behaviourally: a resident poller stops seeing
+   host stores, with the device spinning on the line at 1.7e7/s and never observing the update.
+
+What survives of the plan's reasoning: the prize arithmetic (§1) was real, and the *reason* it is
+unreachable is not the one §1 feared ("no dependable trigger" was right, but the mechanism is
+host→device store visibility, not clock ramp, not preemption, and not barrier cost).
+
+### 12.2 Restart conditions (all three, or nothing)
+
+Do not reopen 1b unless **all** of these are true, because each has now been measured to be
+necessary:
+
+1. A **contractual** host→device trigger with no per-job command: either a driver/runtime that
+   advertises `usm_atomic_shared_allocations` (or documents host-store→device-poll coherence for
+   pinned USM), or an imported external semaphore / `zeCommandListAppendMemoryWait` path that parks
+   without burning an enqueue. Re-test with `lab_resident_bw B` (`LAB_ENG_TRIG=0..4`): the bar is 0
+   stalls in 300 pings at idle 0 **and** idle 100 ms.
+2. Evidence that the **work inside** a persistent grid is not penalised: `lab_resident_bw B 2 …` with
+   `LAB_PER_PING=1` must beat `./lab_resident_bw C` (which prints its own A2 "work-only one launch"
+   reference). Until the engine is faster than 43-56 µs at 120-128 teams, there is nothing to integrate.
+3. A scheduler that can legitimately keep >= 256 teams busy *without* stealing them from prefill —
+   which is a different architecture (e.g. resident-throughput designs like MPK's SM-level task graph)
+   and would be a new plan, not a revival of this one.
+
+### 12.3 The loose end worth its own hour: the >10 ms idle cliff
+
+§11.5 is a fresh, reproducible platform fact: the same 4-command chain costs 56 µs warm and 247-410 µs
+after >= 20 ms of B70 idleness, and a keepalive drip flattens it to ~91-105 µs. Decode's own cadence
+(~300 µs between jobs) is in the flat zone, so this is **not** the decode fixed cost — but every
+"first B70 call after a pause" pays it: prefill→decode transitions, the first token after streaming
+input arrives, `bench_b70_py.py`-style microbenchmarks that sleep, and any interactive use. Cheapest
+follow-ups, in order: (i) confirm it in the model — timestamp-to-first-B70-job after a deliberate
+pause, with the existing ALLOCLOG phase fields; (ii) decide whether the plugin should keep the B70
+warm during input streaming (a `single_task` every ~2 ms while the parent is tokenising/prefilling,
+cost ~0.05% duty); (iii) check whether it survives `xe` sysfs frequency pinning / `enable_dc=0`
+(requires root — note in README rather than shipping).
