@@ -1,0 +1,86 @@
+============================================================
+Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 | bits 2.66 | codebook mul1 | head_bits 6 | mtp_bits 2.5
+  tile w= 40  K= 2.5 bpw  tensors=  62976  bytes=  30.03 GiB
+        layers.N.mlp.experts.N.down_proj
+        layers.N.mlp.experts.N.gate_proj
+        layers.N.mlp.experts.N.up_proj
+        mtp.layers.N.mlp.experts.N.down_proj
+        mtp.layers.N.mlp.experts.N.gate_proj
+        mtp.layers.N.mlp.experts.N.up_proj
+  tile w= 48  K=   3 bpw  tensors=  12288  bytes=   7.03 GiB
+        layers.N.mlp.experts.N.down_proj
+        layers.N.mlp.experts.N.gate_proj
+        layers.N.mlp.experts.N.up_proj
+  tile w= 64  K=   4 bpw  tensors=      2  bytes=   0.01 GiB
+        mtp.fc_embedding
+        mtp.fc_hidden
+  tile w= 96  K=   6 bpw  tensors=    485  bytes=   2.84 GiB
+        layers.N.linear_attn.in_proj_qkv
+        layers.N.linear_attn.in_proj_z
+        layers.N.linear_attn.out_proj
+        layers.N.mlp.shared_expert.down_proj
+        layers.N.mlp.shared_expert.gate_proj
+        layers.N.mlp.shared_expert.up_proj
+        layers.N.self_attn.indexer.index_qk_proj
+        layers.N.self_attn.k_proj
+        layers.N.self_attn.o_proj
+        layers.N.self_attn.q_proj
+        layers.N.self_attn.v_proj
+        lm_head
+        mtp.layers.N.mlp.shared_expert.down_proj
+        mtp.layers.N.mlp.shared_expert.gate_proj
+============================================================
+Qwen3.5-35B-A3B-3bpw-hq2 | bits 3.17 | codebook mul1 | head_bits 6 | mtp_bits 4
+  tile w= 48  K=   3 bpw  tensors=  30720  bytes=  11.25 GiB
+        layers.N.mlp.experts.N.down_proj
+        layers.N.mlp.experts.N.gate_proj
+        layers.N.mlp.experts.N.up_proj
+  tile w= 64  K=   4 bpw  tensors=    772  bytes=   0.39 GiB
+        mtp.layers.N.mlp.experts.N.down_proj
+        mtp.layers.N.mlp.experts.N.gate_proj
+        mtp.layers.N.mlp.experts.N.up_proj
+        mtp.layers.N.self_attn.k_proj
+        mtp.layers.N.self_attn.o_proj
+        mtp.layers.N.self_attn.q_proj
+        mtp.layers.N.self_attn.v_proj
+  tile w= 96  K=   6 bpw  tensors=    166  bytes=   0.67 GiB
+        lm_head
+        model.visual.blocks.0.attn.k_proj
+        model.visual.blocks.0.attn.proj
+        model.visual.blocks.0.attn.q_proj
+        model.visual.blocks.0.attn.v_proj
+        model.visual.blocks.0.mlp.linear_fc1
+        model.visual.blocks.0.mlp.linear_fc2
+        model.visual.blocks.1.attn.k_proj
+        model.visual.blocks.1.attn.proj
+        model.visual.blocks.1.attn.q_proj
+        model.visual.blocks.1.attn.v_proj
+        model.visual.blocks.1.mlp.linear_fc1
+        model.visual.blocks.1.mlp.linear_fc2
+        mtp.fc
+  tile w=112  K=   7 bpw  tensors=    250  bytes=   1.15 GiB
+        layers.N.linear_attn.in_proj_qkv
+        layers.N.linear_attn.in_proj_z
+        layers.N.linear_attn.out_proj
+        layers.N.mlp.shared_expert.down_proj
+        layers.N.mlp.shared_expert.gate_proj
+        layers.N.mlp.shared_expert.up_proj
+        layers.N.self_attn.k_proj
+        layers.N.self_attn.o_proj
+        layers.N.self_attn.q_proj
+        layers.N.self_attn.v_proj
+  tile w=128  K=   8 bpw  tensors=      3  bytes=   0.00 GiB
+        mtp.layers.N.mlp.shared_expert.down_proj
+        mtp.layers.N.mlp.shared_expert.gate_proj
+        mtp.layers.N.mlp.shared_expert.up_proj
+============================================================
+Qwen3-0.6B-exl3@8.0bpw_H8 | bits 8.0 | codebook None | head_bits 8 | mtp_bits None
+  tile w=128  K=   8 bpw  tensors=    197  bytes=   0.56 GiB
+        lm_head
+        model.layers.N.mlp.down_proj
+        model.layers.N.mlp.gate_proj
+        model.layers.N.mlp.up_proj
+        model.layers.N.self_attn.k_proj
+        model.layers.N.self_attn.o_proj
+        model.layers.N.self_attn.q_proj
+        model.layers.N.self_attn.v_proj
