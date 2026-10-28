@@ -1,13 +1,14 @@
 # PLAN: persistent B70 worker (kill the per-layer command round trip)
 
 Status: **CLOSED by measurement on 2026-10-28 - see §11 for the numbers and §12 for what would
-reopen it.** Gate G0 failed on both of its criteria (a resident grid needs ~256 of the machine's
-~450 thin-WG slots to reach 195 GB/s, and at production's own decode geometry the engine measured
-**84 us/job against the split path's 56 us/job** - it had to beat 36 us). Gate G1 also failed: the
-pinned-USM doorbell - the whole premise - is dependable for only a few pings; the sole trigger that
-completed 60/60 pings with zero stalls was a 4-byte H2D **command** per job, i.e. the cost the
-design exists to remove. Kept above as the reasoning record, because §1-§4 are still the correct
-statement of the prize and of what was already ruled out.
+reopen it.** Gate G0 failed on both of its criteria: a resident thin-gemv grid needs ~256 of the
+machine's ~448-512 team slots to reach 195 GB/s (§11.2), and at the geometry the shipped plugin
+actually launches the engine measured **75.6-97.1 µs/job against the split path's 28.9 µs/job** — it
+had to beat 9 µs (§11.3a). Gate G1 also failed: the pinned-USM doorbell — the whole premise — is
+dependable for only a few pings; the sole trigger that completed every ping was a 4-byte H2D **command**
+per job, i.e. the cost the design exists to remove. Along the way §3.1's premise that a decode job
+needs "~20-40 WGs" was found to be wrong by 5× (it is 200). Kept above as the reasoning record,
+because §1-§4 are still the correct statement of the prize and of what was already ruled out.
 
 Original status: *not started.* Run **gate G0 (§3.0) first** - it is a half-day of lab work that can
 kill the whole idea cheaply, and a measured predecessor already lost this fight once (megakernel:
@@ -281,7 +282,7 @@ Shape of the change, sized honestly at 1-2 days plus a full gate battery:
 0. **gate G0 (§3.0): a permanently-resident grid of thin float-gemv WGs must sustain >= 195 GB/s of
    packed bytes at a grid the device actually keeps resident, and beat the split path's wall by > 20 us
    at the same nc** -> **FAIL, both halves** (§11.2: 195 GB/s needs >= 256 of ~448-512 resident teams,
-   and 576 collapses 25x; §11.3: engine 84.4 us/job vs split 56.0 us/job, gate was < 36 us).
+   and 576 collapses 25x; §11.3: engine 84-92 us/job vs split 56.0 us/job, gate was < 36 us).
    -> **lever 1b CLOSED.**
 1. gate G1 (§2): a keepalive/wait strategy with stall rate < 1%, p99 < 200 us, cost < 2 us/job ->
    **FAIL** (§11.4): every host-store doorbell flavour loses 68-100% of pings to >5 ms stalls with a
@@ -337,7 +338,7 @@ Command graphs (both axes), handler-free enqueue / `raw_kernel_arg`, runtime-env
 its premise ("avoid the runtime's per-action cost") is now measured to be worth ≤ 0.5 µs/action over
 the handler-free path, i.e. the commit itself is the cost.
 
-## 9. First session, concretely
+## 9. First session, concretely — DONE 2026-10-28, results in §11, closure in §12
 
 1. `git pull`; read NOTES levers 1a/1b/1c, this file, **and the megakernel post-mortem in
    `archive/decode-command-latency.md`**; rebuild `lab_doorbell` (`icpx -fsycl -O2 -w
@@ -398,7 +399,9 @@ Lab: **`lab_resident_bw.cpp`** (`icpx -fsycl -O2 -ffp-contract=off -w lab_reside
 lab_resident_bw`; arms `A` residency+bandwidth, `C` split-path control, `B` engine+doorbell;
 `LAB_SK=2` reproduces production's decode split-K geometry, `LAB_PER_PING`, `LAB_IDLE_US`,
 `LAB_KEEPALIVE_US`, `LAB_ENG_TRIG/FOUT/FAN`). Capability probe: **`l0_coop_probe.cpp`** (`-lze_loader`).
-All numbers below are min-of-3 windows after burn-in, in one process per arm, no profiler.
+Min-of-3 windows after burn-in unless a row says otherwise (the §11.4 trigger matrix is a single
+1-window pass of 60 pings per cell, and its reruns vary ~10%); every arm prints its own `n`, so a
+truncated run cannot masquerade as a full one. No profiler was attached to any number here.
 
 ### 11.1 G0a — cooperative launch: capability YES, and it would not have saved anything
 
@@ -421,41 +424,79 @@ block, `GemvK<4,false>` inner loop, 2.458 MB = one nc=2 decode job per "job"):
 | us/job | 118 | 59.8 | 30.8 | 24.4 | 17.1 | 15.6 | 13.8 | 11.9 | 11.4 | 11.4 | 288 | 558 |
 | residency | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (ceiling)** | ✗ pipelined | ✗ |
 
-* **Co-residency ceiling ≈ 448-512 teams** (57-65 k threads; 1.75-2× the 256 CUs, i.e. the shape
-  fills the machine's thread slots). Tested two ways and they agree: team 0 waits for N entries
-  before opening a release gate, *and* every team independently samples `entered − exited`; at 576
-  teams only 516 are ever alive at once. Crossing the ceiling is not a gentle rolloff, it is a
-  **25× throughput collapse** (11.4 → 288 µs/job) — starvation, exactly the megakernel's epitaph,
-  now measured as a function of grid size instead of inferred.
+* **Co-residency ceiling ≈ 448 verified-simultaneous teams, max observed 516-532** (57-65 k threads;
+  ~2× the 256 CUs, i.e. the shape fills the machine's thread slots). Tested two ways and they agree:
+  team 0 waits for N entries before opening a release gate, *and* every team independently samples
+  `entered − exited`; at 576 teams only 516-532 are ever alive at once. Crossing the ceiling is not a
+  gentle rolloff, it is a **25× throughput collapse** (11.4 → 288 µs/job) — starvation, exactly the
+  megakernel's epitaph, now measured as a function of grid size instead of inferred.
 * **195 GB/s requires >= 256 resident teams** — 57% of the whole machine's capacity, permanently,
   for an engine whose jobs need 60-120. The plan's premise that decode's small grid ("~20-40 WGs")
   sits *below* the co-residency ceiling and is therefore safe from starvation is **true but
   irrelevant**: the ceiling is not the binding constraint, the *bandwidth per team* is. A small
   resident grid starves just as surely as a big one; it just starves quietly.
+* **Why the model nevertheless shows 195 GB/s marginal, and why that is the kill shot rather than a
+  contradiction.** Production does not read one expert with 60 units: the float decode gemv is
+  split-K (`NSL_GU` is 2 by C-ABI tune and 7 by bench tune, times `nm`=2, times `I/ncwg`=5, times
+  `nc`=2 ⇒ ~40-140 teams for gu, ~80 for down). Read that way, today's marginal rate is *consistent
+  with* this lab's 207-215 GB/s point at 256-448 teams — i.e. the split path already occupies most of
+  the machine's team slots **during the job** and gives them back between jobs. A resident engine has
+  to hold them **forever** to get the same rate, which is exactly the §4 resource contract it cannot
+  satisfy alongside prefill. (Inference from the shipped geometry, not a direct measurement: the
+  number to check if anyone disputes it is the decode gu/down grid printed by `bench_layer --v`.)
 
-### 11.3 G0 criterion "engine_wall < split_wall − 20 us" — FAIL, the engine is ~1.5× SLOWER
+### 11.3 G0 criterion "engine_wall < split_wall − 20 us" — FAIL at every geometry tried
 
-Same bytes, same shapes, same process, production geometry (`LAB_SK=2`: gu 40 teams + down 80 teams
-= 120 units/job, and the split arm issues blob H2D + gu + down + D2H + one wait):
+Same bytes, same shapes, same process. The split arm issues blob H2D + gu launch + down launch + D2H
++ one wait (4 commands — production issues 5-6, so this control is *faster* than production's, which
+raises the bar rather than lowering it):
 
 | arm | µs/job | GB/s |
 |---|---|---|
 | **C — split path, 4 commands + wait** (control) | **56.0** | 43.9 |
 | A2 — same work as ONE launch of 120 teams + wait (no protocol at all) | 43.0 | 57.2 |
-| **B — engine, 128 teams, dma trigger, per_ping=1** | **84.4** | 29.1 |
+| **B — engine, 128 teams, dma trigger, per_ping=1** | **84.4 / 92.3** (two runs) | 29.1 |
 | B — engine, 64 teams | 111.5 | 22.0 |
 | B — engine, 128 teams, per_ping=4 (not available to real decode) | 44.1 | — |
 | B — engine, 128 teams, per_ping=16 (not available to real decode) | 25.3 | — |
 
-Needed: < 36 µs. Got: 84 µs at the only operating point decode can use — **one job per trigger**,
+(That table is `LAB_SK=2`, i.e. one k-slice per 128-column block doubled. §11.3a repeats it at the
+geometry the shipped plugin actually launches, which is the number to quote.)
+
+#### 11.3a Correction to §3.1's premise, and the measurement that matters
+
+**A decode job is not "~20-40 WGs".** `moe_sycl.cpp` auto-scales `NSL_GU` with
+`while (w < 8 && base*w*128 < 80000) ++w` where `base = nc*nm*(I/128)` = 20 at nc=2 — so it saturates
+at **8**, and coop-D pins `NSL_D = 1`. Therefore gu launches `nc*nm*(I/128)*NSL_GU = **160**` units and
+down `nc*(H/128)*NSL_D = **40**`: **200 128-thread units per decode job**, five times the grid §3.1
+assumed. `LAB_SK=8 LAB_SK_DN=1` reproduces that exactly, and the same three arms then measure:
+
+| arm (shipped geometry, 200 units/job, 2.458 MB) | µs/job | GB/s | tail |
+|---|---|---|---|
+| **C — split path (4 commands + wait)** | **28.9** | 85 | p99 49.9, n=200 |
+| A2 — same work, ONE launch of 200 teams + wait | 19.4 | 127 | engine's own lower bound |
+| **B — engine, 128 teams** (under-sized: 128 < 200 units) | **75.6** | 33 | 0 stalls, p99 107 |
+| **B — engine, 200 teams** (the grid its work needs) | **97.1** | 25 | p99 **3424**, 4.8% >5 ms |
+| B — engine, 256 teams | — | — | **never answered: 100% stalled** |
+
+Needed to pass: **< 9 µs**. Got 75.6 µs at a grid *smaller than the job's own unit count*, and at the
+correct grid the engine is 3.4× the split path with a 3.4 ms p99 — it does not just run slower there,
+it stops being dependable, because the fan-in and the work now compete on the same 200 teams. Both
+facts point the same way: the larger the grid the engine needs to be worth building, the worse the
+engine gets.
+
+Needed: < 36 µs even at the softer `LAB_SK=2` geometry. Got: 84 µs at the only operating point decode
+can use — **one job per trigger**,
 because layer k+1's input is layer k's output, so `per_ping` > 1 is available to this lab and to a
 hypothetical batch-of-layers scheduler, **not** to autoregressive decode. (The `per_ping` rows are
 included precisely to show what the gate would have needed: the engine approaches the split path
 only when it is allowed to do work it cannot have.)
 
-Sub-budget at 128 teams, protocol-only (`LAB_NOWORK=1`): 18.9 µs per round trip — i.e. even the
-*pure* trigger+fanned-out-arrival+completion round trip is ~19 µs, close to the 27.2 µs of parent
-`sub` it exists to erase, before any of the work-rate penalty above.
+Sub-budget, protocol-only (`LAB_NOWORK=1`, dma trigger, 0 stalls in 100 pings at every grid size):
+**21 µs per round trip at 16 teams, 36.1 µs at 128 teams.** So at the grid an engine would actually
+need, the *trigger + fanned-out arrival + completion alone* already costs more than the 27.2 µs of
+parent `sub` it exists to erase — before any work is done inside it, and that is on top of the
+work-rate penalty above.
 
 ### 11.4 G1 — the doorbell: not a stall to be cured, a mechanism that does not exist here
 
@@ -466,8 +507,14 @@ Protocol-only engine, 16 teams, broadcast fan-out, two-level fan-in, 60 pings, s
 | atomic store to pinned USM | p50 14.8 µs, **68% stalled** | **no reply** | **no reply** |
 | non-temporal store (`_mm_stream_si32`+sfence) | p50 12.8 µs, **78% stalled** | **no reply** | **no reply** |
 | store + `clflush` | same class | **no reply** | **no reply** |
-| **4-byte H2D `memcpy` into device memory** | **p50 18.9 µs, 0% stalled** | **p50 38.1 µs, 0% stalled** | (n/a — already a command) |
-| `single_task` writing a device flag | no reply (broken staging; see note) | — | — |
+| **4-byte H2D `memcpy` into device memory** | **p50 18.9 µs (21.0 on a min-of-3 rerun), 0% stalled** | **p50 38.1 µs, 0% stalled** | (n/a — already a command) |
+| `single_task` writing a device flag | no reply — **not a fair test, see note** | — | — |
+
+Note on the `task` row: the trigger kernel read the job id from *sysmem* (`mb->tg_seq`), so it
+inherits the store-visibility failure above instead of testing the mechanism. A fair version would
+stage the id in device memory first (i.e. be an H2D + a kernel, strictly more expensive than the dma
+row) — not worth running, since one command per job is already the point at which the design stops
+paying.
 
 The §2a attribution counter settled the direction that §2 said was "the single most diagnostic number
 we lack": during a stalled ping **team 0's poll counter kept climbing ~12 million** — the engine was
@@ -532,11 +579,17 @@ Same split-path chain, preceded by a host busy-wait of `gap` (min-of-3 p50, µs)
 **Lever 1b (persistent B70 worker) is CLOSED.** Recorded against the megakernel post-mortem's
 restart condition (b) exactly as §3.0 instructed. Three independent reasons, any one sufficient:
 
-1. **Feeding itself needs the machine.** >= 195 GB/s from this gemv shape requires >= 256 permanently
-   resident 128-thread teams; the co-residency ceiling is ~448-512 and 576 already collapses
-   throughput 25×. An engine sized to feed a decode job (60-120 teams) delivers 80-145 GB/s.
-2. **It loses on wall clock anyway.** 84.4 µs/job (engine, best protocol, reliable trigger) vs
-   56.0 µs/job (split path), same bytes/shapes/process. The gate was "beat it by 20 µs".
+1. **Feeding itself needs half the machine, permanently.** A decode job is 200 128-thread units
+   (§11.3a — `NSL_GU` saturates at 8), and this gemv shape only reaches today's 195 GB/s marginal rate
+   at >= 256 co-resident teams; the co-residency ceiling is ~448-512 and 576 collapses throughput 25×.
+   So the engine must hold ~half the machine's thread slots **forever** to match a rate the split path
+   buys **per job** - and §4's "keep the engine small and let prefill have the rest" is the option that
+   does not feed itself.
+2. **It loses on wall clock anyway, at every geometry.** Shipped geometry: **75.6 µs/job** (engine, at
+   an under-sized grid) and **97.1 µs/job** (at the 200-team grid its work needs, p99 3.4 ms) against
+   **28.9 µs/job** for the split path — where the gate was "beat it by 20 µs", i.e. < 9 µs. At the
+   softer `LAB_SK=2` geometry: 84-92 vs 56.0. Both protocols, both fan-out styles, and the only
+   dependable trigger were used in the engine's favour.
 3. **The trigger costs a command.** The only mechanism that completed every ping is an H2D copy —
    one submit per job, which is ~4×5.4 µs of the 27.2 µs prize handed straight back, on top of a
    ~19 µs round trip. And the doorbell premise itself (§1-§4) is not supported by this device's

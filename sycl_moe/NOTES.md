@@ -424,14 +424,18 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
     C = split-path control, a "same work, one launch, no protocol" reference, and an idle-gap scan;
     B = engine with 5 trigger mechanisms × 3 fan-out styles × 2 fan-in styles, min-of-3 windows, plus
     the §2a device poll counter). Four numbers ended it:
-    * **feeding itself needs the machine:** >= 195 GB/s (the model's own marginal rate) requires >= 256
-      permanently co-resident 128-thread teams; the co-residency ceiling for this shape is ~448–512 and
-      576 already collapses throughput 25× (11.4 → 288 µs/job). A decode-sized grid (60–128 teams)
-      sustains 80–145 GB/s.
-    * **it loses on wall clock anyway:** engine **84.4 µs/job** vs split path **56.0 µs/job** at
-      production's split-K geometry (gu 40 + down 80 teams, same bytes, same process); the gate was
-      "beat 36 µs". Batching jobs per trigger reaches 25 µs/job, but autoregressive decode cannot
-      batch — layer k+1's input is layer k's output.
+    * **feeding itself needs half the machine, permanently:** a decode job is **200** 128-thread units,
+      not the 20-40 this plan assumed (`NSL_GU` auto-saturates at 8: `nc*nm*(I/128)=20`,
+      `while (w<8 && base*w*128 < 80000) ++w`; coop-D pins `NSL_D=1`), and this gemv shape only reaches
+      the model's own 195 GB/s marginal rate at >= 256 co-resident teams. Co-residency ceiling for the
+      shape: ~448-512; at 576 throughput collapses 25× (11.4 → 288 µs/job). The split path buys that
+      occupancy per job; the engine has to hold it forever.
+    * **it loses on wall clock anyway:** at the shipped geometry, engine **75.6 µs/job** on an
+      under-sized grid and **97.1 µs/job** at the 200-team grid its work actually needs (p99 3.4 ms,
+      4.8% stalled; at 256 teams it never answered at all) vs the split path's **28.9 µs/job** - and the
+      gate was "beat it by 20 µs", i.e. < 9. Softer geometries (`LAB_SK=1/2`) give 127-190 / 84-92 vs
+      96 / 56 - the engine loses by 1.5-3.4× whichever way the work is sliced. Batching jobs per trigger
+      reaches 25 µs/job, but autoregressive decode cannot batch: layer k+1's input is layer k's output.
     * **the only dependable doorbell is a command:** a per-job 4-byte H2D `memcpy` into device memory
       gave 0 stalls / 60 pings (p50 18.9 µs warm, 38.1 µs after 100 ms idle). Every host-store flavour
       (release atomic, `_mm_stream_si32`+sfence, store+clflush) lost 68–100% of pings to >5 ms stalls
@@ -440,8 +444,10 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
     * **the stalled leg is host→device, and it is visibility not latency:** during a stalled ping,
       team 0's own counter showed ~1.2e7 polls of the doorbell line *without observing the store*.
       That is what using an unadvertised operation looks like (no `usm_atomic_host_allocations` /
-      `usm_atomic_shared_allocations`, plan §10) - now measured, and it finally explains
-      `lab_doorbell`'s "20-75% of pings exceed 20 ms" without clock ramp or preemption.
+      `usm_atomic_shared_allocations`, plan §10) - now measured. It is a sufficient explanation for
+      `lab_doorbell`'s "20-75% of pings exceed 20 ms", and it removes the need for the clock-ramp and
+      preemption stories there (both predicted a *slow* answer; what the counter shows is an answer
+      that never arrives because the store is not observed).
     Still true from the earlier investigation, kept so nobody re-derives it: the 1-WG round-trip floor
     really is microseconds; `aspect::ext_oneapi_device_wait` is NOT a device-thread park (it backs the
     host-side `sycl::device::ext_oneapi_wait()`, `device.hpp:392`); and this device's L0 queue group 0
@@ -588,8 +594,8 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
 Dead ends — do not re-litigate (evidence in `archive/kernel-microopt.md`, `archive/int8-dpas-tier.md`,
 `archive/decode-command-latency.md`, and `PLAN_PERSISTENT_WORKER.md` §11-§12): **a persistent/resident
 worker kernel fed by a host doorbell (lever 1b)** — resident thin-gemv grid needs ≥256 of ~448-512
-team slots to reach 195 GB/s, measures 84.4 µs/job vs the split path's 56.0 µs/job at production
-geometry, and its doorbell is not dependable in any host-store flavour;
+team slots to reach 195 GB/s, measures 75.6-97.1 µs/job vs the split path's 28.9 µs/job at the shipped
+split-K geometry, and its doorbell is not dependable in any host-store flavour;
 `archive/decode-command-latency.md`): dp4a/esimd in generic kernels, `dot_acc` ext, col-major
 joint_matrix B, coalesced word loads + `select_from_group`, megakernel-with-grid-barriers, flat
 bytesum tree, `-510` folding, large GRF, annotated_ptr hints, 128-lane WGs without ring,

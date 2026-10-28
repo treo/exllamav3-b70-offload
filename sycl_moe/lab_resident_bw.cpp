@@ -141,10 +141,11 @@ static inline void gemv_unit(const uint32_t* wp, const float* xr, float* outp,
 // SK (LAB_SK) splits each unit's k-range into SK independent units, which is what production does
 // (its decode gu grid is nc*nm*(I/ncwg) with nm=2, i.e. split-K 2, so 40 teams for nc=2 and 80 for
 // down - twice this lab's default). Without SK the lab under-states production's own parallelism.
-static unsigned g_sk = 1;                    // LAB_SK, copied into every functor (.sk)
-static inline void do_unit(int u, int ks, unsigned sk,
+static unsigned g_sk = 1, g_skd = 1;         // LAB_SK (gate/up), LAB_SK_DN (down); shipped = 8 and 1
+static inline void do_unit(int u, int ks, unsigned sku, unsigned skd,
                           const uint32_t* gate, const uint32_t* up, const uint32_t* down,
                           const float* xgu, const float* xdn, float* out, int e, int tid) {
+    const unsigned sk = (u < 2 * U_GU) ? sku : skd;
     const uint32_t* src; const float* xr; size_t tiles_k; int TNcols, blk;
     if (u < U_GU)          { src = gate; xr = xgu + (size_t)e * HID; tiles_k = HID / 16; TNcols = INT; blk = u; }
     else if (u < 2 * U_GU) { src = up;   xr = xgu + (size_t)e * HID; tiles_k = HID / 16; TNcols = INT; blk = u - U_GU; }
@@ -164,10 +165,47 @@ static inline void do_unit(int u, int ks, unsigned sk,
 
 // Flat unit index q -> (unit within expert, k slice). `span` is U_PER_E (all units) or 2*U_GU (gu
 // launch) or U_DN (down launch).
+static inline void do_unit(int u, int ks, unsigned sk,
+                          const uint32_t* gate, const uint32_t* up, const uint32_t* down,
+                          const float* xgu, const float* xdn, float* out, int e, int tid) {
+    do_unit(u, ks, sk, sk, gate, up, down, xgu, xdn, out, e, tid);
+}
 static inline void unit_map(unsigned span, size_t q, unsigned sk, int& u, int& ks) {
     ks = (int)(q % sk);
-    const size_t v = q / sk;                         // v in [0, nc*span)
+    const size_t v = q / sk;
     u = (int)(v % span);
+}
+static inline unsigned upe(unsigned sku, unsigned skd) { return 2 * U_GU * sku + U_DN * skd; }
+// q indexes [0, nc*upe); returns (unit-within-expert u, k slice ks) and the expert slot.
+static inline void unit_map(size_t q, unsigned sku, unsigned skd, int& u, int& ks, int& slot) {
+    const unsigned gub = 2 * U_GU * sku;
+    const unsigned w = (unsigned)(q % upe(sku, skd));
+    slot = (int)(q / upe(sku, skd));
+    if (w < gub) {
+        const unsigned half = w / (U_GU * sku), rem = w % (U_GU * sku);
+        u = (int)(half * U_GU + rem / sku);
+        ks = (int)(rem % sku);
+    } else {
+        const unsigned w2 = w - gub;
+        u = (int)(2 * U_GU + w2 / skd);
+        ks = (int)(w2 % skd);
+    }
+}
+// phase-restricted map: span==0 -> gu units only, span==1 -> down units only
+static inline void unit_map_ph(size_t q, unsigned sku, unsigned skd, int phase, int& u, int& ks,
+                               int& slot) {
+    if (phase == 0) {
+        const unsigned per = 2 * U_GU * sku;
+        const unsigned w = (unsigned)(q % per);
+        slot = (int)(q / per);
+        const unsigned half = w / (U_GU * sku), rem = w % (U_GU * sku);
+        u = (int)(half * U_GU + rem / sku); ks = (int)(rem % sku);
+    } else {
+        const unsigned per = U_DN * skd;
+        const unsigned w = (unsigned)(q % per);
+        slot = (int)(q / per);
+        u = (int)(2 * U_GU + w / skd); ks = (int)(w % skd);
+    }
 }
 
 // ---------------------------------------------------------------- counters layout (device)
@@ -261,7 +299,7 @@ struct ResidentLoop {
     unsigned* ctr;
     int E, nc, jobs;
     size_t units_job;
-    unsigned nteams, sk;
+    unsigned nteams, sk, skd;
     unsigned deadproto;          // 1 = compile the engine's protocol in but never run it
     Mailbox* mb;                 // only used by the dead-protocol path
 
@@ -306,11 +344,10 @@ struct ResidentLoop {
             }
             const size_t jobid = u / units_job;
             const size_t ui = u % units_job;
-            int uu, ks;
-            unit_map(U_PER_E, ui, sk, uu, ks);
-            const int sl = (int)(ui / sk / U_PER_E);
+            int uu, ks, sl;
+            unit_map(ui, sk, skd, uu, ks, sl);
             const int e = (int)((jobid * (unsigned)nc + (unsigned)sl) % (unsigned)E);
-            do_unit(uu, ks, sk, gate, up, down, xgu, xdn, out, e, tid);
+            do_unit(uu, ks, sk, skd, gate, up, down, xgu, xdn, out, e, tid);
         }
         if (tid == 0) {
             // Everyone is still inside the kernel here (nobody exits before the gate), so at this
@@ -331,7 +368,7 @@ struct SplitUnits {
     float* out;
     unsigned* ctr;
     int E, nc, phase, job;
-    unsigned sk;
+    unsigned sk, skd;
     void operator()(sycl::nd_item<1> it) const {
         const int tid = (int)it.get_local_id(0);
         const unsigned nt = (unsigned)it.get_group(0);
@@ -366,7 +403,7 @@ struct Engine {
     float* out;
     int E, nc;
     size_t units_job;
-    unsigned nteams, sk;
+    unsigned nteams, sk, skd;
     unsigned group;            // fan-in group size (1 = flat single counter, 8 = two-level)
     unsigned fout;             // fan-OUT: 0 = team 0 writes every slot, 1 = two-level tree
     unsigned trigger;          // TRIG_* above
@@ -480,12 +517,11 @@ struct Engine {
             for (size_t uu = nt; uu < units_job * per_ping; uu += nteams) {
                 const size_t sub = uu / units_job;             // which decode job of this ping
                 const size_t qi = uu % units_job;
-                int u, ks;
-                unit_map(U_PER_E, qi, sk, u, ks);
-                const int sl = (int)(qi / sk / U_PER_E);
+                int u, ks, sl;
+                unit_map(qi, sk, skd, u, ks, sl);
                 const int e = (int)((((s * (unsigned)per_ping) + sub) * (unsigned)nc + (unsigned)sl) %
                                     (unsigned)E);
-                do_unit(u, ks, sk, gate, up, down, xgu, xdn, out, e, tid);
+                do_unit(u, ks, sk, skd, gate, up, down, xgu, xdn, out, e, tid);
             }
 
             // ---- fan-in + completion. Level-triggered (rule 3). Flat = one counter RMW'd by all
@@ -562,7 +598,9 @@ int main(int argc, char** argv) {
     const int jobs = argc > 3 ? atoi(argv[3]) : 200;
     const int E = 260;                      // experts registered per layer in the shipped config
     if (getenv("LAB_SK")) g_sk = (unsigned)atoi(getenv("LAB_SK"));
+    if (getenv("LAB_SK_DN")) g_skd = (unsigned)atoi(getenv("LAB_SK_DN"));
     if (g_sk < 1) g_sk = 1;
+    if (g_skd < 1) g_skd = 1;
     const bool wantA = !strcmp(mode, "all") || strchr(mode, 'A') != nullptr;
     const bool wantB = !strcmp(mode, "all") || strchr(mode, 'B') != nullptr;
     const bool wantC = !strcmp(mode, "all") || strchr(mode, 'C') != nullptr;
@@ -598,7 +636,7 @@ int main(int argc, char** argv) {
     q.memset(out, 0, (size_t)(E + 1) * 4096 * sizeof(float)).wait();
     q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
 
-    const size_t units_job = (size_t)U_PER_E * nc * g_sk;
+    const size_t units_job = (size_t)upe(g_sk, g_skd) * (size_t)nc;
     const double job_mb = JOB_BYTES_PER_E * nc / 1e6;
     printf("per job: nc %d experts, %zu units (unit = one %d-thread team), %.3f MB packed\n",
            nc, units_job, TEAM, job_mb);
@@ -617,7 +655,7 @@ int main(int argc, char** argv) {
         for (unsigned n : {16u, 32u, 64u, 96u, 128u, 160u, 192u, 256u, 320u, 448u, 576u, 704u}) {
             const unsigned dp = getenv("LAB_A_DEADPROTO") ? 1u : 0u;
             ResidentLoop rl{gate, up, down, xgu, xdn, out, ctr, E, nc, jobs, units_job, n, g_sk,
-                            dp, mb};
+                            g_skd, dp, mb};
             q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
             for (int w = 0; w < 2; ++w)      // clock burn-in with the same grid
                 q.submit([&](sycl::handler& cgh) {
@@ -649,8 +687,8 @@ int main(int argc, char** argv) {
     // ---------------------------------------------------------- mode C
     if (wantC) {
         printf("== C: split path (control arm) - blob H2D + gu launch + down launch + D2H, one wait\n");
-        const size_t gu_teams = (size_t)nc * 2 * U_GU * g_sk, dn_teams = (size_t)nc * U_DN * g_sk;
-        SplitUnits su{gate, up, down, xgu, xdn, out, ctr, E, nc, 0, 0, g_sk};
+        const size_t gu_teams = (size_t)nc * 2 * U_GU * g_sk, dn_teams = (size_t)nc * U_DN * g_skd;
+        SplitUnits su{gate, up, down, xgu, xdn, out, ctr, E, nc, 0, 0, g_sk, g_skd};
         auto one_job = [&](int j) {
             su.job = j;
             su.phase = 0;
@@ -734,7 +772,7 @@ int main(int argc, char** argv) {
         // is cold-started per job - the honest lower bound for an engine per_ping cannot beat.
         {
             su.phase = 2;
-            const size_t all_teams = units_job;
+            const size_t all_teams = units_job;   // upe(sku,skd)*nc units, one per team
             auto one_all = [&](int j) {
                 su.job = j;
                 q.submit([&](sycl::handler& cgh) {
@@ -840,12 +878,18 @@ int main(int argc, char** argv) {
                 q.memset(ctr, 0, C_WORDS * sizeof(unsigned)).wait();
                 q2.memset(dflag, 0, 16).wait();
                 *hseq = 0;
-                Engine eng{mb, ctr, gate, up, down, xgu, xdn, out, E, nc, units_job, n, g_sk, grp,
-                           fo, trig, dflag, backoff, per_ping, nowork};
+                Engine eng{mb, ctr, gate, up, down, xgu, xdn, out, E, nc, units_job, n, g_sk, g_skd,
+                           grp, fo, trig, dflag, backoff, per_ping, nowork};
                 sycl::event resident = q.submit([&](sycl::handler& cgh) {
                     cgh.parallel_for(sycl::nd_range<1>{{(size_t)n * TEAM}, {TEAM}}, eng);
                 });
-                double first = ping(1, trig);
+                double first = -3;
+                const double tres = now_us();
+                // Wait (bounded) for the engine to become resident before scoring anything: at
+                // 256-448 teams the launch itself plus the first round trip can exceed one ping
+                // ceiling, and treating that as "the doorbell failed" would be a lab artifact.
+                do { first = ping(1, trig); } while (first == -1 && now_us() - tres < 3000000.0);
+                (void)tres;
                 if (first <= 0) {
                     printf("  %-7u %-8s %-5u %-4u DID NOT RESPOND (%.1f: -1 timeout, -2 quit)\n", n,
                            tname[trig], fo, grp, first);
