@@ -647,3 +647,74 @@ rounds on both placement layouts. Semantically in_order only *adds* ordering, an
 chained, so correctness is not at stake; the thing to watch is any place that relied on two
 independent command streams overlapping on the one queue (`b70_warm` against `b70_forward` share it
 today, serialized by `g.exec_mu`).
+
+## 2026-10-28: where the 27.2 us of `sub` actually is (per-stage instrument + four knob arms)
+
+`EXL3_MOE_B70_HOSTPROF=1` now reports every stage of `moe_sycl::forward` **labeled, per job class,
+with min / mean / max / count(>10 us)**, and `sycl_moe/subprof.sh` runs arms interleaved over rounds
+comparing per-stage minima (`subprof_report.py` renders it; it refuses to print an empty table as a
+result). Decode forward (rows=1, 2.05bpw, nc~2), best of rounds, us:
+
+| stage | min | mean | max | >10 us of 256 |
+|---|---|---|---|---|
+| prologue (tier policy, split-K auto rule, coop eligibility, workspace rebind) + blob pack | 0 | 0.75 | 5 | 0 |
+| blob H2D (`q.memcpy`) | 2.0 | 3.50 | 13 | 0 |
+| **K1 submit — first KERNEL of the forward** | 4.0 | **13.74** | 73 | **116** |
+| gemv gu submit | 3.0 | 5.02 | 57 | 2 |
+| K34 submit | 3.0 | 5.03 | 16 | 0 |
+| coop-down submit | 4.0 | 5.87 | 66 | 5 |
+| **total host window** | | **34.96** (ALLOCLOG `sub` p50 28.1) | | |
+
+**The structure of the fixed cost is therefore: ~3-5 us per queue action (five of them, ~16 us of
+minima) + ~1.5 us of our own host logic + a TAIL of ~8-10 us that lands on the first kernel command
+of the forward and is paid on ~40% of forwards.** The tail, not the per-action cost, is the only
+soft spot left, and it is positional, provably:
+
+| arm | first-kernel stage | K1 | total |
+|---|---|---|---|
+| control | (K1 is first) K1 mean **13.74**, slow 116 | — | 34.96 |
+| `EXL3_MOE_B70_PROBE_FIRST=1` — no-op `single_task` inserted before K1 | probe mean **12.74**, slow 107 | mean 7.30, slow 19 | 40.09 |
+| `EXL3_MOE_B70_BLOB_BY_KERNEL=1` — the blob's memory command replaced by a compute-engine kernel pulling it from pinned host memory (bit-identical results, rms 6.529521670017857e-07) | pull-kernel mean **12.96**, slow 105 | mean 6.39, slow 8 | 35.51 |
+
+Both interventions MOVE the tail onto whatever is the first kernel and leave the total unchanged (the
+probe arm is worse because it adds an action that itself eats the tail). So the cost is not the
+copy's engine, not the copy command, and not anything about K1's dispatch: it is the first *kernel*
+dispatch after the queue has been idle ~270 us and after two memory commands, and it is intermittent
+(min 4.0 us, max 73 us).
+
+Things ruled out, each by an arm that actually executed (see the retraction below):
+* **device/queue idleness at decode's cadence** — the measured inter-forward gap is ~270 us p50 at
+  every context length (1024/2048/4096; gaps derived from ALLOCLOG timestamps, n≈70-130 k), and the
+  idle cliff this box does have needs ~10-20 ms (§"the idle cliff"). No length dependence, no cliff.
+* **pageable copy source / shared destination** — `g_stage.stage{,_u16}` and `h_blob` are
+  `sycl::malloc_host`; `d_x`/`d_out`/`w_chunk` are `sycl::malloc_device`. Both already correct.
+* **the explicit `depends_on` edges P1 mandates** — ~0.1 us/action (chain arms, `lab_inorder_cost`).
+* **local_accessors** — ~0.2 us/launch (`lab_sub_position` no-accessor arm).
+* **queue property `in_order`** — worth ~0.6 us/launch in the lab (2.53 vs 3.15) and **nothing in the
+  model**: `EXL3_MOE_B70_INORDER=1` gives total 35.93 vs control 35.07 and identical per-stage
+  minima, with bit-identical output (rms 6.529521670017857e-07) and C-ABI 103.0-103.1 vs 103.4-103.5
+  us/call. A lab-only delta that does not transfer - recorded as a negative result, and the knob
+  stays (default off) because it prints `is_in_order=` so anyone can re-check.
+* **`SYCL_PI_LEVEL_ZERO_USE_COPY_ENGINE=0`**, **`UR_L0_USE_DRIVER_COUNTER_BASED_EVENTS=0`**,
+  **`NEOReadDebugKeys=1 EnableDirectSubmissionControllerBcsTimeoutDivisor=1e6`** — totals 34.99 /
+  (n/a) / 34.68 vs control 35.07. Nothing.
+* **`nd_launch` (handler-free enqueue)** — 0.6 us/launch SLOWER than `q.submit`+functor on both queue
+  flavours, when the arms are matched (see the methodology note below).
+
+### Retractions, because two earlier conclusions in this file were produced by arms that never ran
+
+`subprof.sh` first invoked arms as `EXL3_MOE_B70=1 EXL3_MOE_B70_HOSTPROF=1 $arm python ...`. bash
+fixes the command word at PARSE time, so an expanded `$arm` that looks like `NAME=value` became the
+**command** ("EXL3_MOE_B70_INORDER=1: command not found") and the arm died with an empty log. So
+"the copy-engine / counter-events / immediate-command-list knobs change nothing" (written earlier
+today) and "reordering the blob copy relocates the cost" (a `BLOB_LAST` arm that was never
+implemented at all - the two arms were the same binary measured twice, and the difference was drift)
+were both unsupported. The script now calls `env(1)`, asserts the arm produced a window, and prints a
+loud diagnostic if it did not; the claims above replace those, and the `BLOB_BY_KERNEL` arm is the
+real version of the reordering experiment.
+
+Methodology note (now NOTES rule 12): the first cut of `lab_inorder_cost` appeared to show the
+handler-free path was ~2 us/chain faster; that arm differed from its control in kernel body AND in
+how many `q.submit` calls it replaced. With 6 identical launches (same kernel, same 14 args, same
+device work) the sign reversed. Every conclusion in this section comes from arms that differ in
+exactly one factor, or from the in-model instrument.

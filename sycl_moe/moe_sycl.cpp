@@ -426,6 +426,23 @@ struct GemvBase
     int ncwg = 128;          // columns per workgroup (nbk = N/ncwg); 128 == the classic geometry
 };
 
+// Pull a job blob from PINNED HOST memory into device memory on the compute engine, so a decode
+// forward can issue NO memory command at all. Used only by EXL3_MOE_B70_BLOB_BY_KERNEL=1; see the
+// call site for why (the tail lives behind the copy, not in the kernel that follows it). Reads over
+// PCIe are the same mechanism the arena uploader already uses, and the blob is a few hundred bytes
+// at rows=1, so the device-side cost is a handful of 16 B loads.
+struct BlobPull
+{
+    const sycl::uint4* src;
+    sycl::uint4* dst;
+    int n;                       // 16-byte words (caller over-allocates both sides by 16 B)
+    void operator()(sycl::item<1> i) const
+    {
+        const size_t k = i.get_id(0);
+        if ((int)k < n) dst[k] = src[k];
+    }
+};
+
 template <int K2V, bool MMA>
 struct GemvK
 {
@@ -1851,12 +1868,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     if (blob_sz > cap_blob) {
         if (h_blob) { MOE_ALOG_FREE(h_blob, cap_blob, "h_blob"); sycl::free(h_blob, q); }
         if (h_blob2) { MOE_ALOG_FREE(h_blob2, cap_blob, "h_blob2"); sycl::free(h_blob2, q); }
-        h_blob = (char*)sycl::malloc_host(blob_sz, q);
-        h_blob2 = (char*)sycl::malloc_host(blob_sz, q);
+        // +16 B slack in every blob allocation: EXL3_MOE_B70_BLOB_BY_KERNEL rounds the copy up to
+        // 16-byte words, so the pull kernel must be allowed to read/write one word past blob_sz.
+        const size_t alloc_sz = blob_sz + 16;
+        h_blob = (char*)sycl::malloc_host(alloc_sz, q);
+        h_blob2 = (char*)sycl::malloc_host(alloc_sz, q);
         MOE_ALOG_ALLOC(h_blob, blob_sz, "h_blob");
         MOE_ALOG_ALLOC(h_blob2, blob_sz, "h_blob2");
         if (w_chunk) { MOE_ALOG_FREE(w_chunk, cap_blob, "w_chunk"); sycl::free(w_chunk, q); }
-        w_chunk = (ChunkDev*)sycl::malloc_device<char>(blob_sz, q);
+        w_chunk = (ChunkDev*)sycl::malloc_device<char>(alloc_sz, q);
         MOE_ALOG_ALLOC(w_chunk, blob_sz, "w_chunk");
         alog_msg("   blob chunk_sz %zu tokb %zu toke %zu offs %zu/%zu/%zu",
                  (size_t)nc * sizeof(ChunkDev), ((size_t)rows + 1) * sizeof(int),
@@ -1877,8 +1897,31 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     // NOTE: implicit in-order ordering between chained submits/memcpys is NOT enforced on
     // this stack (oneAPI 2026.2 + L0 + Xe2); explicit depends_on chains are required.
     const double ht0 = hpf ? HostProf::me().start_region("blob-h2d") : 0.0;
-    sycl::event dep = pre_dep ? q.memcpy(w_chunk, hb, blob_sz, {*pre_dep})
-                              : q.memcpy(w_chunk, hb, blob_sz);
+    // EXPERIMENT (EXL3_MOE_B70_BLOB_BY_KERNEL=1). The per-stage instrument localized the decode
+    // forward's fixed cost to a TAIL on whichever submit is the first KERNEL after the H2D copies
+    // (K1: min 5.0 / mean 14.0 / 98 of 256 forwards > 10 us), and a no-op kernel placed first
+    // inherits that tail (mean 12.7, 107/256) while K1 drops to 7.3 - i.e. the delay is the copy
+    // path's cold fast-submission route being paid by the command behind the copy. This knob tests
+    // the structural fix the same finding implies: issue NO memory command at all, and let a
+    // compute-engine kernel pull the few hundred blob bytes straight from pinned host memory over
+    // PCIe (the arena uploader already reads pinned host memory this way). Correctness must be
+    // bit-identical: same bytes, same destination, same dependency.
+    static const int blob_by_kernel = []{
+        const char* e = getenv("EXL3_MOE_B70_BLOB_BY_KERNEL");
+        return e && e[0] == '1';
+    }();
+    sycl::event dep;
+    if (blob_by_kernel) {
+        const int words = (int)((blob_sz + 15) / 16);
+        dep = q.submit([&](sycl::handler& cgh) {
+            if (pre_dep) cgh.depends_on(*pre_dep);
+            cgh.parallel_for(sycl::range<1>{(size_t)words},
+                             BlobPull{(const sycl::uint4*)hb, (sycl::uint4*)w_chunk, words});
+        });
+    } else {
+        dep = pre_dep ? q.memcpy(w_chunk, hb, blob_sz, {*pre_dep})
+                      : q.memcpy(w_chunk, hb, blob_sz);
+    }
     if (hpf) HostProf::me().end_region(ht0);
     if (prof) { pev.clear(); pev.push_back(dep); }
     auto launch = [&](auto&& fn, const char* nm = nullptr) {

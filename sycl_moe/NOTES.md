@@ -101,7 +101,12 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
    that is thermal throttling: cool 3 min, rerun.
 7. Noise floors: decode ±3% (≥1 t/s is real), prefill ±3.5% (needs 3 reps), synthetic <10 µs = air.
 8. Never trust a piped build rc or a log you did not confirm exists; two "results" came from
-   stale binaries, one campaign narrated a sweep that had not run.
+   stale binaries, one campaign narrated a sweep that had not run. **Third instance, same shape
+   (2026-10-28): a study harness ran its arms as `VAR=1 $arm python ...` - bash fixes the command
+   word at PARSE time, so an expanded `$arm` that looks like an assignment BECOMES the command, the
+   arm dies instantly, and the empty log reads as "no effect". Two conclusions were written from such
+   arms before the bug was found.** Run arms through `env(1)`, and make every runner assert that its
+   arm produced output (`subprof.sh` now prints a loud diagnostic when an arm yields no window).
 9. **Sweep interacting knobs together.** `stream_t` × `cap_rows` (2026-10-28): each looked 'flat'
    when swept alone inside the other's dead zone, and the pair is worth +8-10%. Before believing a
    recorded 'knob is flat', ask what regime the *other* knobs pinned it in.
@@ -360,15 +365,34 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
    (`lab_inorder_cost.cpp`). i.e. the cost is the L0 commit, not SYCL's handler. That also predicts
    PLAN_L0 would not deliver its headline benefit, so the raw
    `zeCommandListAppendLaunchKernel` experiment is deprioritized.
-   **But the queue PROPERTY behind it is worth something** (`lab_inorder_cost.cpp`, and see P1: the
-   plugin's queue has never been in-order): the same `q.submit`+functor launch costs **2.53 us on an
-   `in_order` queue vs 3.15 us on the out-of-order queue we build** - ~0.6 us/launch, ~20%, and the
-   explicit `depends_on` edges themselves are only ~0.1 us/action. Plausible mechanism: the runtime
-   allocates an event per command because on an out-of-order queue commands COULD overlap, whether or
-   not we ask. Est. 4-5 us of the model's 66.1 us forward (~1.5-2% decode at 2.05bpw, more where the
-   B70 leg dominates) - near the noise floor, so it needs `EXL3_MOE_B70_HOSTPROF` plus 3 interleaved
-   `perfab.sh` rounds before anyone ships it. In_order only ADDS ordering and every op is already
-   chained, so the change is semantically safe; the thing to check is `b70_warm` sharing the queue. Still unexplained: the *same*
+   **The queue PROPERTY behind it is NOT a lever, though the lab said it was** (`lab_inorder_cost.cpp`,
+   and see P1: the plugin's queue has never been in-order): the same `q.submit`+functor launch costs
+   **2.53 us on an `in_order` queue vs 3.15 us on the out-of-order queue we build** (~0.6 us/launch,
+   ~20%) - but in the model that delta does not survive: `EXL3_MOE_B70_INORDER=1` measures host window
+   35.93 us vs control 35.07 with IDENTICAL per-stage minima, bit-identical output (rms
+   6.529521670017857e-07) and C-ABI 103.0-103.1 vs 103.4-103.5 us/call. Knob kept default-off (it
+   prints `queue in_order=N`, so the property can never be silently ignored); recorded as a negative.
+   **Where the 27.2 us actually is** - `EXL3_MOE_B70_HOSTPROF=1` now labels stages, separates job
+   classes, and prints min/mean/max/count(>10 us); arms interleaved by `subprof.sh` +
+   `subprof_report.py`; full tables in `archive/decode-command-latency.md` §"where the 27.2 us of
+   `sub` actually is":
+   * the floor is ~3-5 us PER QUEUE ACTION (minima: blob H2D 2.0, K1 4.0, gemv 3.0, K34 3.0, down 4.0)
+     plus ~1.5 us of our own host logic (tier policy, split-K auto rule, coop eligibility, workspace
+     rebind, blob packing) - together the measured 27-28 us;
+   * the only soft spot is a **~8-10 us TAIL on the first KERNEL command of the forward, on ~40% of
+     forwards** (K1: min 4.0, mean 13.74, max 73, 116/256 windows over 10 us). It is POSITIONAL: a
+     no-op `single_task` inserted before K1 eats it (mean 12.74, slow 107) and K1 falls to 7.3; and
+     replacing the blob's memory command with a compute-engine kernel that pulls the blob from pinned
+     host memory (`EXL3_MOE_B70_BLOB_BY_KERNEL=1`, bit-identical) moves it there (mean 12.96, slow
+     105) with K1 at 6.39. **Neither changes the total** - so it is not the copy, not the copy engine,
+     not K1's dispatch; it is first-dispatch-after-drain, and the remaining lever on this phase is
+     ACTION COUNT (fusion), which CoopGuK already measured as a wash;
+   * ruled out by arms that actually executed: device idleness at decode's cadence (measured
+     inter-forward gap ~270 us p50 at context 1024/2048/4096 - this box's real cliff needs ~10-20 ms,
+     see the idle-gap scan), pageable copy source and shared copy destination (ours are already
+     `malloc_host`/`malloc_device`), the `depends_on` edges (~0.1 us/action), `local_accessor`s
+     (~0.2 us/launch), `in_order`, `USE_COPY_ENGINE=0`,
+     `UR_L0_USE_DRIVER_COUNTER_BASED_EVENTS=0`, NEO's BCS ring-timeout key, `nd_launch` (slower). Still unexplained: the *same*
    `q.submit` costs 2.6 us in the lab (flat across drained/busy/no-dep/barrier-bracket regimes and
    across `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property
    shapes), ~5.4 us inside the plugin, ~21 us under `bench_layer`; the lab also drifts ~15% run to
@@ -652,4 +676,10 @@ see `archive/decode-command-latency.md` §“Research 2026-10-28”).
 - Tools: `pb.py` (in-process prefill bench, `-prof` for kineto), `tl_analyze.py` (trace busy/idle),
   `mon.py` (both cards' link/power/util), `ab.sh` / `perfab.sh` (interleaved arms),
   `split_report.py` (per-forward workload split from `EXL3_MOE_STREAM_DEBUG`).
+  Host-side submission attribution: `subprof.sh` (interleaved knob arms through `env(1)`, fails loudly
+  when an arm produces no window) + `subprof_report.py` (per-stage min/mean/max/slow table) over
+  `EXL3_MOE_B70_HOSTPROF=1`; diagnostic knobs `EXL3_MOE_B70_INORDER` (build the queue in-order),
+  `EXL3_MOE_B70_PROBE_FIRST` (no-op kernel before K1 - moves the first-kernel tail),
+  `EXL3_MOE_B70_BLOB_BY_KERNEL` (pull the job blob with a compute kernel instead of a memory command;
+  bit-identical). All default off.
 - `archive/INDEX.md` — what's where, symptom→page lookup, provenance of this rewrite.
