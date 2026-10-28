@@ -504,7 +504,8 @@ PLAN_L0 would not deliver what it was billed for, and makes the raw-`zeCommandLi
 experiment low-priority. The 2.6 → 5.4 → 21 us progression across lab/model/harness is still
 unexplained; this lab also has ~15% run-to-run drift, so read 2.6-3.5 us as one number. Routes now
 closed: fewer-API-overhead, graphs, fusion (`CoopGuK` wash). The route left is to stop enqueuing per
-layer: lever 1b, a persistent kernel on `ext_oneapi_device_wait`.
+layer: lever 1b, a resident kernel that polls a pinned doorbell instead of being launched per job
+(plan: `../PLAN_PERSISTENT_WORKER.md`).
 
 ### 4. Command graphs, re-priced on the HOST axis — still no
 
@@ -573,11 +574,16 @@ Capability, and long-lived execution. Useful outcomes:
   `ext_oneapi_graph` (executable graphs with `update_node_parameters`, cf. `Graph/Update/*`, 50+ tests
   including `update_nd_range.cpp` and `dyn_cgf_*`) YES, `ext_oneapi_limited_graph` YES,
   `ext_oneapi_external_semaphore_import` YES, images no; **256 compute units, 128 KB SLM,
-  max_work_group_size 1024, 64 sub-groups/WG**. `device_wait` YES is the interesting one: it makes a
-  persistent, doorbell-fed worker kernel (the only design that removes the 57.6 us fixed cost
-  instead of trimming ~20 us of it) implementable without spinning a whole GPU context blind.
-  `Graph/NativeCommand/level-zero_usm.cpp` shows the supported way to mix native L0 nodes into a
-  SYCL graph if the native-submission experiment (lever 1) is ever built.
+  max_work_group_size 1024, 64 sub-groups/WG**. One correction worth carrying: **`ext_oneapi_device_wait`
+  is NOT a device-thread parking primitive** - it backs the host-side `sycl::device::ext_oneapi_wait()`
+  (`device.hpp:392`; `test-e2e/DeviceWait/basic.cpp` is a host-side multi-queue test). SYCL gives a
+  device thread no way to block on a host store, so the persistent-worker design necessarily POLLS; the
+  no-spin alternatives are command-level (`ext_oneapi_wait_external_semaphore`, or a native
+  `zeCommandListAppendMemoryWait` via `ext_codeplay_enqueue_native_command`) and they may cost an
+  enqueue per job, which is the very thing the design exists to remove. It remains the only design that
+  removes the 57.6 us fixed cost instead of trimming ~20 us of it - the plan for it is
+  `../PLAN_PERSISTENT_WORKER.md`. `Graph/NativeCommand/level-zero_usm.cpp` shows the supported way to
+  mix native L0 nodes into a SYCL graph if a native path is ever built.
 * `WorkGroupScratchMemory/{dynamic_alloc_local_accessor,missing_launch_property}.cpp` and
   `AsyncAlloc/device` document the runtime's dynamic-SLM and async-allocation paths; my per-submit
   measurement already varied exactly those shapes (2.55-2.62 us), so they are ruled out as the cause

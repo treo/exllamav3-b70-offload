@@ -414,21 +414,27 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
         job from 8 WGs up) - fan-out needs per-WG slots or `device_wait`, not a shared line;
     (c) completion must be LEVEL-triggered (`done >= want`), because the device coalesces doorbells
         and an equality test waits forever for a skipped id.
-    A resident spinner does not starve other queues and in fact *speeds them up* (16 MB fill on a
-    second queue: 17.5 us with a spinner vs 34.0 us without) - which points at idle/clock states as
-    the stall source; the keepalive-trickle variants (modes 7/8: a tiny submission every 2 ms / 10 ms
-    on the other queue) are coded and are the natural next test. Ranked below 1c for now.
+    (a) resident spinner does not starve other queues and in fact *speeds them up* (16 MB fill on a
+    second queue: 17.5 us with a spinner vs 34.0 us without) - which points at idle/clock states as the
+    stall source; the keepalive variants (modes 7/8: a tiny submission every 2 ms / 10 ms on the other
+    queue) are coded and are the natural next test. Ranked below 1c for now.
+    **Plan written: `PLAN_PERSISTENT_WORKER.md`** - step 1 is a ~45 min gated lab (locate the stall
+    with a device-side poll counter, then arms S1-S6 including the keepalive and the command-level
+    park options), with explicit stop criteria so this cannot quietly eat a week.
     From the LLVM sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
     `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
     `WorkGroupScratchMemory`) plus an aspect probe on this box: B70 + oneAPI 2026.2 reports
     **`ext_oneapi_device_wait` YES**, `ext_oneapi_graph` (executable, WITH node updates) YES,
     `ext_oneapi_limited_graph` YES, `ext_oneapi_external_semaphore_import` YES, and geometry
     **256 compute units, 128 KB SLM, max_work_group_size 1024, 64 sub-groups per WG**.
-    `device_wait` is the primitive that lets ONE long-lived kernel block on-device until a job is
-    posted instead of ending and being relaunched: parent writes a pinned doorbell, kernel waits,
-    runs the chain, signals completion - so no layer pays a submit at all. Its ceiling is the whole
-    fixed cost (57.6 us/forward, up to ~2.8 ms/token = ~19% of decode) minus the doorbell round
-    trip, versus lever 1's ~20 us. Price in a lab BEFORE any production code: (i) the actual
+    NOT a device-thread park: `aspect::ext_oneapi_device_wait` backs the HOST-side
+    `sycl::device::ext_oneapi_wait()` (`device.hpp:392`), so a resident engine necessarily POLLS - the
+    only no-spin parks are command-level (`ext_oneapi_wait_external_semaphore`, native
+    `zeCommandListAppendMemoryWait` via `ext_codeplay_enqueue_native_command`) and those may cost an
+    enqueue per job, i.e. the thing we are trying to remove. What the design does buy: ONE long-lived
+    kernel that polls a pinned doorbell, runs the chain, signals completion - so no layer pays a submit
+    at all. Its ceiling is the whole fixed cost (57.6 us/forward, up to ~2.8 ms/token = ~19% of decode)
+    minus the doorbell round trip, versus lever 1's ~20 us. Price in a lab BEFORE any production code: (i) the actual
     doorbell -> observed-complete round trip (if it is ~30 us the design is dead - measure first,
     as graphs taught us); (ii) cross-scope visibility for the flag (system-scope atomics, not
     volatile reads); (iii) keeping the prefill path and the poison/timeout path intact; (iv) power
