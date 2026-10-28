@@ -39,6 +39,10 @@ Method notes / caveats:
   cross `stream_t` in the prefill measurement) differs from real text: the profiled prefill streamed
   3 571 of 7 680 CPU experts. Where a byte count matters it is recomputed from the
   `EXL3_MOE_STREAM_DEBUG` batch lines of the same run (`notes/m_prof_e2e_sd.txt`).
+* **Placement history leaks between runs.** Dynamic placement writes a per-model expert-frequency
+  profile at unload and reseeds from it at load, keyed only on model dir + expert count. Every `-mcs`
+  number in §8 after the first is therefore "warm"; §8.3 quantifies the effect (+12-22% decode) and
+  gives the controlled comparison. Use `notes/run_profile_ab.sh` as the template for clean A/Bs.
 * Everything here is one AVX2 host + one Ampere GPU. Sections marked *(arch)* are the numbers that
   will move on a different CPU tier; the protocol for re-measuring is the point of the harnesses.
 
@@ -270,6 +274,13 @@ configurations (with and without profiler env, across three invocations) measure
 figures are reliable; decode differences below ~15% are not resolved by these single-shot runs. The
 profiler-enabled run (66.9) is a separate, slower regime.
 
+**Every `-mcs` row below is *placement-warm*.** Dynamic placement persists a per-model expert
+frequency profile and re-seeds the GPU-resident slice from it on the next load, so the first
+offloaded run in a session (`prof_split`, §0) starts from the checkpoint order and every run after
+it starts from what the previous run learned. `-mcl` and the all-GPU reference have no placement
+step and are unaffected. §8.3 isolates the effect: **+12-22% decode and 25% fewer CPU-computed
+picks per token**, which is the largest single confounder in this table.
+
 | configuration | prefill | decode |
 |---|---|---|
 | all on GPU (reference) | 5043 | 124.4 |
@@ -293,14 +304,16 @@ profiler-enabled run (66.9) is a separate, slower regime.
 | `EXL3_MOE_STREAM_FUSED_T=64` (most streamed experts → batched reconstruct tier) | 1752 | 108.2 |
 | `…FUSED_T=64` + `EXL3_MOE_STREAM_BATCH_RECON=0` (→ per-expert loop) | 1740 | 107.4 |
 
-Interpretation, in the order the levers matter:
+Interpretation, in the order the levers matter (read §8.3 first for the placement caveat):
 
 1. **Streaming decides prefill.** Disabling it (`STREAM_T` absurd, or `MIN_ROWS` above the chunk
    size) costs 2.1-2.2× at 2048 rows; everything else moves prefill by <6%.
 2. **Pinned arena** buys another +32% prefill (no stager `memcpy`, direct DMA from the worker's
-   weights) but appears to *cost* decode (78 vs 93-104): `-mcpa` also switches placement from the
-   periodic sweep to promote-on-miss with 4 spare slots per layer, whose per-step transfers and
-   bookkeeping land on the critical path.
+   weights) — that holds cold and warm (2367 / 2523 tok/s). At decode it does *not* exploit a
+   learned placement: with placement controlled (§8.3), `-mcpa` measures **78.7 cold / 77.7 warm**
+   while plain `-mcs 192` measures **78.0 cold / 100.7 warm**. So `-mcpa` is not slower in absolute
+   terms — it simply fails to get the profile's benefit, most plausibly because its per-step hook
+   (§8.2, ~2-3 ms) cancels the saving from ~25% fewer CPU-computed picks.
 3. **Decode is set by expert bytes × hit rate ÷ DRAM bandwidth**, and only secondarily by knobs:
    halving the pool (15→8 threads) is free, `SLOT_ROWS=32` is at the top of the range (105) and
    `-mcpa`'s promote-on-miss at the bottom (78), while static placement (99) is indistinguishable
@@ -319,7 +332,8 @@ Interpretation, in the order the levers matter:
 ### 8.1 Second model: Qwen3.8-Flash-Next @2.68 (512 experts, top-10, K=2.5/3, half-rate experts)
 
 `-mcs 410` (80% of experts on the CPU), `-cs 4096 -chunk_size 2048 -max_length 1024`
-(`notes/m_e2e_q38split410.txt`). **No all-GPU reference exists on this box**: the model's expert
+(`notes/m_e2e_q38split410.txt`), **cold placement start** (no profile for this model existed before
+that run; it wrote one at unload, so any re-run of this row must clear it — §8.3). **No all-GPU reference exists on this box**: the model's expert
 trellis alone is 36.33 GiB, so this configuration is the practical minimum, and the numbers below
 are only comparable to the §5 microbenchmark, not to a GPU-only run.
 
@@ -350,14 +364,55 @@ Two measurements (`EXL3_MOE_CPU_SWAP_DEBUG=1`), both on Qwen3.5 `-mcs 192`:
 * **Promote-on-miss hook.** The `-mcpa` path prints its own accounting every 128 steps: hit rate
   climbing 31% → 81% as the resident set settles, ~13 CPU-computed picks/step early on, and a
   `hook` cost of **3.5-5.5 ms per reported step** (`notes/m_promote_hook.txt`). Cross-checking
-  against §8's decode delta (`-mcpa` 78 vs `-mcs 192` ~100 tok/s ⇒ +2.6 ms/token), the reported
-  denominator spans roughly two forwards, so the honest figure is **~2-3 ms of host time per
-  token**: `ev.synchronize()` on the pinned hit-count snapshot, numpy ranking over all split
-  modules, and per-transfer `torch.cuda.device` + stream-ordering calls. It is per *step*, not per
-  byte moved, which is why it hurts short-context decode most.
+  against §8's decode delta (`-mcpa` 77.7 vs `-mcs 192` 100.7, both warm ⇒ +2.9 ms/token) the
+  reported denominator spans roughly two forwards, so the honest figure is **~2-3 ms of host time
+  per token**: `ev.synchronize()` on the pinned hit-count snapshot, numpy ranking over all split
+  modules, and per-transfer `torch.cuda.device` + stream-ordering calls. Attribution is entangled
+  with §8.3 — that same gap is also exactly what `-mcpa` fails to gain from a learned profile — but
+  the hook cost itself is a directly printed number, and it is per *step*, not per byte moved.
 
 Neither cost appears in `doc/env_vars.md`; both bear on whether a port keeps promote-on-miss
 enabled by default.
+
+### 8.3 The hot-expert profile is a confounder (controlled 2×2)
+
+Both dynamic placement modes persist what they learn: `save_expert_stats` writes decayed per-layer
+selection counts to `~/.cache/exllamav3/expert_stats/<sha1(model_dir|num_experts)>.json` every 4096
+decode steps and at unload, and `load_cpu_split` re-seeds the expert lists from it so the *GPU*
+slice starts holding the hottest experts (`block_sparse_mlp_cpu.py:55-96,855-862`). Two properties
+matter for measurement hygiene:
+
+* the cache key is **model directory + expert count only** — not the split size, not the placement
+  mode — so a profile written by a `-mcs 192` run seeds a later `-mcs 255` or `-mcs 192 -mcpa` run;
+* the file is rewritten at unload, so a sequence of runs forms a weak feedback loop (each run is
+  seeded by the routing of its predecessor, and wikitext-vs-chat routing differ).
+
+`notes/run_profile_ab.sh` controls it (profile removed vs a fixed reference profile restored before
+every run), measuring `-mcs 192` and `-mcs 192 -mcpa` on Qwen3.5 from both starts
+(`notes/m_prof_ab_*.txt`), prefill at 2048 rows and decode at 1024 context:
+
+| configuration | start | prefill | decode ctx 256 | ctx 1024 | ctx 1792 |
+|---|---|---|---|---|---|
+| `-mcs 192` | cold (identity placement) | 1712 | 80.5 | 78.0 | 76.5 |
+| `-mcs 192` | warm (reference profile) | 1790 | 100.8 | 100.7 | **114.2** |
+| `-mcs 192 -mcpa` | cold | 2367 | 73.9 | 78.7 | 79.4 |
+| `-mcs 192 -mcpa` | warm | 2523 | 73.3 | 77.7 | 79.5 |
+
+The mechanism, measured rather than inferred (`EXL3_MOE_HANDOFF_PROF=1` with real text, 570 report
+windows each, `notes/m_ab_text_{cold,warm}.txt`): the worker receives **5.87 CPU assignments per
+token** from a cold start versus **4.42** warm, i.e. the learned placement moves ~25% of the routed
+picks off the CPU, and the decode gain scales with exactly that (the per-pick cost from §5 times
+1.45 fewer picks ≈ the observed +2 to +3.5 ms/token). Zero swap sweeps fired in either run
+(`perf.py` drives `model.forward` without a generator, and 400 decode steps is below the 4×interval
+inline threshold), so this is purely the *starting* placement, not convergence during the run.
+
+Consequences for reading §8: (i) decode numbers are only comparable within the same placement start
+— prefill much less so (+5-7% here); (ii) the `-mcpa` decode row is *not* evidence that
+promote-on-miss is slow in absolute terms, only that it doesn't exploit the profile; (iii) the
+`prof_split` row (66.9 tok/s) is a cold start *and* profiler-loaded, so do not compare it to the
+warm rows; (iv) any port benchmark must pin this state — either delete the cache file per run, set
+`EXL3_MOE_CPU_SPLIT_STATS` to a fixed profile, or redirect
+`block_sparse_mlp_cpu.EXPERT_STATS_DIR` (what the test suite does).
 
 ## 9. What a port should re-measure first
 

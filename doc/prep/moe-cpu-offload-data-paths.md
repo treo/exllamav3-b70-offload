@@ -329,7 +329,7 @@ a chunk is always ≤ 4 rows.
 | W3 | pinned weight slot → VRAM ring | contiguous H2D on the copy stream | `len(batch) × exp_b` | 13.3 GB/s sustained, 11 GB/s for one expert (§2, §7) |
 | W2' | arena → VRAM ring (pinned arena) | direct DMA from the parent's registered mapping, per expert | same | skips W2: +32% prefill (§8) |
 | W4 | VRAM packed ring → VRAM native ring | `moe_unswizzle_trellis` (read+write) | `len(batch) × exp_b` | ~440 GB/s effective, 49-51 µs per projection per 28-expert batch (§7) |
-| W5 | GPU slot tensors ← arena (promote-on-miss) | `promote_expert`/`demote_expert` on a side stream, repacked with the same strided copies as W1 | `exp_b` per moved expert | costs ~15 tok/s of decode at `-mcs 192 -mcpa` (§8) |
+| W5 | GPU slot tensors ← arena (promote-on-miss) | `promote_expert`/`demote_expert` on a side stream, repacked with the same strided copies as W1 | `exp_b` per moved expert | no decode gain over plain `-mcs 192` once the placement start is controlled; its per-step hook is ~2-3 ms (`measured-costs.md` §8.2, §8.3) |
 | A1 | `y` VRAM → pinned `x` | kernel store (P1) or `copy_` (P2/P3) | `rows × hi × 2` | kernel: 3.9 µs; `copy_`: 3.5 µs + 12 GB/s (§6, §2) |
 | A2 | worker `out` pinned → VRAM | add-in-place kernel (P1) or `copy_` (P2/P3) | `rows × ho × 4` | kernel: 4.0 µs; `copy_`: 41 µs at 64 rows (§6, §2) |
 | A3 | `sel`/`w` | same mechanisms | `rows × topk × (4+2)` | folded into A1's kernel in P1 |

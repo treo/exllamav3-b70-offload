@@ -23,6 +23,7 @@ python notes/bench_handoff.py  MODEL_DIR ...       # flags, copies, decode loop,
 python notes/bench_link.py                          # pinned bandwidth + negotiated PCIe width
 python notes/prof_e2e.py -m MODEL_DIR -mcs 192      # per-kernel decode/prefill breakdown
 bash   notes/run_e2e.sh <cfg>...                    # eval/perf.py sweep over the knob configs
+bash   notes/run_profile_ab.sh                      # controlled A/B of the hot-expert profile
 ```
 
 Reference environment for all numbers: RTX 3090 (sm_86) on a PCIe Gen4 **×8** link, Ryzen 9 5950X
@@ -68,6 +69,12 @@ top-10, K=2.5/3).
 * Slot reuse is gated on `consumed` (written by the *reading* device's stream), not `done`
   (written by the worker): with offloaded layers spread over several accelerators, `done` alone lets
   the worker overwrite an output another device has queued but not performed.
+* **Measurement hygiene: the hot-expert profile carries across runs.** Dynamic placement saves its
+  expert-frequency counts (`~/.cache/exllamav3/expert_stats/<sha1(dir|E)>.json`) at unload and
+  reseeds the GPU-resident slice from them at load. The key ignores the split size and placement
+  mode, so successive runs of *different* configurations seed each other — which alone explains most
+  of the apparent decode regression of `-mcpa` (+12-22% decode, 5.87 → 4.42 CPU picks per token;
+  `measured-costs.md` §8.3). Any benchmark must clear or pin that file first.
 * Placement is not free: a periodic hot/cold sweep measures **~6 ms** (device quiesce + a
   checkpoint re-read) and the promote-on-miss hook **~2-3 ms per decode step** of host time
   (`measured-costs.md` §8.2). Both are invisible at default intervals, and both are pure host

@@ -25,6 +25,7 @@ The system `gcc` is 16.2, which the installed nvcc refuses; the extension is bui
 | `bench_link.py` | pinned H2D bandwidth and the negotiated PCIe gen/width, idle and under SM load | measured-costs §2 |
 | `prof_e2e.py` | torch-profiler kernel breakdown of N decode steps and one prefill chunk | measured-costs §6, §7 (`m_prof_e2e*.txt`) |
 | `run_e2e.sh` | `eval/perf.py` over named knob configs (`m_e2e_<cfg>.txt`) | measured-costs §8 |
+| `run_profile_ab.sh` | controlled 2×2 of cold vs warm starting placement (`m_prof_ab_*.txt`, reference profile in `refprofile_q35.json`) | measured-costs §8.3 |
 | `probe_handoff.py` | single-step walkthrough printer (debug aid for the fused issue/collect calls) | — |
 
 Typical invocations (all take a model directory, e.g.
@@ -55,6 +56,14 @@ PERF_ARGS="-cs 8192 -chunk_size 4096 -max_length 2048 -dr 1" bash run_e2e.sh spl
 
 ## Known rough edges
 
+* **Placement state persists between runs and contaminates comparisons.** Dynamic placement writes
+  `~/.cache/exllamav3/expert_stats/<sha1(model_dir|E)>.json` at unload and reseeds from it at load;
+  the key ignores split size and placement mode. `run_profile_ab.sh` shows the pattern for
+  controlling it (move the file away, or restore a fixed reference copy before each run). Real-text
+  effect measured in `m_ab_text_{cold,warm}.txt`: 5.87 vs 4.42 CPU picks per token.
+* `prof_e2e.py` feeds random token ids, so its routing (and therefore how many experts cross
+  `stream_t`) is not representative of real text — including the profile effect, which vanishes on
+  uniform-random routing. Use `eval/perf.py` (wikitext) for anything placement-sensitive.
 * `bench_handoff.py`'s `loop` section must issue and collect in pairs; issuing several jobs without
   collecting them deadlocks the stream by design (each issue waits its slot's `consumed` flag).
 * `prof_e2e.py` feeds random token ids, so its routing is not representative of text; combine it
