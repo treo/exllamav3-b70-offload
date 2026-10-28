@@ -175,6 +175,26 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
   use the edit tool (2026-10-27 reminder: three scripted multi-line patches left a duplicated
   `struct ChunkDev`, a stray `(4 acc chains)` fragment and a truncated expression; each cost a
   debug cycle the edit tool would have caught at apply time).
+- **P16 host→device pinned-USM stores are NOT a dependable doorbell.** A resident kernel RMW-polling
+  a `malloc_host` line stops observing host writes - warm after a few dozen pings, permanently after
+  ~10 ms of device idle - and neither an atomic RMW on the device side, nor a non-temporal host store
+  (`_mm_stream_si32`+`sfence`), nor `clflush`, nor background traffic fixes it (measured 68-100% of
+  pings > 5 ms; `lab_resident_bw B`, plan §11.4). Diagnostic that found it: have the poller count its
+  own polls and publish the count; ~1.2e7 polls with no observation = visibility failure, not latency.
+  Dependable alternative: a 4-byte H2D `memcpy` into DEVICE memory per job (0 stalls), i.e. a command.
+  Root cause is advertised capability: this device has neither `usm_atomic_host_allocations` nor
+  `usm_atomic_shared_allocations`.
+- **P17 a poll-COUNT bail bound is not a time bound here.** A system-scope atomic RMW on pinned host
+  memory runs at ~60 ns (1.7e7/s), not the ~1.5-2 µs PCIe round trip `lab_doorbell` assumed. A
+  "1e6 polls ≈ 1.5-3 s" bound was really 60 ms, and the resident kernel was quietly killing itself
+  mid-measurement while the log blamed the interconnect. Bound lifetimes by measured rate (≈2e7 polls
+  for ~1.2 s), and print the rate so the number is falsifiable.
+- **P18 the B70 has an idle cliff on the submission path.** The same 4-command chain costs 56 µs warm,
+  70 µs after 10 ms idle, 247 µs after 20 ms, 410 µs after 100 ms; a trivial-kernel drip every 0.5-2 ms
+  flattens it to ~91-105 µs. Separate from ULLS: with `EnableDirectSubmission=0` the cliff is still
+  there (134 µs warm → 412 µs cold). Decode's ~300 µs inter-job cadence is in the flat zone, so do not
+  blame it for decode's fixed cost - but it dominates any benchmark that pauses, and the first B70 call
+  after a real user/input pause.
 - **P15 int8 fragment ceiling**: Xe2 joint_matrix has NO int8 m16 accumulator - requesting
   `joint_matrix<sycl::sub_group, int, use::accumulator, 16, 16>` throws at launch ("...Rows=16,
   Cols=16 is not supported on this device", lab_jm9_m16.cpp, and note stdout was buffered so the
@@ -322,7 +342,10 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
    `q.submit` costs 2.6 us in the lab (flat across drained/busy/no-dep/barrier-bracket regimes and
    across `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property
    shapes), ~5.4 us inside the plugin, ~21 us under `bench_layer`; the lab also drifts ~15% run to
-   run, so read 2.6-3.5 us as one number. **Consequence: 1b is the only route left.**
+   run, so read 2.6-3.5 us as one number. ~~Consequence: 1b is the only route left.~~ **Consequence
+   re-checked: 1b is now closed too (see 1b), so per-action submission cost has no remaining route on
+   this stack. What the same budget says IS still open is the child's work-rate term (6.3 us/expert,
+   rows>1 DPAS batching) and the placement/overlap question - not the command path.**
 1c. **Placement is 100% STATIC in the shipped config, and the B70 cannot be given more hot work —
     measured, with the mechanism checked.** Facts, each verified this session:
     * With `-mcs 256` on 2.05bpw, every layer registers `E 260` on the B70 (256-slice + 4 spares)
@@ -395,66 +418,80 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
         "half the hot set on each device".
     (iii) Teach promote-on-miss to target B70 slots (needs a spare concept inside `[0,b70n)`).
 
-1b. **A persistent worker kernel - floor measured, dependable trigger not yet.** Sources: the LLVM
-    sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
-    `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
-    `WorkGroupScratchMemory`) plus an aspect probe: B70 + oneAPI 2026.2 reports
-    **`ext_oneapi_device_wait` YES**, `ext_oneapi_graph` (executable, WITH node updates) YES,
-    `ext_oneapi_limited_graph` YES, `ext_oneapi_external_semaphore_import` YES, geometry
-    **256 compute units, 128 KB SLM, max_work_group_size 1024, 64 sub-groups/WG** (which also
-    explains lever 4's lab curve: 50 WGs x 8 sub-groups is ~1.6 SIMD16 streams per EU, so the decode
-    gemv really is under-distributed - true, just not on the critical path).
-    Measured (`lab_doorbell.cpp`, resident kernel + pinned doorbell, host-side clocks, 100 ms ceiling):
-    round trip **p50 2.4-3.1 us at 1 WG** and ~8-11 us at 16-64 WGs - i.e. the ceiling of the idea is
-    the whole 57.6 us of fixed cost - but **20-75% of pings stall past 20 ms**, so it is not shippable
-    as understood. Three mechanism lessons, each reproducible:
+1b. **CLOSED 2026-10-28: persistent B70 worker - measured, loses, and its premise is not supported
+    by this device.** Evidence + restart conditions: `PLAN_PERSISTENT_WORKER.md` §11–§12. Lab:
+    `lab_resident_bw.cpp` (A = residency gate + sustained GB/s vs resident thin-gemv team count;
+    C = split-path control, a "same work, one launch, no protocol" reference, and an idle-gap scan;
+    B = engine with 5 trigger mechanisms × 3 fan-out styles × 2 fan-in styles, min-of-3 windows, plus
+    the §2a device poll counter). Four numbers ended it:
+    * **feeding itself needs the machine:** >= 195 GB/s (the model's own marginal rate) requires >= 256
+      permanently co-resident 128-thread teams; the co-residency ceiling for this shape is ~448–512 and
+      576 already collapses throughput 25× (11.4 → 288 µs/job). A decode-sized grid (60–128 teams)
+      sustains 80–145 GB/s.
+    * **it loses on wall clock anyway:** engine **84.4 µs/job** vs split path **56.0 µs/job** at
+      production's split-K geometry (gu 40 + down 80 teams, same bytes, same process); the gate was
+      "beat 36 µs". Batching jobs per trigger reaches 25 µs/job, but autoregressive decode cannot
+      batch — layer k+1's input is layer k's output.
+    * **the only dependable doorbell is a command:** a per-job 4-byte H2D `memcpy` into device memory
+      gave 0 stalls / 60 pings (p50 18.9 µs warm, 38.1 µs after 100 ms idle). Every host-store flavour
+      (release atomic, `_mm_stream_si32`+sfence, store+clflush) lost 68–100% of pings to >5 ms stalls
+      against a resident poller, and a keepalive drip did not rescue it. So the design's ceiling was
+      never "zero submits per layer", only "one instead of five".
+    * **the stalled leg is host→device, and it is visibility not latency:** during a stalled ping,
+      team 0's own counter showed ~1.2e7 polls of the doorbell line *without observing the store*.
+      That is what using an unadvertised operation looks like (no `usm_atomic_host_allocations` /
+      `usm_atomic_shared_allocations`, plan §10) - now measured, and it finally explains
+      `lab_doorbell`'s "20-75% of pings exceed 20 ms" without clock ramp or preemption.
+    Still true from the earlier investigation, kept so nobody re-derives it: the 1-WG round-trip floor
+    really is microseconds; `aspect::ext_oneapi_device_wait` is NOT a device-thread park (it backs the
+    host-side `sycl::device::ext_oneapi_wait()`, `device.hpp:392`); and this device's L0 queue group 0
+    DOES advertise `COOPERATIVE_KERNELS` (`l0_coop_probe.cpp`), so a driver-provided grid barrier is
+    addressable in principle - but it is beside the point, because the engine lost *without* using any
+    grid-wide barrier. Original lab trail (`lab_doorbell.cpp`, resident kernel + pinned doorbell, host
+    clocks, 100 ms ceiling): round trip p50 **2.4-3.1 µs at 1 WG** and ~8-11 µs at 16-64 WGs - i.e. the
+    idea's ceiling really was the whole 57.6 µs of fixed cost - but 20-75% of pings stalled past 20 ms,
+    and §11.4 above is why. Three mechanism lessons, each reproducible:
     (a) polling SYSMEM with an acquire LOAD goes deaf after a few pings (legal lowering to a cached
         load) - the doorbell must be an atomic RMW;
     (b) hundreds of WGs RMW-polling one DEVICE-memory line serializes catastrophically (>20 ms per
         job from 8 WGs up) - fan-out needs per-WG slots or `device_wait`, not a shared line;
     (c) completion must be LEVEL-triggered (`done >= want`), because the device coalesces doorbells
         and an equality test waits forever for a skipped id.
-    (a) resident spinner does not starve other queues and in fact *speeds them up* (16 MB fill on a
-    second queue: 17.5 us with a spinner vs 34.0 us without) - which points at idle/clock states as the
-    stall source; the keepalive variants (modes 7/8: a tiny submission every 2 ms / 10 ms on the other
-    queue) are coded and are the natural next test. Ranked below 1c for now.
-    **Plan written: `PLAN_PERSISTENT_WORKER.md`** - step 1 is a ~45 min gated lab (locate the stall
-    with a device-side poll counter, then arms S1-S6 including the keepalive and the command-level
-    park options), with explicit stop criteria so this cannot quietly eat a week.
-    **Evidence check (§10 of that plan) changed three things:** (1) the doorbell cannot be *designed* on
-    USM-host atomics - SYCL grants host/device atomic interop only with
-    `usm_atomic_host_allocations`/`usm_atomic_shared_allocations`, and this B70 advertises **neither**,
-    so the "deaf after ~9 pings" behaviour is unspecified-operation behaviour, not a rule to build on;
-    (2) the leading stall explanation is now **driver preemption/timeslicing** (this kernel:
-    timeslice 1 ms, preempt 640 ms / compute 7500 ms, i915 request timeout 20 s, xe job timeout
-    1-10 s) rather than clock ramp, and a resident engine must retire periodically for the same reason;
-    (3) "no grid-sync primitive" was too strong - L0 specifies cooperative launch
-    (`zeCommandListAppendLaunchCooperativeKernel`) plus
-    `zeKernelSuggestMaxCooperativeGroupCount` (which would answer the residency bound from the driver),
-    so gate G0a is a 20-line support probe. Megakernel direction itself is corroborated externally
-    (MPK arXiv:2512.22219: one persistent kernel, SM-level task graph, up to 1.7x lower e2e latency) -
-    our own attempt lost to grid-wide phases + co-residency caps, which is the specific pitfall to
-    avoid, not proof the idea fails.
-    From the LLVM sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
-    `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
-    `WorkGroupScratchMemory`) plus an aspect probe on this box: B70 + oneAPI 2026.2 reports
-    **`ext_oneapi_device_wait` YES**, `ext_oneapi_graph` (executable, WITH node updates) YES,
-    `ext_oneapi_limited_graph` YES, `ext_oneapi_external_semaphore_import` YES, and geometry
-    **256 compute units, 128 KB SLM, max_work_group_size 1024, 64 sub-groups per WG**.
-    NOT a device-thread park: `aspect::ext_oneapi_device_wait` backs the HOST-side
-    `sycl::device::ext_oneapi_wait()` (`device.hpp:392`), so a resident engine necessarily POLLS - the
-    only no-spin parks are command-level (`ext_oneapi_wait_external_semaphore`, native
-    `zeCommandListAppendMemoryWait` via `ext_codeplay_enqueue_native_command`) and those may cost an
-    enqueue per job, i.e. the thing we are trying to remove. What the design does buy: ONE long-lived
-    kernel that polls a pinned doorbell, runs the chain, signals completion - so no layer pays a submit
-    at all. Its ceiling is the whole fixed cost (57.6 us/forward, up to ~2.8 ms/token = ~19% of decode)
-    minus the doorbell round trip, versus lever 1's ~20 us. Price in a lab BEFORE any production code: (i) the actual
-    doorbell -> observed-complete round trip (if it is ~30 us the design is dead - measure first,
-    as graphs taught us); (ii) cross-scope visibility for the flag (system-scope atomics, not
-    volatile reads); (iii) keeping the prefill path and the poison/timeout path intact; (iv) power
-    draw of a resident kernel. The 256-EU figure also explains lever 4's lab curve: 50 WGs x 8
-    sub-groups is ~1.6 SIMD16 streams per EU, so the decode gemv really is under-distributed - true,
-    just not on the critical path.
+    (a′) lesson (a) turned out to be only half the story: an RMW fixes the *device's* poll, but the
+        *host's* store still does not reach a resident poller dependably (§11.4) - and a resident
+        spinner does not starve other queues, it in fact *speeds them up* (16 MB fill on a second
+        queue: 17.5 µs with a spinner vs 34.0 µs without), which is why "device is busy" was never the
+        missing ingredient. The keepalive arms are implemented in `lab_resident_bw` (`LAB_KEEPALIVE_US`,
+        `LAB_IDLE_US`) and they flatten the *idle cliff* but do not make a store doorbell dependable.
+    **Plan written and executed: `PLAN_PERSISTENT_WORKER.md`** (§11 results, §12 closure). Its step 1
+    (locate the stall with a device-side poll counter, then test arms S1-S6 including the keepalive and
+    command-level parks) is what produced the four numbers above; the plan's claim that lab_doorbell
+    already had keepalive arms coded was wrong - those modes were never in that file.
+    Related NEW platform fact, independent of this lever and not yet exploited: `lab_resident_bw C`'s
+    idle-gap scan shows the SAME 4-command chain costs 56 µs warm, 247 µs after 20 ms of B70 idleness
+    and 410 µs after 100 ms (cliff unaffected by `EnableDirectSubmission`, so it is device-side idle,
+    not just a dropped ULLS ring). Decode's own cadence (~300 µs between layer-jobs) is deep in the flat
+    zone, so this is NOT decode's fixed cost; it bites the first B70 call after any pause (prefill→decode
+    transition, first token after input arrives). A keepalive drip every 0.5-2 ms flattens it to
+    ~91-105 µs. Also measured here for the first time: **ULLS/direct submission is ACTIVE on this box
+    and worth ~78 µs per 4-command chain** (55.6 µs default vs 134 µs with `EnableDirectSubmission=0`;
+    forcing it on changes nothing), which closes the "is the driver on the fast path?" question.
+    **Evidence check (plan §10) changed three things, one of which is now itself superseded:** (1) the
+    doorbell cannot be *designed* on USM-host atomics - SYCL grants host/device atomic interop only with
+    `usm_atomic_host_allocations`/`usm_atomic_shared_allocations`, and this B70 advertises **neither** -
+    confirmed behaviourally in §11.4, so this is no longer a documentation worry but a measured wall;
+    (2) the leading stall explanation proposed there, **driver preemption/timeslicing** (timeslice 1 ms,
+    preempt 640/7500 ms, i915 request timeout 20 s, xe job timeout 1-10 s), is **not supported** by the
+    poll-counter evidence: the engine was spinning, not descheduled, and never saw the store - preemption
+    was demoted by measurement, along with clock ramp;
+    (3) "no grid-sync primitive" was too strong - L0 specifies cooperative launch and this device's
+    queue group 0 advertises `COOPERATIVE_KERNELS` (`l0_coop_probe.cpp`), but the residency bound that
+    motivated gate G0a turned out to be irrelevant next to the bandwidth bound.
+    (The pre-closure text of this lever asked for exactly the four things that killed it - the real
+    doorbell→observed-complete round trip, cross-scope flag visibility, keeping prefill and the
+    poison/timeout path intact, and a resident kernel's power draw. All four are now answered in
+    §11; the 256-CU geometry also explains lever 4's lab curve: 50 WGs × 8 sub-groups is ~1.6 SIMD16
+    streams per EU, so the decode gemv is under-distributed - true, just not on the critical path.)
 2. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
    retune measured on real 4.05 decode (C-ABI prefers 2, bench prefers 7 — a wave cliff at 3) and
    per-(entry) 2-arrival units. Summation order must stay bit-identical.
@@ -549,6 +586,10 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
    than either offload leg, so the split line stays at 256.
 
 Dead ends — do not re-litigate (evidence in `archive/kernel-microopt.md`, `archive/int8-dpas-tier.md`,
+`archive/decode-command-latency.md`, and `PLAN_PERSISTENT_WORKER.md` §11-§12): **a persistent/resident
+worker kernel fed by a host doorbell (lever 1b)** — resident thin-gemv grid needs ≥256 of ~448-512
+team slots to reach 195 GB/s, measures 84.4 µs/job vs the split path's 56.0 µs/job at production
+geometry, and its doorbell is not dependable in any host-store flavour;
 `archive/decode-command-latency.md`): dp4a/esimd in generic kernels, `dot_acc` ext, col-major
 joint_matrix B, coalesced word loads + `select_from_group`, megakernel-with-grid-barriers, flat
 bytesum tree, `-510` folding, large GRF, annotated_ptr hints, 128-lane WGs without ring,
