@@ -1,0 +1,425 @@
+# B70 offload: architecture
+
+Anchors are to this tree (`dev`, v1.6.5 + the `doc/prep` commits). Costs marked **[M]** are measured
+on this box (see [`notes/b70/README.md`](../../notes/b70/README.md) for the raw logs); **[P]** are
+projected from hardware figures and must be re-measured before they are quoted anywhere else.
+
+---
+
+## 1. The one structural decision: the B70 is a *worker*, not a *device*
+
+Everything the model itself runs (attention, dense MLP, router, shared expert, sampling, KV cache)
+stays on the CUDA device, in torch, unchanged. The B70 takes the role that `moe_cpu_host.py`'s child
+process plays today: **it consumes jobs from the shared-memory ring and fills the slot's output**.
+It is reached through a Level Zero / SYCL engine, not through torch (there is no `torch.xpu` in this
+venv, and even with one there is no reason to make the model's forward aware of a second vendor).
+
+Why that framing rather than "make the B70 a second compute device the model loads experts onto":
+
+* The parent side of the protocol is then *literally unchanged*: the fused decode handoff, the four
+  flags per slot, the `COMPUTE_GATED` empty-job trick, the `consumed` gating, the ring geometry, the
+  watchdog, the deferred collect, and every Level-D invariant in `doc/prep/port-acceptance.md` keep
+  holding because nobody on the CUDA side knows who did the arithmetic. Measured proof that this is
+  possible: `probe_cross.py` A1/A2/A3 **[M]** — one page-locked region is written by a B70 kernel and
+  read by the 3090, a `cuStreamWriteValue32` from the 3090 is visible to a B70 kernel, and a flag
+  written by a B70 kernel retires a `cuStreamWaitValue32`.
+* The five capabilities `doc/prep/moe-cpu-offload-data-paths.md` §9 lists as "what a port needs from
+  the accelerator" map onto this box as:
+
+| requirement | CUDA today | B70 engine | status |
+|---|---|---|---|
+| page-locked host memory with a device mapping | `cudaHostRegister(PORTABLE\|MAPPED)` + `cudaHostGetDevicePointer` | `register_host_memory(ptr, len, ctx)` on the region the parent already registered | **[M]** works; the region must be pinned by CUDA, *not* by the xe driver (`cudaHostRegister` on `sycl::malloc_host` fails `invalid argument`) |
+| kernels that store to / load from it, system-scope ordered | `int4` stores, `__threadfence_system()`, `ldg_acquire_sys` | plain volatile stores + `sycl::atomic_fence(acq_rel, system)` | **[M]** works for stores; **loads are latency-bound (~65 ns each)**, so the payload comes in by DMA; a system-scope `sycl::atomic_ref` on a *registered foreign* pointer faults the queue — do not use one |
+| stream-ordered flag wait/write without SM occupancy | `cuStreamWaitValue32` / `cuStreamWriteValue32` | not needed on the B70 side: it *produces* flags (kernel store) and *consumes* them by spinning host-side, exactly as the CPU worker does | no Level Zero equivalent exists (checked `ze_api.h` 1.18: only events/timestamps); not required |
+| multiple streams + events, contiguous async copies | compute + copy streams, `wready_ev`/`wconsumed_ev` | one in-order queue for jobs + one for weight transfer; `sycl::event` for the engine thread only (**never** on the parent's path) | **[M]** `.wait()` costs 24 µs, so event waits belong to the engine thread's idle path, not the per-job path |
+| the GPU-side expert kernels | `exl3_moe*`, `reconstruct*`, `hgemm*`, `moe_unswizzle_trellis` | unchanged on the 3090; a *new* implementation for the B70 (see `b70-kernels.md`) | this is the port |
+
+*Consequence for the plan*: no change to `BlockSparseMLP.forward`'s structure, no new torch device,
+no TP interaction, and the CPU worker stays available both as a fallback and as the **numerical
+oracle** for the new kernels.
+
+---
+
+## 2. Where the bytes live
+
+### 2.1 Three weight tiers
+
+```
+   S_g  resident on the 3090        the hot slice, as today (limited by VRAM left after KV cache)
+   S_b  resident on the B70 in VRAM 31.9 GiB, ~608 GB/s          <- the new tier
+   S_c  host DRAM only (the arena)   ~45 GB/s CPU read, or streamed over the link at 14.4 GB/s
+```
+
+Placement is by descending selection frequency (the existing expert-stats profile), filling S_g,
+then S_b, then S_c, under per-tier byte budgets. `S_b` is what makes the port interesting: on this
+box **Qwen3.5-35B's entire routed-expert set (11.25 GiB) fits in `S_b` with room to spare**, and
+Qwen3.8-Flash-Next's (36.33 GiB) does not, leaving ~4 GiB in `S_c`.
+
+Loading: the engine child receives the same `("layer", spec)` pipe messages as the CPU child, reads
+the expert tensors from the checkpoint, and uploads each layer's expert block over the link
+(`14.4 GB/s` **[M]** ⇒ 36 GiB in ~2.7 s, overlapped with the parent's own module load — same
+trick `model.py:614` uses to hide the CPU child's interpreter start). Aux tensors (`suh`, `svh`,
+bias) are uploaded alongside, per expert, in a side table the kernels can index.
+
+`S_c` handling: **keep the existing host arena byte-for-byte as it is**, including the CPU tier's
+packed layout, because it is also (a) the source for streamed prefill of spilled experts and
+(b) what promote/demote and `moe_unswizzle_trellis` operate on. The B70's VRAM copy is made in the
+B70's own layout (below) at upload time; when an expert is spilled out of B70 VRAM the B70 reads it
+from the arena over the link (rare, and the layout question recurs there).
+
+If the B70 holds all offloaded experts, the host arena can be dropped entirely (`EXL3_MOE_B70_ARENA=0`):
+a second, independent saving of the same 36 GiB in *host RAM*. That is only sound when nothing is in
+`S_c`, so it stays opt-in.
+
+### 2.2 Weight layout on the B70
+
+Native tile order first (the format's own order, `doc/prep/mul1-trellis.md` §2). It has three
+advantages: no repack pass at load, no un-swizzle anywhere, and the bytes are interchangeable with
+the GPU's kernels, so an expert can be streamed B70→3090 (or the reverse) with no translation.
+
+A B70-specific repack (k-major banding along `n`, the GPU analogue of the CPU's band-8) is a
+*measured optimisation*, not a prerequisite: Xe2's 128-byte cache lines and 18 MB L2 make a
+128–256 B strided tile read much less costly than it is on x86, and `annotated_ptr`/evict-first
+cache controls recover most of the difference. If it is adopted, the rule must live in exactly one
+place — `exl3_b70_tile_layout(K)` — be *reported* to every consumer (upload, spill read, streamed
+transfer), and never be conflated with `exl3_moe_cpu_swizzle_group(K)`: the arena and the B70 copy
+of the same expert may legitimately differ. Acceptance Gate B4 applies verbatim.
+
+### 2.3 Activations
+
+Today: `x` is copied to the slot as fp16 and the CPU worker quantises it to int8 per row
+(`doc/prep/moe-cpu-offload-data-paths.md` §6). For the B70, quantise on the **3090** inside the
+issue kernel and ship int8:
+
+* payload halves (`hi` bytes/row instead of `2·hi`), and only the minority of rows that need the
+  wide (15-bit) second plane pay `2·hi` again;
+* the B70 kernel's input contract becomes identical to the CPU kernel's (`x8`, per-row `q`,
+  `Σx8`, wide flag), which is what makes the two implementations comparable at the same arithmetic
+  (Gate B′2 in `b70-harness.md`);
+* the quantiser must be a faithful port of `quantize_row_wide_avx2`'s rule (scale `amax/127`;
+  `amax/16256` with a 128-step high plane when more than 1/16 of the row would round to zero) — the
+  harness diffs the *quantised tensors*, not the outputs, so a quantiser difference cannot hide
+  inside a GEMV difference.
+
+Output stays fp32 (protocol-compatible, same accumulation as today) with `EXL3_MOE_B70_OUT_F16=1`
+as a measured option that halves the return payload; it must be re-scored under Gate C1.
+
+---
+
+## 3. The data paths, rewritten for a fast offload device
+
+### P1 — decode (rows < `stream_min_rows`), fused handoff
+
+Protocol unchanged: `submit_issue_fused` (`moe_cpu_host.py:1411`) → `moe_split_issue_kernel` writes
+the slot and `data_ready` → engine computes → `done` → `submit_collect_fused` folds the fp32 partial
+in place from pinned memory and writes `consumed`. What changes is who does what in the middle:
+
+```
+3090 stream : issue kernel (map translate, int8 quantise, slot write, data_ready)
+              │  [GPU-resident experts + shared expert run here, 165-250 us of work]
+              └─ wait done → collect-add (in place) → consumed
+engine      : host thread spins on data_ready (a CPU load on host memory, as today)
+  child     : 1 submission: DMA the compact slot message into B70 VRAM
+              kernels: bucket → GEMV(g,u) → transform+act → GEMV(d) → accumulate, write out, fence, done
+```
+
+Two deliberate changes to the payload shape:
+
+1. **Compact slot message.** The current slot is four fixed-capacity sections (`x`, `sel`, `w`,
+   `out`, `ensure_started` geometry at `moe_cpu_host.py:1203-1207`), so a 1-row decode job has its
+   5 KiB of payload split across three sections sized for 64 rows — three DMAs, or a 320 KiB one.
+   For the B70 worker the issue kernel instead writes a *dense* message: 64-byte header
+   (`seq, rows, topk, hi, ho, flags`) + `sel` + `w` + per-row `q`/`Σx8`/wide + `x8`, then the
+   engine moves it with one `memcpy` (**[M]** 16 KiB DMA + flag = 7.6 µs, 128 KiB = 15 µs).
+   `out` stays at a fixed offset so the collect kernel is untouched. The CPU worker keeps the old
+   layout; the two slot formats live in different regions of different workers, so no shared code
+   has to agree on both.
+2. **Results are pushed, not pulled.** The final kernel stores the fp32 partial straight into the
+   pinned slot and publishes `done` after a system fence (**[M]**: 16 KiB of stores + flag costs
+   ~2 µs over the empty-job baseline). No D2H copy engine transfer, no extra submission, and the
+   3090's `done` wait is then ordered by a write the same kernel made — which is precisely the
+   ordering guarantee `moe_split_collect_add_kernel` relies on today.
+
+Expected exposed cost per decode layer: `10-15 µs` of handshake + `~25-35 µs [P]` of compute,
+against `165 µs` (Qwen3.5) / `~250 µs` (Qwen3.8) of parent GPU work in the same window ⇒
+**fully hidden**, i.e. the offload becomes free at decode. The floor that matters is the empty job:
+with `COMPUTE_GATED` semantics preserved (no payload written, no submission, `dev_count == 0`), the
+engine's cost for a cold layer is one host-side spin miss, and the collect's cost is one kernel that
+exits — unchanged from today's 20 µs, and *cheaper* since the wait retires immediately.
+
+### P1′ — whole-layer offload at decode (`-mbl`)
+
+Same shape as today's copy path (`_issue_compute`, `moe_cpu_host.py:1469`): `sel32` cast, `y_pad`,
+three contiguous `copy_` D2H, `data_ready`, engine, `done`, readback. `doc/prep/measured-costs.md`
+§4 prices that at ~26 µs of parent-side device work per layer against the fused path's 20 µs, and
+the gap is pure overhead — which the CPU path tolerated because the compute behind it was 200 µs+.
+Recommendation: do not carry `-mbl` over as its own path. Express it as `-mb E` (all of a layer's
+experts offloaded) on the fused path, which already handles an arbitrary `first_cpu`, and let the
+shared expert provide the overlap exactly as `-mcs` does today.
+
+### P2 — prefill, rows to the B70 (the new default)
+
+`submit_prefill` (`moe_cpu_host.py:1864`) currently syncs the host on a per-expert count readback to
+decide what to stream. For B70-resident experts there is nothing to decide: **ship the rows.**
+
+* Payload per 2048-row chunk, per layer, Qwen3.8 (`hi = ho = 2560`): int8 `x` 5.2 MB + fp32 `out`
+  21 MB ⇒ 26 MB, or fp16 `out` ⇒ 15.7 MB. At 14.4 GB/s **[M]** that is 1.1–1.8 ms/layer.
+* B70 compute per 2048-row chunk, per layer: 2048 × 10 picks × 3 × 2560 × 640 MAC ≈ 201 GFLOP ⇒
+  1.1 ms at XMX fp16 rate **[P]**, plus reading the layer's whole 0.73 GiB expert set once at
+  608 GB/s ⇒ 1.3 ms **[P]**. So link and compute are the same order, and they overlap.
+* Chunking: `EXL3_MOE_B70_SLOT_ROWS` (propose 256, not 64) so a 2048-row prefill is 8 jobs/layer
+  instead of 32 — each job carries a ~7-9 µs **[M]** handshake, so 32 jobs would add 0.25 ms/layer
+  of pure protocol. Pinned cost is `slots × rows × (sz_x·hi + sz_out·ho)` ≈ 4 × 256 × 7.7–12.8 KB
+  ≈ 8–13 MB, and the engine's VRAM staging is the same again. Four slots keep DMA and compute
+  pipelined.
+* No host sync: the *device* decides per row which rows the B70 handles (rule in P4), so the count
+  readback and the whole tail-compression machinery is skipped on the B70 path.
+
+### P3 — streamed prefill: retired for `S_b`, kept for `S_c`
+
+The crossover is arithmetic, not taste. Streaming expert *e* to the 3090 costs
+`expert_bytes / link_rate` of link — one crossing if the bytes come from the host arena, two if they
+come from B70 VRAM. Computing *e* on the B70 for `rows_e` rows costs
+`rows_e × (sz_x·hi + sz_out·ho) / link_rate` plus its share of B70 compute. With one crossing:
+
+```
+stream wins  <=>  rows_e  >  expert_bytes / (sz_x*hi + sz_out*ho)
+   int8 in, fp16 out:  Qwen3.8  1.465 MiB / 7680 B = 200 rows     Qwen3.5  1.125 MiB / 6144 B = 192 rows
+   int8 in, fp32 out:  Qwen3.8 -> 120 rows                         Qwen3.5 -> 115 rows
+   and halve again if the bytes must come off the B70 (two crossings) rather than the host arena
+```
+
+An expert only sees ~200 picks in a chunk when `rows × topk / E` is that large or routing is very
+skewed: at 2048 rows × topk 10 over 512 experts the *average* is 40, and the experts that would
+clear 200 are precisely the ones already in `S_g` on the 3090. So for B70-resident experts the
+fused / batched-reconstruct / per-expert streamed tiers, the weight-staging rings, `WSLOT_MB`,
+`BATCH_EXPERTS`, the `stage_jobs` ring, the stager thread and the `moe_unswizzle_trellis` restore
+pass are all **dead code** (and the 28.6 % of device time they cost, per
+`doc/prep/measured-costs.md` §7, disappears).
+
+For `S_c` experts, all of it still applies unchanged — streaming a spilled expert to the 3090 beats
+a 45 GB/s CPU GEMV by ~12×, which is why `stream_t` remains the biggest knob on the CPU path (2.1×
+end to end). Keep `stream_t`'s calibration (`probe_bandwidth`, `moe_cpu_host.py:900`) for `S_c`
+only, re-probed against the B70-era link if the CPU worker is disabled.
+
+### P4 — new: splitting rows between two fast devices
+
+When `S_g` is non-empty, both devices can produce part of the routed sum for a chunk. The split must
+need **no host sync** and must not compute an expert twice:
+
+```
+row goes to the B70  <=>  any pick of the row is outside S_g     (device-side test, 1 word/row)
+row stays on the 3090 <=>  all picks in S_g
+```
+
+This is the existing masking mechanism (out-of-range picks masked inside `exl3_moe*` and
+`moe_split_issue_kernel` writing `dev_count`), so it is cheap and already tested. It is also
+self-balancing in the right direction: as `S_g` grows, fewer rows cross. A load-balance term
+`EXL3_MOE_B70_ROW_FRACTION` (0…1, forced share) covers the case where routing is uniform enough that
+the rule sends too little or too much, chosen from measured per-device throughput
+(the E4/E5 probes of `b70-harness.md`).
+
+Explicitly *not* doing: splitting a single row's picks across devices (doubles the payload and needs
+an atomic combine), or per-expert partitioning of one chunk (needs the count readback the design
+just removed).
+
+---
+
+## 4. Cost model
+
+Everything the policy knobs tune, in one place. `b*` = bytes, `r*` = rates, all measured per §7 of
+`b70-harness.md`.
+
+```
+decode layer cost = max( parent_gpu_work_layer,
+                         notify + dma_in(rows·(hi + ε)) + b70_compute(rows, picks_b)
+                                    + dma_out/store(rows·ho·sz_out) + notify )
+prefill layer cost = jobs_per_layer · notify
+                   + max( link_bytes / link_rate , b70_flops / xmx_rate + weights_read / vram_rate )
+placement = minimise Σ_layers [ link_bytes(layer) / link_rate + compute(layer) / rate(device) ]
+            over the partition (S_g, S_b, S_c), subject to
+              bytes(S_g) ≤ VRAM_3090 − KV − weights_elsewhere   and   bytes(S_b) ≤ VRAM_b70
+            solved greedily in descending selection frequency (hot → S_g → S_b → S_c), which is
+            optimal whenever cost is monotone in frequency — true here, because a row's payload
+            crosses the link at most once regardless of how many of its picks live on the B70.
+crossover(stream e) = expert_bytes_e / (sz_x·hi + sz_out·ho)     [rows per expert per chunk, see P3]
+```
+
+Constants on this box: `link_rate` 14.4 GB/s **[M]**, `notify` 3.2 µs resident / 5–8 µs per
+submission **[M]**, `vram_rate` ≤608 GB/s (target ≥70 % for the GEMV, i.e. ≥420 GB/s, to be
+measured), `xmx_rate` 183 TFLOP/s fp16 / 367 TOPS int8 **[M]** via `b70-bench`, `parent_gpu_work`
+165 µs/layer (Qwen3.5) and ~250 µs/layer (Qwen3.8) **[M, doc/prep]**.
+
+What the model says at a glance:
+
+* Decode: with 8 experts × 1.465 MiB read at 420 GB/s (28 µs) plus a ~10 µs handshake, the B70 job
+  is 4–7× shorter than the window the parent gives it. The knob that matters is therefore *how many
+  experts land on the B70*, not how the handshake is built — until the handshake stops being hidden.
+* Prefill is link-bound at ~2048 rows unless `sz_out` drops to fp16 or the row split keeps more work
+  on the 3090; the model gives the crossover for both, and the harness measures which the box lands on.
+* Adding a *second* B70 (32 GiB each) would make Qwen3.8 fully `S_b`-resident; the ring/protocol
+  already supports several workers because each gets its own `MoeCpuHost`-shaped object.
+
+---
+
+## 5. Execution model tiers
+
+Three ways to run one job on the B70, priced with the measured numbers. The phase plan adopts T1 and
+holds T2 as an optimisation with a hard gate, because the difference between them (≈3 µs/layer) is
+smaller than the noise `doc/prep/measured-costs.md` §8 warns about.
+
+| | T0 phases | T1 graph/command-list per job | T2 resident engine |
+|---|---|---|---|
+| what is submitted per job | 5–8 kernels (bucket, gemv_gu, transform+act, gemv_d, accumulate, publish) | one pre-recorded graph / reused L0 command list, rebuilt only when the shape class changes | nothing: a doorbell store in pinned memory |
+| measured per-job cost component | ~2 µs host per submission; ~2–5 µs device turnaround per phase | **[M]** 5.0–6.3 µs end-to-end for an empty job, 7.6–9 µs with a 16 KiB DMA | **[M]** 3.2 µs round trip (mean of 200, best 2.8) |
+| phases separated by | separate launches | graph edges | grid-wide barriers inside the resident kernel (atomic counter, device scope) |
+| occupies the card | only while running | only while running | **permanently** (must be sized to leave cores for anything else) |
+| liveness | queue errors surface per submission | same | a hang is a device loss; needs the child to die so the parent's watchdog fires |
+| needs | nothing exotic | `ext/oneapi/experimental/graph.hpp` (present) or raw `zeCommandList` reuse | one polling lane per sub-group **with a system fence** (`LESSONS` 2/3/6), uniform control flow, no `atomic_ref` on foreign pointers |
+
+T0 is the first thing that runs at all (it is the honest baseline and the easiest place to bisect a
+wrong number). T1 is the shipping default. T2 additionally removes the *engine thread's* wake-up and
+is only interesting if the harness shows the engine thread, not the card, on the critical path.
+
+What makes this easy is the same thing the CPU worker already exploits: the engine thread spins on
+`data_ready` in host memory with an ordinary CPU load (no PCIe involved, exactly like the loop in
+`cpu/moe_handoff.cu:351`), so a job can be handed to the card ~100 ns after the 3090 wrote it. Only
+the *payload* needs the link, not the notification.
+
+---
+
+## 6. Process and ownership model
+
+* **Engine = a child process**, like the CPU worker, for three reasons beyond symmetry: (a) it moves
+  the SYCL enqueue cost (2 µs/submission, 20 µs if a `.wait()` sneaks in) off the Python forward
+  thread, which `doc/prep/measured-costs.md` §6 shows is already 3.6 ms/token; (b) a device fault or
+  a wedged queue kills the child, and the existing parent-side watchdog (`moe_cpu_host.py:1310`)
+  already knows how to unblock pending stream waits and raise on the next `begin_pass`; (c) the
+  load/upload pipeline (`("layer", spec)` messages, acks, deferred safetensors reads) is reused.
+  It needs one new capability, which Phase 0 must prove: `register_host_memory` on a
+  `multiprocessing.shared_memory` segment mapped *in the child* (the parent has already
+  `cudaHostRegister`ed the same bytes). Fallback if that fails: run the engine as a thread in the
+  parent (protocol unchanged; only (a) and (b) are lost).
+* **Ownership**: the parent owns and registers the control region; the engine never allocates memory
+  the 3090 must see (§2.1, measured constraint). The engine owns all B70 VRAM: expert weights,
+  staging, scratch. Nothing on the B70 is shared with the 3090 except the handoff region.
+* **Queues**: one in-order job queue, one weight-transfer queue, both private to the engine. The
+  engine publishes `done` only from the job queue, so flag order equals data order.
+* **Lifetime**: engine start is scheduled exactly like the CPU worker's (spawned before any module
+  loads, `ready` awaited in `ensure_started`, quit flag + `PDEATHSIG`), and `shutdown`/`unregister`
+  keep working across reload and autosplit rollback. `register_host_memory` is undone on unload
+  (`unregister_host_memory`) or the next load in the same process may fail.
+* **Affinity**: the engine thread that spins needs a core; it joins the existing reservation
+  (`EXL3_HOST_CORES`, `moe_cpu_host.py:187` `_apply_host_affinity`) rather than a GEMV pool. There is
+  no pool to size: the card schedules its own 256 vector engines, so `EXL3_MOE_CPU_THREADS`,
+  `_PIN`, `_SPREAD` and `_SMALL_WORKERS` have no B70 counterpart.
+* **Coexistence with the CPU worker**: two hosts, two rings, two slot regions. A row whose picks
+  span `S_b` and `S_c` produces one job per worker and the collect adds both partials (the combine
+  already adds; the `COMPUTE_GATED` gate is per worker). Deferred to Phase 5 — nothing in the
+  protocol blocks it, and it is the answer for models that overflow 32 GiB.
+
+---
+
+## 7. Code impact
+
+| file | change |
+|---|---|
+| `exllamav3/exllamav3_ext/b70/` *(new)* | SYCL/Level Zero engine + kernels: a **torch-free C ABI** shared library (`b70_engine.so`), driven by ctypes — the probes prove that shape works end to end and it keeps `-fsycl` out of the nvcc build (`util/cuda_flags.py:77 extension_sources` walks `.c/.cpp/.cu` and would choke on a SYCL TU) |
+| `exllamav3/ext_b70.py` *(new)* | locate or JIT-build `b70_engine.so` with `icpx -fsycl`, mirroring `ext.py`'s JIT/cache/env logic; capability probe (device present, aspects, `register_host_memory`, graph support, `spillMemSize == 0` for shipped kernels) |
+| `exllamav3/model/moe_b70_host.py` *(new)* | `MoeB70Host`: reuses the ring/flag/geometry constants, `_set_job_seq`, `_write_flag`, `check_shm_capacity`, `probe_bandwidth`, `_HugeArena` from `moe_cpu_host.py`; own `_spawn`/child main (upload + engine loop); own `submit_prefill` policy (no streaming for `S_b`, no count readback); own slot format (§3 P1) |
+| `exllamav3/model/moe_cpu_host.py` | *factor out*, do not fork: the protocol half (constants 45-82, `ensure_started` geometry 1187-1290, `_register_handoff` 1050, watchdog 1310, fused issue/collect 1411-1467) becomes worker-agnostic; the CPU-specific half stays. Until that refactor lands, `MoeB70Host` may subclass and override — but each override must be listed here so the Level-D tests keep being run against both |
+| `exllamav3/exllamav3_ext/routing.cu` | `moe_split_issue_kernel` gains a payload mode: compact message, int8 quantisation (+wide plane, `q`, `Σx8`), row-split predicate. The fp16/slot mode stays for the CPU worker |
+| `exllamav3/exllamav3_ext/cpu/moe_handoff.cu` | none (its `*_fused` host calls and flag ops are worker-agnostic; `exl3_moe_cpu_worker_run` is simply not used by the B70 host) |
+| `exllamav3/exllamav3_ext/moe_unswizzle.cu` | untouched while `S_b` is native-ordered; gains a `(src_layout)` selector only if the B70 repack lands |
+| `exllamav3/modules/block_sparse_mlp_cpu.py` | eligibility: replace the `device.type == "cuda"` test at `cpu_maybe_offload_load`/`cpu_maybe_split_load` (402, 428) with "an offload worker is configured"; three-tier placement in `load_cpu_split` (778); delegate `cpu_split_submit`/`cpu_split_combine` (556, 633) to the right host; swap/promote (`_split_swap_tick` 936, `_split_promote_step` 189) extended to the B70 tier or explicitly disabled there |
+| `exllamav3/model/config.py` | `-mbl/-mb/-mba` and the knobs of §8, next to `moe_cpu_offload`/`moe_cpu_split` (42-54) |
+| `exllamav3/model/model.py` | spawn the B70 engine beside the CPU worker before module load (614-616); same TP refusal (695-710) |
+| `exllamav3/util/backend.py` | `B70` fact module: presence, toolchain, and the per-backend defaults that `MoeCpuTuning` currently hard-codes for a CPU worker |
+| `tests/b70/`, `notes/b70/` | see `b70-harness.md` |
+| `doc/env_vars.md` | document every new knob (the prep README lists four knobs that were live but undocumented — do not repeat that) |
+
+## 8. Knobs
+
+Naming follows the existing convention (`EXL3_MOE_*`, mirrored in `MoeCpuTuning`-style objects, plus
+CLI aliases in `config.py`). Family A/B/C = shape / policy / implementation, per
+`doc/prep/tuning-knobs.md`.
+
+| knob | class | default | meaning |
+|---|---|---|---|
+| `-mb N` / `EXL3_MOE_B70_SPLIT` | A | 0 | put the coldest `N` experts of every eligible layer on the B70 (mirror of `-mcs`) |
+| `-mba` / `EXL3_MOE_B70_AUTO` | B | 0 | size `S_b` to fill B70 VRAM with the experts that do not fit the 3090 |
+| `-mbl N` / `EXL3_MOE_B70_LAYERS` | B | 0 | restrict the B70 split to the first N eligible layers |
+| `EXL3_MOE_B70_SLOTS`, `…_SLOT_ROWS` | A | 4, 256 | ring depth and rows per job (prefill chunking; decode is unaffected because one job is one step) |
+| `EXL3_MOE_B70_ROW_FRACTION` | B | auto | forced share of rows a prefill chunk sends to the B70 (§3 P4) |
+| `EXL3_MOE_B70_QUANT_INPUT` | C | 1 | int8 payload from the 3090 vs fp16 (0 also disables the wide-plane path: use for numerics bisection only) |
+| `EXL3_MOE_B70_OUT_F16` | C | 0 | return fp16 partials (halves the uplink) |
+| `EXL3_MOE_B70_ENGINE` | C | `graph` | `phase` (T0) / `graph` (T1) / `resident` (T2) |
+| `EXL3_MOE_B70_RESIDENT_WGs`, `…_POLL_BACKOFF` | A | 64, ~500 | resident-engine footprint and poll rate (`LESSONS` 6 — a wrong value here costs 1000×, not 10 %) |
+| `EXL3_MOE_B70_SWIZZLE` | A | 0 | B70-side banding (§2.2); must be reported by `exl3_b70_tile_layout` |
+| `EXL3_MOE_B70_ARENA` | B | 1 | keep a host-arena copy of `S_b` weights (needed for spill + streamed `S_c`, off saves the RAM) |
+| `EXL3_MOE_B70_THREADS`, `…_PIN` | C | 2, 1 | engine thread count/pinning (transfer thread + engine loop) |
+| `EXL3_MOE_B70_PROF`, `…_STREAM_DEBUG`, `…_VERIFY`, `…_MAX_ISA` | C | off | observability parity with the CPU worker; `…_VERIFY` runs the same job on the CPU worker and diffs |
+| inherited | | | `EXL3_MOE_CPU_SPLIT_STATS` (placement profile — same state-pinning requirement, `doc/prep/measured-costs.md` §8.3), `EXL3_HOST_CORES`, `EXL3_MOE_STREAM_MIN_ROWS` (path selector), `EXL3_MOE_STREAM_T` (only for `S_c`) |
+
+Knobs that **stop applying** when a layer's experts are in `S_b`: `EXL3_MOE_CPU_WSLOTS/_WSLOT_MB`,
+`EXL3_MOE_STREAM_BATCH_EXPERTS`, `EXL3_MOE_STREAM_FUSED_T`, `EXL3_MOE_STREAM_BATCH_RECON`,
+`EXL3_MOE_CPU_STAGE_THREADS`, `EXL3_MOE_PINNED_ARENA`'s streamed-DMA half, and
+`EXL3_MOE_CPU_SWIZZLE`'s GPU-restore consequence (§3 P3). They stay live for `S_c`.
+
+## 9. Phases and gates
+
+Each phase ends with a commit at a known-good state and a harness report; a gate may be *explained*
+by a measurement but not waived. (Gate definitions: `b70-harness.md`.)
+
+| phase | deliverable | gate |
+|---|---|---|
+| 0 | probes in `notes/b70/` (done) + cross-process `register_host_memory` test + engine skeleton that round-trips one fake job | D0 (protocol liveness), A-format bit-exactness of the uploaded bytes (`memcmp` B70 VRAM against the source tensors) |
+| 1 | T0 engine, naive `Recipe A` decode kernel, fp16 payload, `-mb` on a small split, CPU worker untouched | **A** bit-exact, **B′** rel RMS ≤ 2.5e-2 vs the fp64 oracle *and* vs the CPU tier, **C1-C3** model agreement, **D** all invariants, **E1/E2/E3** handshake floors |
+| 2 | T1 graph engine, int8 payload + wide rows, `Recipe B` GEMV, layout decision measured | **E4** cold-expert read rate ≥ 300 GB/s, **E1** empty job ≤ 10 µs, **B3** determinism, zero spills in every shipped kernel |
+| 3 | prefill: rows-to-B70, big slots, row split, streaming off for `S_b` | **E5** prefill link efficiency ≥ 80 % of measured rate; **E7′** (successor of E7) B70 prefill ≥ 4× the CPU-tail path on the same model |
+| 4 | three-tier placement, spill path, `-mba`, reload/autosplit, docs + env-var table | **C** at `-mb 255`/`-mba` on both reference models, decode within 5 % of the all-GPU reference on Qwen3.5 |
+| 5 | optional: T2 resident engine, CPU+B70 coexistence, second B70, power policy | each justified by a ≥ 20 µs/token measured saving |
+
+## 10. Risks
+
+| risk | mitigation |
+|---|---|
+| `register_host_memory` does not work on a second process's mapping | Phase-0 test; fallback = engine as a parent-side thread (§6) |
+| documented `sycl_ext_intel_matrix` extras are newer than the installed 2026.2 runtime (no `aspect::ext_intel_matrix`) | build-time capability probe; kernels written against plain `joint_matrix` / ESIMD `xmx::dpas` with the OpenCL `intel_sub_group_*` route as the reference; `b70-kernels.md` §4 grades the options |
+| a resident engine wedges the card, or blocks a second B70 user | T2 off by default; sized by measurement; child dies on device-lost so the parent's watchdog turns it into an exception instead of a hang |
+| `.wait()`/event latency creeping back into the hot path (it is 24 µs and silent) | the harness asserts a *per-job host-time* budget and the code review rule: no `wait()` outside setup/teardown (`LESSONS` 1) |
+| int8-dot or funnel-shift mis-compilation quietly corrupts weights | the format test vectors from `doc/b70` (K=4 table) run as a device unit test at every commit, plus the `EXL3_MOE_B70_VERIFY` differential against the CPU tier |
+| fp32-vs-int32 accumulation temptation changes the numeric class | Gate B′ pins the class; any deviation (e.g. bf16 DPAS) needs a new level-B measurement, not a relaxed threshold |
+| the link is not really 14.4 GB/s on another boot (sysfs says Gen1 ×1 **[M]**, measured 14.4) | never hard-code: `probe_bandwidth` at startup drives `SLOT_ROWS`, `ROW_FRACTION` and `stream_t(S_c)`, and the report states the measured rate with every number |
+| power/thermal: 275 W cap, and B70 prefill is a sustained all-core load | the harness samples board power and pkg/vram temperature; a throttled run is flagged by the temperature slope, not by wall time alone |
+| placement profile leaks between runs (the single biggest confounder found in the prep work) | harness deletes or pins the profile per run, exactly as `notes/run_profile_ab.sh` does, and every reported number names its placement start |
+
+---
+
+## 11. Open questions that could still change this design
+
+Each is answerable by one probe or one benchmark, listed in the order that would hurt most if the
+answer goes the wrong way:
+
+1. **Does `register_host_memory` work on a segment mapped in a second process?** If not, the engine
+   becomes a parent-side thread (§6) and the SYCL enqueue cost lands on the forward thread — which
+   then makes T1/T2 (graph replay, resident engine) mandatory rather than optional.
+2. **Does `dot_4x8packed_us_int` / `sycl::ext::oneapi::dot_acc` compile to one Xe2 instruction?**
+   Seven ops per weight instead of one pushes decode past the ALU budget (§1 of
+   `b70-kernels.md`) and the answer becomes "decode on the B70 is XMX-only", which changes the tier
+   boundary at 4–16 rows.
+3. **How much of the 608 GB/s does the decode GEMV actually reach** with native tile order, with
+   banding, and with evict-first cache controls? Below ~250 GB/s the decode job stops being hidden
+   behind the parent's window and the *placement* (how many experts go to the B70 at all) becomes a
+   throughput decision instead of a capacity one.
+4. **Is a resident engine survivable in production** (device-loss semantics, a second B70 client,
+   `power1_cap` behaviour while spinning)? Measured: 3.2 µs round trip and a 21–371 µs drain, so it
+   is worth ~2–5 µs/layer and nothing more.
+5. **DPAS route R1 (fp16 B) vs R2 (u8 product bytes)** — depends on whether the card is ALU- or
+   XMX-bound at the model's actual rows/expert, and on the undocumented byte order inside a DPAS
+   operand (confirm with the vectors first).
+6. **Where the input transform belongs** (3090 in the issue kernel vs B70): the payload argument is
+   only real if E5 shows the link as the prefill bottleneck; B′5 has to pass either way.
+7. **What serves `S_c` best on a machine with a B70 at all** — the CPU GEMV at ~45 GB/s, streaming
+   the expert to the 3090 at 14.4 GB/s, or streaming it to the B70 (two crossings, then 608 GB/s)?
+   Recalibrate `stream_t` for all three rather than inheriting the CPU value.
