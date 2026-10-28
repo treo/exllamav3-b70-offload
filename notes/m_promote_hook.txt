@@ -1,0 +1,103 @@
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.0.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.1.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.2.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.3.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.4.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.5.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.6.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.7.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.8.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.9.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.10.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.11.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.12.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.13.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.14.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.15.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.16.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.17.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.18.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.19.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.20.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.21.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.22.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.23.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.24.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.25.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.26.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.27.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.28.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.29.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.30.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.31.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.32.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.33.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.34.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.35.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.36.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.37.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.38.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU split experts (worker, promote-on-miss): model.language_model.layers.39.mlp [64..256) of 256, 4 spare slots, placement from saved profile
+ -- CPU MoE worker started: 40 layers, avx2, 15 threads
+ -- CPU MoE host affinity: host on LPs [15, 31]
+USDT:2026-10-28 20:41:24 630301:630301 SyncActivityProfilerHandler.cpp:39] profiler_start
+ -- promote-on-miss: step 128, 239 promotions, 233 demotions, 8 in flight; last 128 steps: 167.2 routed/step, 115.0 on the CPU (31.2% hit), hook 3.51 ms/step
+ -- promote-on-miss: step 256, 953 promotions, 949 demotions, 10 in flight; last 128 steps: 158.2 routed/step, 40.5 on the CPU (74.4% hit), hook 5.53 ms/step
+ -- promote-on-miss: step 384, 1616 promotions, 1610 demotions, 12 in flight; last 128 steps: 173.9 routed/step, 32.3 on the CPU (81.4% hit), hook 5.06 ms/step
+USDT:2026-10-28 20:41:32 630301:630301 SyncActivityProfilerHandler.cpp:46] profiler_stop
+
+### decode x400: 3242.14 ms device time, 51 distinct activities
+ ms total      %   calls   us/call  key
+  463.605  14.30   12000     38.63  void exl3_mgemm_kernel<7, false, true, 2, 16, 16, 512, 4, 3>(__half const*, unsigned s
+  359.612  11.09   16000     22.48  void exl3_gemm_kernel<7, false, true, 2, 16, 32, 128, 4, 3>(__half const*, unsigned sh
+  303.162   9.35   16000     18.95  void exl3_moe_coop_ns::exl3_moe_coop_a_kernel<3, 2, true, false>(MoeCoopParams)
+  287.364   8.86   16000     17.96  void exl3_moe_coop_ns::exl3_moe_coop_a_kernel<7, 2, true, false>(MoeCoopParams)
+  194.314   5.99   28551      6.81  Memcpy DtoH (Device -> Pinned)
+  186.888   5.76   16000     11.68  void exl3_moe_coop_ns::exl3_moe_coop_b_kernel<3, 2, true, false>(MoeCoopParams)
+  181.408   5.60     400    453.52  void exl3_gemm_kernel<6, false, false, 2, 16, 16, 512, 4, 3>(__half const*, unsigned s
+  172.760   5.33   16000     10.80  void exl3_moe_coop_ns::exl3_moe_coop_b_kernel<7, 2, true, false>(MoeCoopParams)
+  161.850   4.99    1798     90.02  Memcpy HtoD (Pinned -> Device)
+  125.354   3.87    4000     31.34  void exl3_mgemm_kernel<7, false, false, 2, 16, 16, 512, 4, 3>(__half const*, unsigned 
+   78.784   2.43   55860      1.41  aten::copy_
+   77.709   2.40   31600      2.46  void rms_norm_kernel<2, float, __half, __nv_bfloat16, float>(float const*, __nv_bfloat
+   62.681   1.93   12000      5.22  void cuda_recurrent_gated_delta_rule_kernel_128<0, 4, false, __half>(__nv_bfloat16 con
+   60.945   1.88   16000      3.81  moe_split_issue_kernel(long*, long const*, float*, __half const*, __half const*, int*,
+   60.642   1.87   16000      3.79  routing_gemv_kernel(__half const*, __half const*, __half*, int, int)
+   58.505   1.80   16000      3.66  moe_split_collect_add_kernel(float*, float const*, int const*, int, int, int, int)
+   52.837   1.63   16000      3.30  routing_std_topk_kernel(__half const*, long*, __half*, __nv_bfloat16 const*, __half co
+   48.775   1.50   24000      2.03  aten::fill_
+   37.278   1.15   12000      3.11  void conv1d_update_kernel<true, false, false>(__nv_bfloat16 const*, __nv_bfloat16*, in
+   36.544   1.13   12000      3.05  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::Half>, 
+ -> 8.105 ms of device time per token
+### decode: host-side cost of the handoff / MoE calls
+  293.701 ms   58636      5.01 us/call  cudaMemcpyAsync
+  194.726 ms   55860      3.49 us/call  aten::copy_
+    7.122 ms    7582      0.94 us/call  cudaEventRecordWithFlags
+USDT:2026-10-28 20:42:38 630301:630301 SyncActivityProfilerHandler.cpp:39] profiler_start
+USDT:2026-10-28 20:42:39 630301:630301 SyncActivityProfilerHandler.cpp:46] profiler_stop
+
+### prefill 1024 rows: 723.74 ms device time, 128 distinct activities
+ ms total      %   calls   us/call  key
+  229.516  31.71    4128     55.60  aten::copy_
+  221.716  30.63    2489     89.08  Memcpy HtoD (Pinned -> Device)
+   58.121   8.03     151    384.91  void exl3_moe_kernel<3, 128, 2, 64, false, false>(__half const*, __half*, __half*, __h
+   30.492   4.21      54    564.67  void f16acc::gemm_kernel<false, 128, false>(__half const*, __half const*, void*, int, 
+   21.904   3.03     204    107.37  void f16acc::gemm_kernel<true, 128, false>(__half const*, __half const*, void*, int, i
+   12.494   1.73     148     84.42  void exl3_moe_kernel<3, 256, 2, 16, false, false>(__half const*, __half*, __half*, __h
+   11.764   1.63     345     34.10  moe_unswizzle_kernel(unsigned char const*, unsigned char*, unsigned long, unsigned lon
+   10.981   1.52     152     72.24  void exl3_moe_kernel<3, 128, 2, 32, false, false>(__half const*, __half*, __half*, __h
+    7.643   1.06     250     30.57  void reconstruct_had_kernel<7, 2, false>(__half*, unsigned short const*, __half const*
+    6.419   0.89     654      9.82  void reconstruct_had_batch_kernel<3, 2, false>(__half*, unsigned short const* const*, 
+    5.302   0.73      80     66.28  aten::sort
+    4.911   0.68     128     38.37  ampere_fp16_s16816gemm_fp16_64x128_ldg8_f2f_stages_32x6_nn
+    3.914   0.54     854      4.58  aten::gather
+    3.904   0.54      48     81.34  ampere_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn
+    3.901   0.54     640      6.10  void at_cuda_detail::cub::detail::radix_sort::DeviceRadixSortOnesweepKernel<at_cuda_de
+    3.865   0.53     645      5.99  Memcpy DtoH (Device -> Pinned)
+    3.522   0.49    2481      1.42  aten::index_select
+    3.522   0.49    1626      2.17  void at::native::(anonymous namespace)::indexSelectSmallIndex<long, long, unsigned int
+    3.132   0.43     192     16.31  aten::scatter_add_
+    3.090   0.43     495      6.24  aten::cat
+    2.904   0.40     152     19.11  void at::native::vectorized_scatter_add_kernel<16, float, long>(float*, float const*, 
+    2.861   0.40      79     36.22  void rms_norm_kernel<2, float, __half, __nv_bfloat16, float>(float const*, __nv_bfloat
+ -> 1415 tok/s of device time (723.7 ms for 1024 rows)

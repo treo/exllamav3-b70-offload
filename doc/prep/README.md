@@ -68,6 +68,10 @@ top-10, K=2.5/3).
 * Slot reuse is gated on `consumed` (written by the *reading* device's stream), not `done`
   (written by the worker): with offloaded layers spread over several accelerators, `done` alone lets
   the worker overwrite an output another device has queued but not performed.
+* Placement is not free: a periodic hot/cold sweep measures **~6 ms** (device quiesce + a
+  checkpoint re-read) and the promote-on-miss hook **~2-3 ms per decode step** of host time
+  (`measured-costs.md` §8.2). Both are invisible at default intervals, and both are pure host
+  work a port will re-implement from scratch.
 * `EXL3_MOE_CPU_SLOT_ROWS` is not only a chunk size: the fused decode path refuses `rows >
   cap_rows`, so lowering it below the speculative-verify width (32) silently switches that traffic
   to the slower copy path.

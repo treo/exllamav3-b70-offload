@@ -325,6 +325,29 @@ of CPU streaming per token, against a measured 30.4 ms/token total, i.e. the GPU
 cannot hide behind is ~12 ms — consistent with its 48 layers and 2560-wide hidden versus Qwen3.5's
 40 × 2048 at 10.2 ms (§6).
 
+### 8.2 Placement machinery has a real cost, and it is bursty
+
+Two measurements (`EXL3_MOE_CPU_SWAP_DEBUG=1`), both on Qwen3.5 `-mcs 192`:
+
+* **Periodic sweep.** Forcing it every 4 decode steps (`EXL3_MOE_CPU_SWAP_INTERVAL=4`, 65 sweeps in
+  the run) moves decode from ~100 tok/s to **62-66 tok/s** for contexts ≥ 256
+  (`notes/m_e2e_swapint4.txt`), i.e. **≈6 ms per sweep**: a `torch.cuda.synchronize()` on every
+  device holding a split layer, a checkpoint re-read of the promoted expert, its upload and the map
+  update. At the default interval of 128 that amortizes to ~0.05% of decode — and it is why the
+  sweep is deferred to the generator's queue-drained hook rather than happening mid-generation.
+  Prefill was unaffected (1778 tok/s), since sweeps only fire between decode steps.
+* **Promote-on-miss hook.** The `-mcpa` path prints its own accounting every 128 steps: hit rate
+  climbing 31% → 81% as the resident set settles, ~13 CPU-computed picks/step early on, and a
+  `hook` cost of **3.5-5.5 ms per reported step** (`notes/m_promote_hook.txt`). Cross-checking
+  against §8's decode delta (`-mcpa` 78 vs `-mcs 192` ~100 tok/s ⇒ +2.6 ms/token), the reported
+  denominator spans roughly two forwards, so the honest figure is **~2-3 ms of host time per
+  token**: `ev.synchronize()` on the pinned hit-count snapshot, numpy ranking over all split
+  modules, and per-transfer `torch.cuda.device` + stream-ordering calls. It is per *step*, not per
+  byte moved, which is why it hurts short-context decode most.
+
+Neither cost appears in `doc/env_vars.md`; both bear on whether a port keeps promote-on-miss
+enabled by default.
+
 ## 9. What a port should re-measure first
 
 1. Pinned H2D/D2H sustained bandwidth and latency floor (sets `stream_t`, `WSLOT_MB`, and whether

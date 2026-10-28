@@ -150,6 +150,14 @@ collect, the wait retires immediately and the layer costs nothing but its two ke
      module's hidden width differs from the quantized width) as `int4` stores.
 4. Stream: `cuStreamWriteValue32(data_ready[slot] = seq)`.
 
+Why the translate is **in place**: the bsz-1/bsz≤8 routing outputs are static tensors whose
+addresses are baked into the BC (bound-class) kernel graphs that run the GPU-resident experts, so
+the physical-slot remap must update those buffers rather than produce new ones
+(`routing.cu:1101-1106`, `block_sparse_mlp_cpu.py:592-608`). Note also that this handoff cannot be
+captured into any replayable graph: step 1 writes a *host* descriptor whose sequence number changes
+per call and advances a ring index, and the waits reference per-slot flag lines by value. The model
+forward is eager Python enqueues; only the expert kernels themselves (`bc`) are pre-captured.
+
 Data volume for a decode step, per offloaded layer: `sel` `topk×4 B`, `w` `topk×2 B`, and either 0
 or `x = hi×2 B` per row. On Qwen3.8 at bsz 1: 40 B + 20 B + 5 120 B (or nothing). Measured: the two
 kernels cost 3.9 and 4.0 µs of device time, the pair of host calls ~14-22 µs to enqueue, and a job
