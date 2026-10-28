@@ -274,7 +274,17 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
 1. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
    retune measured on real 4.05 decode (C-ABI prefers 2, bench prefers 7 — a wave cliff at 3) and
    per-(entry) 2-arrival units. Summation order must stay bit-identical.
-2. **B70 gemv weight bandwidth = 11-24% of peak — the one lever left that matters, and it is the
+2. **Weight *representation*, not arithmetic — the decode gemv ceiling (`lab_i8gemv.cpp`).** With a
+   byte-aligned layout the dot product is FREE (loads-only variant equals the dot variant to 0.1 us,
+   ~530-600 GB/s of bytes read), while today's packed bit-window gather tops out at 145-260 GB/s
+   even in an isolated lab with no pipeline. Both production gemvs already run at that lab rate
+   (gu 51.4 us/8.2 MB = 160 GB/s, coop-down 28.4/4.1 = 145), so the win is in the ORDER of the
+   bytes, not in fewer instructions or more bandwidth: a nibble-aligned, k-contiguous repack of the
+   SAME 4 bits/weight costs no extra VRAM and measured 1.8-2.1x packed-equivalent (268-301 GB/s) in
+   the lab. That is the current top decode lever (and it also prices pre-decoded int8: 4x bytes for
+   no gain over the reorder - rejected). Full table + reasoning:
+   `archive/decode-command-latency.md` §2026-10-28 (03:00-04:00).
+2a. **B70 gemv weight bandwidth = 11-24% of peak — the one lever left that matters, and it is the
    SAME one for both workloads.** Measured ladder (`bench_layer --e 260 --topk 10`, harness's own
    GB/s column, `archive/decode-command-latency.md`): decode rows=1 float **76.2 GB/s** / int8
    66.4; rows 4-32 float 84-93, int8 129-147 — against 608 spec / 674 measured D2D. At rows=1
@@ -284,7 +294,7 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
    split-K (monotonically worse, auto is optimal), more WGs via k-slicing, and graph-based
    submission (see 2b). Investigation should go to per-thread outstanding-load depth and the
    decode/bytesum chain between loads, not to queue mechanics.
-2b. **SYCL command graphs — mechanism PROVEN, payoff measured too small, do not ship.** A graph
+2c. **SYCL command graphs — mechanism PROVEN, payoff measured too small, do not ship.** A graph
    replay of the forward chain works with our real kernel shapes (`lab_graph4.cpp`: job-block H2D
    node + `nd_range<2>` + `local_accessor` + device-scope `atomic_ref` RMW + external dep event,
    0 bad / 300 replays rewriting the pinned job block), and it saves ~1.2 us per command

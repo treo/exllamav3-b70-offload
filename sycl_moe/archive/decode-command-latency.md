@@ -360,3 +360,64 @@ decode/bytesum chain length between loads, and per-WG tile shape (n-subgroup cou
 more split-K or at submission mechanics. (Related negative results already on file: `(tk&3)`
 depth-4 prefetch array, wide 128-lane WGs without the ring, annotated_ptr hints —
 `archive/kernel-microopt.md`, `archive/platform-pitfalls.md` P10.)
+
+## 2026-10-28 (03:00-04:00): where the decode forward's 161 us actually is
+
+Two new instruments, both host-side only (rule 3: no device hooks):
+`EXL3_MOE_B70_HOSTPROF=1` (per-stage host gap|submit-cost, printed every 256 forwards) and
+`lab_i8gemv.cpp` (same logical work, three weight representations, prints real and
+packed-equivalent GB/s).
+
+### Stage attribution, `bench_layer --e 260 --rows 1 --topk 10` (median 161 us, unprofiled)
+
+| stage | span (`--v`, inflated) | packed bytes | rate |
+|---|---|---|---|
+| K1 prep_gu | 2.6 us | – | – |
+| (gap before gemv_gu) | 18.0 us | – | – |
+| K2 gemv_gu (gate+up) | **51.4 us** | 8.2 MB | **160 GB/s** |
+| K34 act+prep_d | 4.1 us | – | – |
+| K56 coop-down | **28.4 us** | 4.1 MB | **145 GB/s** |
+
+**So the harness's `=> 76 GB/s` headline is an end-to-end number, not a kernel number: the two
+gemvs themselves run at 145-160 GB/s.** `lab_i8gemv.cpp` reproduces exactly that for the packed
+bit-window access pattern alone (variant A, 10 experts, no split-K, no pipeline: 145 GB/s), which
+means *the production gemvs are at the ceiling of their own access pattern* — the remaining ~75 us
+of the forward is command/wait latency (and `--v` inflates spans by ~40 us, so treat the split as
+indicative, not additive).
+
+### What the packed representation costs, and what a byte-aligned one would buy
+
+| `lab_i8gemv` variant (K x N x E matched to the decode job) | time | real GB/s | packed-equivalent GB/s |
+|---|---|---|---|
+| A packed bit-window gather (today's layout), E=10, K=2560 N=640 | 56.6 us | 145 | **145** |
+| A packed, same shape, E=20 (2x workgroups) | 64.6 us | 254 | **254** |
+| A packed, down-like shape (K=640 N=2560) | 31.4 us | 261 | **261** |
+| B pre-decoded int8, contiguous k, pair dots, E=10 gu | 30.6 us | 535 | **268** |
+| B pre-decoded int8, down-like | 27.2 us | 603 | **301** |
+| C same loads as B, **math removed** | 30.6 / 27.1 us | 536 / 603 | 268 / 301 |
+
+Three conclusions, in priority order:
+
+1. **B ≡ C to within 0.1 us: with a byte-aligned weight layout the dot product is FREE — that
+   kernel is pure memory.** So decode's gemv cost is *representation*, not arithmetic: the trellis
+   bit-window read (7 overlapping u32 gathers per 16 columns per lane) is what caps us at
+   ~150 GB/s, and a byte/nibble-aligned ordering runs at the machine's small-stride ceiling
+   (~530-600 GB/s of bytes actually read).
+2. **The clean version of the fix costs no extra VRAM**: re-order the *same* 4 bits/weight at
+   upload so each lane's 16 k-values are byte-adjacent (nibble-aligned, k-contiguous per column)
+   instead of bit-window-interleaved. Measured ceiling from row B/C: ~2.6-3.7x on the gemv, i.e.
+   decode forward ~161 → ~100 us if it lands halfway. Requires: a second stream repack
+   (`repack_native_to_stream_words` sibling), a `GemvNibble` instantiation, tier selection, and a
+   host reference for the new path (the i8trace discipline applies: device + host ref + harness
+   move together, `moe_layout.hpp` is the single source).
+3. Keeping a *pre-decoded int8 copy* of the worker tier is **not** the answer: 4x the bytes does
+   not fit (15.7 GB packed → 61 GB), and per row B/C it buys nothing over (2) once the layout is
+   byte-aligned. It would only make sense as a small hot-expert cache.
+
+### Also measured: host submission is NOT the remaining cost
+
+`EXL3_MOE_B70_HOSTPROF=1`, steady state: every stage's host `sub` < 0.05 us/forward and `gap` ≈ 0.
+(The first 256-forward window shows one 69 us `submit` at stage 2 — a first-use/one-time cost, not
+a per-forward one; it vanished in every later window.) Independently confirms the `lab_graph4`
+slope: there is nothing left for command graphs or host-side trimming to win here, and it retires
+the last argument for PLAN_L0.

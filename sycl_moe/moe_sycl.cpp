@@ -54,13 +54,52 @@ void alog_msg(const char* fmt, ...)
     FILE* f = alog();
     if (!f) return;
     struct timeval tv; gettimeofday(&tv, nullptr);
-    fprintf(f, "%ld.%03ld %d ", (long)tv.tv_sec, (long)tv.tv_usec / 1000, (int)getpid());
+    fprintf(f, "%ld.%06ld %d ", (long)tv.tv_sec, (long)tv.tv_usec, (int)getpid());
     va_list ap; va_start(ap, fmt);
     vfprintf(f, fmt, ap);
     va_end(ap);
     fputc('\n', f);
     fflush(f);
 }
+
+namespace {
+
+// Host-side submission profiler (EXL3_MOE_B70_HOSTPROF=1). HOST code only - no in-kernel state
+// (NOTES verification rule 3) and no device-visible effect when off. It answers the question the
+// --v spans can only imply: what is the submitting thread doing while the device sits idle?
+// Per stage (ordinal: 0 = job-blob H2D, then one per launch in submit order) it accumulates
+//   gap = host time from the previous stage's end to this stage's submit start,
+//   sub = duration of the submit/memcpy CALL itself.
+// Means print every 256 forwards; the gettimeofday pair costs ~1-2 us per stage, so these numbers
+// are diagnostic, not an A/B result.
+struct HostProf
+{
+    static double now_us()
+    { struct timeval tv; gettimeofday(&tv, nullptr); return tv.tv_sec * 1e6 + tv.tv_usec; }
+    double mark = 0.0, gap[12] = {}, sub[12] = {};
+    int idx = 0;
+    static HostProf& me() { static HostProf h; return h; }
+    void begin() { mark = now_us(); }
+    double start_region() { const double t = now_us(); if (idx < 12) gap[idx] += t - mark; return t; }
+    void end_region(double t0) { const double t = now_us(); if (idx < 12) sub[idx] += t - t0; mark = t; ++idx; }
+    void end()
+    {
+        static int calls = 0;
+        if ((++calls % 256) != 0) return;
+        printf(" -- hostprof (%d fwd, us gap|sub per stage):", calls / 256);
+        for (int i = 0; i < idx && i < 12; ++i)
+            if (sub[i] + gap[i] > 0.05) printf(" [%d %.2f|%.2f]", i, gap[i] / 256.0, sub[i] / 256.0);
+        printf("\n"); fflush(stdout);
+        for (int i = 0; i < 12; ++i) gap[i] = sub[i] = 0.0;
+    }
+};
+struct HpScope
+{
+    const bool on;
+    ~HpScope() { if (on) HostProf::me().end(); }
+};
+
+} // namespace
 
 namespace {
 
@@ -1760,11 +1799,19 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
 
     // NOTE: implicit in-order ordering between chained submits/memcpys is NOT enforced on
     // this stack (oneAPI 2026.2 + L0 + Xe2); explicit depends_on chains are required.
+    static const int hpf = []{ const char* e = std::getenv("EXL3_MOE_B70_HOSTPROF");
+                               return e && e[0] == '1'; }();
+    const HpScope hp_scope{hpf != 0};
+    if (hpf) HostProf::me().begin();
+    const double ht0 = hpf ? HostProf::me().start_region() : 0.0;
     sycl::event dep = pre_dep ? q.memcpy(w_chunk, hb, blob_sz, {*pre_dep})
                               : q.memcpy(w_chunk, hb, blob_sz);
+    if (hpf) HostProf::me().end_region(ht0);
     if (prof) { pev.clear(); pev.push_back(dep); }
     auto launch = [&](auto&& fn) {
+        const double htl = hpf ? HostProf::me().start_region() : 0.0;
         dep = q.submit([&](sycl::handler& cgh) { cgh.depends_on(dep); fn(cgh); });
+        if (hpf) HostProf::me().end_region(htl);
         if (prof) pev.push_back(dep);
     };
 
