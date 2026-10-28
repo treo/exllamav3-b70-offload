@@ -56,3 +56,27 @@ them:
 4. Numerics are the CPU path's class (int8 activations, fp32 transforms), validated by the
    acceptance levels in [`doc/prep/port-acceptance.md`](../prep/port-acceptance.md), not by
    bit-exactness against the GPU path.
+
+## Start here, next session
+
+Phase 0 is nearly done (the probes in [`notes/b70/`](../../notes/b70/README.md) answer the
+transport and sharing questions). What is left before any of the design is exercised end to end:
+
+1. `notes/b70/probe_gemv.cpp`: the `Recipe A` trellis decode for one 16×16 tile, diffed against
+   `tests/testlib/trellis.py` on the device, plus the K=4 vector table from
+   `doc/b70/EXL3 mul1 Trellis Unpacking…` — this is Gate B′6 and it needs no engine, so it is the
+   cheapest place to find out whether the ALU budget (`~9 ops/weight`) is real on this compiler.
+2. Same file, second kernel: does `dot_acc` / `dot_4x8packed_us_int` become **one** instruction
+   (`IGC_ShaderDumpEnable=1`)? Open question 2, and it gates the decode-vs-XMX tier boundary.
+3. `exllamav3/exllamav3_ext/b70/` + `ext_b70.py`: the torch-free C-ABI engine library, with a
+   `b70_engine_submit(job_desc)` that does nothing but DMA the slot message back and forth and
+   publish `done`. Wire it to `MoeB70Host` in the child process and run the Level-D liveness tests
+   with a *null* kernel: if an all-zero output folded into the routed sum still passes the protocol
+   tests, the plumbing is right and only the arithmetic is missing.
+4. Then the real GEMV (Gate B′1/B′2), and only then `-mb`.
+
+Rules to keep while doing it (`notes/b70/LESSONS.md` is the reason for each):
+no `.wait()` on a job path; DMA in, fenced stores out; no `sycl::atomic_ref` on the shared region;
+explicit `i[0]` indexing; assert on every payload word, never on a return code or a flag alone;
+pin the placement profile before timing anything; sample board power with the engine parked as the
+baseline.
