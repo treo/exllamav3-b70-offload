@@ -1,0 +1,16 @@
+# layer 7: H=2048 I=512 K=3 E=256 topk=8 expert=1.125 MiB | slots=4 cap_rows=64 slot=771.0 KiB region=67.3 MiB memops=False threads=15
+flags: host enqueue: write 2.93 us, satisfied wait 2.49 us
+flags: handshake round trip (stream idle 0 ms beforehand): med 10.7 us p90 13.2 us max 363.0 us
+flags: handshake round trip (stream idle 2 ms beforehand): med 14.8 us p90 46.3 us max 214.4 us
+flags: GPU write -> host sees it (incl. enqueue+launch): med 7.4 us p90 8.5 us
+loop rows=  1: host enqueue issue+collect   15.6 us | serial layer med   171.9 us p90   234.8 | stream issue   33.8 us collect   137.2 us | 48-layer pipeline   165.1 us/layer (experts 8/256)
+loop rows=  2: host enqueue issue+collect   24.3 us | serial layer med   285.9 us p90   294.8 | stream issue   13.1 us collect   276.3 us | 48-layer pipeline   277.1 us/layer (experts 15/256)
+loop rows=  4: host enqueue issue+collect   24.8 us | serial layer med   507.4 us p90   512.2 | stream issue   27.6 us collect   478.2 us | 48-layer pipeline   522.9 us/layer (experts 29/256)
+loop rows=  8: host enqueue issue+collect   26.5 us | serial layer med   977.9 us p90  1241.5 | stream issue   36.9 us collect   958.5 us | 48-layer pipeline   972.1 us/layer (experts 57/256)
+loop rows= 16: host enqueue issue+collect   32.2 us | serial layer med  1982.1 us p90  2280.9 | stream issue   18.4 us collect  2412.5 us | 48-layer pipeline  2021.6 us/layer (experts 100/256)
+loop rows= 32: host enqueue issue+collect   43.8 us | serial layer med  4240.3 us p90  4628.3 | stream issue   42.0 us collect  4148.2 us | 48-layer pipeline  4244.9 us/layer (experts 166/256)
+unswizzle g: 28 experts   10.5 MiB r+w, group=2 planar=1:    50.8 us (433.9 GB/s effective)
+unswizzle u: 28 experts   10.5 MiB r+w, group=2 planar=1:    50.8 us (433.2 GB/s effective)
+unswizzle d: 28 experts   10.5 MiB r+w, group=2 planar=1:    50.5 us (436.4 GB/s effective)
+/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

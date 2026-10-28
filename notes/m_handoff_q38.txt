@@ -1,0 +1,19 @@
+# layer 7: H=2560 I=640 K=2.5 E=512 topk=10 expert=1.465 MiB | slots=4 cap_rows=64 slot=963.8 KiB region=68.1 MiB memops=True threads=15
+flags: host enqueue: write 1.89 us, satisfied wait 1.94 us
+flags: handshake round trip (stream idle 0 ms beforehand): med 6.8 us p90 8.4 us max 19.6 us
+flags: handshake round trip (stream idle 2 ms beforehand): med 10.5 us p90 21.5 us max 220.6 us
+flags: GPU write -> host sees it (incl. enqueue+launch): med 5.1 us p90 5.7 us
+loop rows=  1: host enqueue issue+collect   21.6 us | serial layer med   403.0 us p90   411.7 | stream issue   37.9 us collect   364.5 us | 48-layer pipeline   401.6 us/layer (experts 10/512)
+empty rows=  1: serial layer med    25.6 us p90    26.4 | 48-layer pipeline    18.7 us/layer
+loop rows=  2: host enqueue issue+collect   19.9 us | serial layer med   773.1 us p90   784.2 | stream issue   31.7 us collect   738.3 us | 48-layer pipeline   768.2 us/layer (experts 20/512)
+empty rows=  2: serial layer med    20.5 us p90    26.2 | 48-layer pipeline    15.3 us/layer
+loop rows=  4: host enqueue issue+collect   21.2 us | serial layer med  1508.7 us p90  1557.6 | stream issue   32.8 us collect  1469.4 us | 48-layer pipeline  1515.6 us/layer (experts 39/512)
+empty rows=  4: serial layer med    20.9 us p90    26.9 | 48-layer pipeline    15.4 us/layer
+loop rows=  8: host enqueue issue+collect   21.2 us | serial layer med  3071.4 us p90  3274.5 | stream issue   38.9 us collect  3158.0 us | 48-layer pipeline  3088.6 us/layer (experts 75/512)
+empty rows=  8: serial layer med    20.7 us p90    26.4 | 48-layer pipeline    13.8 us/layer
+loop rows= 16: host enqueue issue+collect   21.5 us | serial layer med  6429.9 us p90  7005.8 | stream issue   33.9 us collect  6357.9 us | 48-layer pipeline  6376.3 us/layer (experts 138/512)
+empty rows= 16: serial layer med    20.2 us p90    21.2 | 48-layer pipeline    13.5 us/layer
+loop rows= 32: host enqueue issue+collect   15.7 us | serial layer med 11711.2 us p90 12248.7 | stream issue   47.1 us collect 11873.3 us | 48-layer pipeline 11743.9 us/layer (experts 229/512)
+empty rows= 32: serial layer med    20.6 us p90    29.4 | 48-layer pipeline    13.6 us/layer
+/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
