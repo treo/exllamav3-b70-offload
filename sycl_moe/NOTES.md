@@ -323,7 +323,101 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
    across `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property
    shapes), ~5.4 us inside the plugin, ~21 us under `bench_layer`; the lab also drifts ~15% run to
    run, so read 2.6-3.5 us as one number. **Consequence: 1b is the only route left.**
-1b. **The bigger version of the same prize: a persistent worker kernel - now feasibility-checked.**
+1c. **Placement is 100% STATIC in the shipped config, and the B70 cannot be given more hot work —
+    measured, with the mechanism checked.** Facts, each verified this session:
+    * With `-mcs 256` on 2.05bpw, every layer registers `E 260` on the B70 (256-slice + 4 spares)
+      and `b70n == E`: the B70 already holds the **whole** worker slice. The arena math agrees
+      (326 476 800 B/layer = 260 x 1.258 MB) and the budget is not binding (15.7 GB of 26.8 GB).
+    * Therefore promote-on-miss has **no candidates**: `misses = ... & ((mp - first) >= b70n)`
+      (`block_sparse_mlp_cpu.py:302`) is the empty set when `b70n == E`. Confirmed by **zero `UPDATE`
+      lines** (no `b70_update_expert` call) across two full decode runs.
+    * `EXL3_MOE_CPU_SWAP_POLICY=hot2` and `EXL3_MOE_CPU_SWAP_INVERT=1` are read only inside
+      `_split_sweep_layer` (:1036, :1069), and `_split_swap_tick` returns before the sweep whenever
+      the layer has spares (:990-994) - it does (4/layer). So both envs are INERT here: measured `nc`
+      curves are identical with and without them (2.37/2.27/3.57/1.87/1.66/1.50 vs
+      2.36/2.25/3.57/1.91/1.66/1.50). Anyone concluding "the policy did not help" from those arms is
+      concluding nothing: the code path never ran.
+    * Consequently the within-run `nc` falloff is NOT migration (nothing can migrate) - it is workload
+      phase composition. My own earlier statement that it was "experts migrating off the B70" was
+      wrong and is retracted.
+    * Giving the B70 MORE work does engage (raising `-mcs` widens the worker slice, and `b70n` follows
+      it to `E`), and it is measured, mechanism-checked, and slightly NEGATIVE for decode:
+      | mcs | mean nc | forward p50 us | decode t/s (2 reps) |
+      |---|---|---|---|
+      | 256 | 2.21 | 65.7 | 67.7 / 67.1 |
+      | 320 | 2.60 | 67.5 | 67.0 / 66.7 |
+      | 384 | 3.11 | 68.9 | 67.4 / 66.2 |
+      | 448 | 4.23 | 80.7 | 67.3 / 66.4 |
+      Marginal expert on the B70 leg = (80.7-65.7)/(4.23-2.21) = **7.4 us**, while the same expert on
+      the 3090 costs ~1.4 us of DRAM (1.23 MB at ~900 GB/s) plus a launch. The child's work is
+      ALREADY overlapped with the parent's GPU work (two-phase issue/collect: `cpu_split_submit`
+      returns `(cpu_partial, cpu_pending)`, collected after the GPU's own expert pass), so the B70's
+      idleness is not a wasted resource - it is slack behind the parent's critical path. Lengthening
+      the child's per-layer wall past that overlap is exactly what the table above penalizes.
+    * Implication: the B70 wins only where the alternative is PCIe streaming from the 3090's side
+      (92 us/expert measured in prefill) - hence `-mcs 256` sitting near optimum and prefill being
+      where the B70 earns its keep (+7-10% measured). To use the idle card on decode we would have to
+      displace work that is on the PARENT's critical path at less than its cost there; at rows=1 and
+      2.05 bpw it is ~5x slower per expert than the 3090, so it cannot.
+    * What remains genuinely on the table for decode: shrink the child's fixed 57.6 us/layer (levers
+      1a/1b) so more of the child's work hides under the parent's per-layer GPU time, and rows>1
+      batching (DPAS tier at 129-147 GB/s) where the B70 is competitive.
+    Two code paths could move hot experts onto the B70 and neither can run in the shipped config
+    (`-mcs 256 -mcpa`, 2.05bpw):
+    * promote-on-miss masks the B70 slot range out of its candidate set:
+      `misses = routed & ~resident & ~busy & ((mp - first) >= b70n)`
+      (`exllamav3/modules/block_sparse_mlp_cpu.py:302`) - promotions can only land in CPU-tier
+      slots `>= b70n`, so `b70_update_expert` is never called for them.
+    * the periodic sweep - the ONLY code that honours `EXL3_MOE_CPU_SWAP_POLICY=hot2` (:1036) and
+      `EXL3_MOE_CPU_SWAP_INVERT=1` (:1069, whose comment says the hot expert "now travels to the
+      device through b70_update_expert") - is bypassed whenever the layer has spare slots:
+      `if self._split_spares: _split_promote_step(...); return` (:990-994). This config registers
+      **4 spare slots per layer**, so the sweep never executes.
+    Measured proof it is inert: with `hot2` on vs off, per-decode-job `nc` is identical in every
+    sixth of the run (ctrl 2.37/2.27/3.57/1.87/1.66/1.50 vs hot2 2.36/2.25/3.57/1.91/1.66/1.50)
+    and **zero `UPDATE` lines appear in either ALLOCLOG** - no expert ever moved onto or off the
+    B70. Consequences: `EXL3_MOE_B70_SUB` only resizes a *static, cold-by-profile* prefix
+    (worker slice is experts `[256..512)` = the colder half by the saved heat profile, and the B70
+    holds its prefix), which is exactly why SUB=0.5 / SUB=512 measured neutral-to-worse
+    (dec 68.3 / 67.0 / 67.1); and my earlier statement that the `nc` falloff during a run is
+    "experts migrating off the B70" was WRONG - with zero updates it is benchmark phase
+    composition, not migration.
+    Still true and worth keeping in mind: the B70 leg is worth **+6.1% decode** (interleaved 3-arm:
+    `EXL3_MOE_B70=1` 68.1 vs `=0` 64.2 dec_avg), so it matters - it is just starved, and the fix is
+    code, not config. Ranked options:
+    (i) CONFIG-ONLY approximation, unverified properly so far: enlarge the worker slice so some
+        globally-hot experts fall inside it (`-mcs 384`: dec 68.8 vs 67.7 control, ONE non-
+        interleaved rep = inside noise) - the B70 prefix then holds the hottest of a warmer slice.
+        Needs an interleaved 3-round A/B with `nc` from ALLOCLOG as the mechanism check (expect nc
+        to rise from ~2.2 toward 4-6 before believing any perf move).
+    (ii) SMALL CODE CHANGE: let the invert/hot2 sweep run even when spares exist (it already knows
+        how to quiesce, budget and install via `b70_update_expert`). This is the direct route to
+        "half the hot set on each device".
+    (iii) Teach promote-on-miss to target B70 slots (needs a spare concept inside `[0,b70n)`).
+
+1b. **A persistent worker kernel - floor measured, dependable trigger not yet.** Sources: the LLVM
+    sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
+    `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
+    `WorkGroupScratchMemory`) plus an aspect probe: B70 + oneAPI 2026.2 reports
+    **`ext_oneapi_device_wait` YES**, `ext_oneapi_graph` (executable, WITH node updates) YES,
+    `ext_oneapi_limited_graph` YES, `ext_oneapi_external_semaphore_import` YES, geometry
+    **256 compute units, 128 KB SLM, max_work_group_size 1024, 64 sub-groups/WG** (which also
+    explains lever 4's lab curve: 50 WGs x 8 sub-groups is ~1.6 SIMD16 streams per EU, so the decode
+    gemv really is under-distributed - true, just not on the critical path).
+    Measured (`lab_doorbell.cpp`, resident kernel + pinned doorbell, host-side clocks, 100 ms ceiling):
+    round trip **p50 2.4-3.1 us at 1 WG** and ~8-11 us at 16-64 WGs - i.e. the ceiling of the idea is
+    the whole 57.6 us of fixed cost - but **20-75% of pings stall past 20 ms**, so it is not shippable
+    as understood. Three mechanism lessons, each reproducible:
+    (a) polling SYSMEM with an acquire LOAD goes deaf after a few pings (legal lowering to a cached
+        load) - the doorbell must be an atomic RMW;
+    (b) hundreds of WGs RMW-polling one DEVICE-memory line serializes catastrophically (>20 ms per
+        job from 8 WGs up) - fan-out needs per-WG slots or `device_wait`, not a shared line;
+    (c) completion must be LEVEL-triggered (`done >= want`), because the device coalesces doorbells
+        and an equality test waits forever for a skipped id.
+    A resident spinner does not starve other queues and in fact *speeds them up* (16 MB fill on a
+    second queue: 17.5 us with a spinner vs 34.0 us without) - which points at idle/clock states as
+    the stall source; the keepalive-trickle variants (modes 7/8: a tiny submission every 2 ms / 10 ms
+    on the other queue) are coded and are the natural next test. Ranked below 1c for now.
     From the LLVM sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
     `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
     `WorkGroupScratchMemory`) plus an aspect probe on this box: B70 + oneAPI 2026.2 reports
