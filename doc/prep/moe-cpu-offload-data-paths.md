@@ -57,6 +57,15 @@ draft / MTP), page-locked in the parent with `cudaHostRegister(..., PORTABLE | M
 `gpu_base_ptr` (`cuda_host_get_device_pointer`) is the device-visible alias; all kernel-facing
 addresses are computed from it.
 
+*Lifecycle*: `Model.load` spawns the child process **before** loading any module (`model.py:614-616`)
+so the worker's own interpreter/torch/checkpoint-index startup overlaps the GPU-side load — note that
+`moe_cpu_host.py`'s module docstring still says the child is spawned at the first layer registration.
+Layers are then streamed to the child over a pipe (parent→child via a sender thread, child→parent
+acks and arena-chunk descriptors), the region is created and the worker's `ready` flag is awaited in
+`ensure_started` on the first forward, and a host watchdog thread starts there. Tensor-parallel loads
+raise `NotImplementedError` if an offload was requested (`model.py:695-710`): the TP loader exports
+modules from CPU-staged tensors, which would silently drop the offload.
+
 ```
 offset 0        ctrl block:  quit | pass_wake | abort | ready | jobs_tail | jobs_head   (64 B apart)
 offset 384      MoeJob jobs[256]            (1056 B each: 7 u32 header + experts[256] + seq_hi)

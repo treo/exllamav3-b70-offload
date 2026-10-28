@@ -72,7 +72,11 @@ top-10, K=2.5/3).
   cap_rows`, so lowering it below the speculative-verify width (32) silently switches that traffic
   to the slower copy path.
 * `doc/env_vars.md:411` documents the streaming threshold base as 16; the code uses 8
-  (`moe_cpu_host.py:139`). Undocumented-but-live knobs: `EXL3_MOE_CPU_SPLIT`,
+  (`moe_cpu_host.py:139`), and `moe_cpu_host.py`'s module docstring says the worker is spawned at the
+  first layer registration while `model.py:614-616` spawns it before any module loads (deliberately,
+  to overlap interpreter startup). Neither changes behaviour, but both are load-bearing-looking text
+  a porter would otherwise trust.
+* Live but undocumented in `doc/env_vars.md`: `EXL3_MOE_CPU_SPLIT`,
   `EXL3_MOE_CPU_SPLIT_LAYERS`, `EXL3_MOE_CPU_SWAP{,_INTERVAL,_HYST,_FLOOR,_MAX,_DEBUG,_VERIFY}`,
   `EXL3_MOE_SPLIT_FUSED`, `EXL3_MOE_SUBMIT_PROF`, `EXL3_SPLIT_PROF`, `EXL3_MOE_POOL_PRIME`,
   `EXL3_MOE_CPU_SMALL_WORKERS`.
