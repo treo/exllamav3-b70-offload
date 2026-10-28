@@ -110,13 +110,6 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
     pass, 5-7 k afterwards; streamed experts 260 → ~70-110, tail rows 0 → ~300-770). Every
     policy/threshold experiment run on cold state measures a different workload. `pb.py`'s reps
     (or perf.py run 2) are the steady state; `split_report.py` shows the split per forward.
-12. **Arms must differ in exactly ONE factor — a 20% phantom win cost an hour.** In
-    `lab_inorder_cost.cpp` the first "handler-free `nd_launch`" arm looked ~2 µs/chain faster than the
-    control, but it also swapped the kernel body and replaced a different NUMBER of `q.submit` calls
-    inside the chain. Re-measured with 6 identical launches (same kernel, same 14 args, same device
-    work, only the API differing) the effect reverses sign: `nd_launch` is ~0.6 µs/launch *slower*.
-    Before quoting any A/B, name the single factor and show the arm that changes only it — and when a
-    result contradicts a previous measurement, suspect the comparison before the compiler.
 11. **An instrument that prints nothing may be BROKEN, not silent.** The first version of
     `EXL3_MOE_B70_HOSTPROF` never reset its stage counter in `begin()`, so after ~2 forwards
     nothing accumulated and every later window printed an empty line. I read that silence as
@@ -125,6 +118,13 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
     (isolated lab), ~5.4 us (model), ~21 us (harness). Rule: a diagnostic must print its own
     denominator and emit at least one unconditional line per window, so that "zero" is always a
     measured zero rather than an absent one.
+12. **Arms must differ in exactly ONE factor — a 20% phantom win cost an hour.** In
+    `lab_inorder_cost.cpp` the first "handler-free `nd_launch`" arm looked ~2 µs/chain faster than the
+    control, but it also swapped the kernel body and replaced a different NUMBER of `q.submit` calls
+    inside the chain. Re-measured with 6 identical launches (same kernel, same 14 args, same device
+    work, only the API differing) the effect reverses sign: `nd_launch` is ~0.6 µs/launch *slower*.
+    Before quoting any A/B, name the single factor and show the arm that changes only it — and when a
+    result contradicts a previous measurement, suspect the comparison before the compiler.
 
 ## Verification rules
 
