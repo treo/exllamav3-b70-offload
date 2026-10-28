@@ -1,0 +1,12 @@
+  entry/heartbeat marker: 0xbee0 (0xBEEF = started, parked; 0 = never ran)
+  doorbell + payload, all groups ack                      26.44    32.41    37823  [ok] rounds 301
+  resident kernel exit                                 19 us to drain
+  entry/heartbeat marker: 0xbee0 (0xBEEF = started, parked; 0 = never ran)
+  doorbell + payload, all groups ack                     283.54   288.24     3527  [ok] rounds 301
+  resident kernel exit                                 20 us to drain
+  entry/heartbeat marker: 0xbee0 (0xBEEF = started, parked; 0 = never ran)
+  doorbell + payload, all groups ack                     302.66   319.26     3304  [ok] rounds 301
+  resident kernel exit                                 25 us to drain
+  entry/heartbeat marker: 0xbee0 (0xBEEF = started, parked; 0 = never ran)
+  doorbell + payload, all groups ack                     350.49   363.07     2853  [ok] rounds 301
+  resident kernel exit                                 31 us to drain

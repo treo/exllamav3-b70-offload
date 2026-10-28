@@ -1,0 +1,8 @@
+mode A: after 50 ms, heartbeat=0 (0 = kernel never ran or never reached the beat)
+mode A: doorbell round trip 911853.88 us [NOT ACKED], beat 0
+mode A: 200 rounds, mean 3.27 us, best 2.76 us
+mode B: after 50 ms, heartbeat=0 (0 = kernel never ran or never reached the beat)
+mode B: doorbell round trip 4.09 us [acked], beat 0
+mode B: 200 rounds, mean 3.20 us, best 2.42 us
+mode C: submit-per-job, mean 4.99 us, best 4.14 us
+done

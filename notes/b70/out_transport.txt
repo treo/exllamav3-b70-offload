@@ -1,0 +1,32 @@
+== 1. device
+  name                                         Intel(R) Arc(TM) Pro B70 Graphics
+  compute units reported                       256
+  max work-group size                          1024
+  sub-group sizes                              16 32 
+  global memory                                31.9 GiB
+  local memory (SLM)                           128 KiB
+  usm host / shared / boxed                    y
+    ... shared                                 y
+    ... indirect call/stack (spi), images      atomic-shared n
+  buffer/image import (interop)                system-alloc y
+  PCIe link                                    2.5 GT/s PCIe x1 (idle sample)
+== 2. pinned(host USM) <-> device
+  size           H2D GB/s    D2H GB/s      H2D us      D2H us  round trip submit+wait us
+  256 MiB           14.40       14.51    18620.88    18517.73  under load link 2.5 GT/s PCIe x1
+  32 MiB            14.40       14.48     2349.10     2335.14  under load link 2.5 GT/s PCIe x1
+  1 MiB             13.68       14.02       96.14       94.80  under load link 2.5 GT/s PCIe x1
+  128 KiB            7.29        5.94       32.65       31.23  under load link 2.5 GT/s PCIe x1
+  16 KiB             0.93        0.92       25.60       24.08  under load link 2.5 GT/s PCIe x1
+  4 KiB              0.23        0.23       24.08       24.19  under load link 2.5 GT/s PCIe x1
+== 3. one-job-one-submission cost model
+  single_task: host submit only                med 18.12 us (p90 18.45)
+  single_task: submit + wait                   med 22.03 us (p90 22.51)
+  copy+kernel+copy, 16 KiB, wait once          med 62.44 us (p90 65.27)
+  same, pipelined                              58.94 us per job (8 in flight)
+== 4. kernel touching host-pinned memory in place (zero copy)
+  4096 lanes: pinned read + write              med 25.76 us (1.27 GB/s incl. launch)
+  4096 lanes: pinned write only                med 23.78 us
+  1 lane, 4096 sequential pinned reads         med 251.37 us (dependent!)
+  => stores cheap, reads latency-bound         kernel must not chase host pointers
+== 8. board power, idle with live context: 46.0 W
+done

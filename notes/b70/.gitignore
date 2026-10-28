@@ -1,0 +1,6 @@
+# build products and binaries of the B70 probes
+probe_transport
+probe_doorbell
+probe_notify
+probe_resident
+libb70shim.so

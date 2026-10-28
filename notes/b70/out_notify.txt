@@ -1,0 +1,16 @@
+== N1..N5: one submission per job, completion via pinned flag
+  job                                                med us     p90 us       GB/s
+  N1 empty kernel -> ack                               6.25       6.82       0.00
+  N2 kernel reads 4 KiB pinned, acks sum               9.81      10.75       0.42
+  N2 kernel reads 16 KiB pinned, acks sum             10.67      11.86       1.54
+  N2 kernel reads 256 KiB pinned, acks sum            31.77      32.30       8.25
+  N3 kernel writes 16 KiB to pinned, acks              9.03       9.82       1.81
+  N4 D2H 16384 B via DMA, then ack                     7.57       8.28       2.16
+  N5 H2D 16384 B via DMA, then ack                     8.92       9.48       1.84
+  N4 D2H 131072 B via DMA, then ack                   15.40      15.83       8.51
+  N5 H2D 131072 B via DMA, then ack                   16.93      17.46       7.74
+  N4 D2H 1048576 B via DMA, then ack                  79.05      79.76      13.27
+  N5 H2D 1048576 B via DMA, then ack                  80.06      81.31      13.10
+  N4 D2H 4194304 B via DMA, then ack                 297.45     298.08      14.10
+  N5 H2D 4194304 B via DMA, then ack                 301.39     302.66      13.92
+done
