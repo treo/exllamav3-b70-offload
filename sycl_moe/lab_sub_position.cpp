@@ -63,6 +63,12 @@ struct KPlain {                // gemv-like: nd_range<1>, no accessor
 
 struct Ctx {
     float *d, *a; uint8_t *dx, *bdev; void* hx; void* hb; void* hout;
+    // `carry` models what b70_forward does with g_last_ev: the FIRST memcpy of a forward depends on
+    // the PREVIOUS forward's last event. The child has already polled that event to completion, so
+    // the edge is vacuous for correctness - the question is whether materialising it is what makes
+    // the NEXT kernel submit cost 2-3x its siblings in the model (it does not in the plain arms).
+    sycl::event* carry = nullptr;
+    bool carry_valid = false;
 };
 
 // one production-shaped forward: x H2D, blob H2D, K1(acc), gemv, K34(acc), K56(2 accs), out D2H.
@@ -73,7 +79,8 @@ static sycl::event chain(sycl::queue& q, Ctx& C, double* t, bool deps, bool nacc
     sycl::nd_range<1> r1{sycl::range<1>{512}, sycl::range<1>{128}};
     double p = us();
     auto tick = [&](int k) { const double z = us(); if (t) t[k] += z - p; p = z; };
-    sycl::event ex = q.memcpy(C.dx, C.hx, BX);                              tick(0);
+    sycl::event ex = (C.carry && C.carry_valid) ? q.memcpy(C.dx, C.hx, BX, {*C.carry})
+                                                : q.memcpy(C.dx, C.hx, BX);     tick(0);
     sycl::event eb = deps ? q.memcpy(C.bdev, C.hb, BB, {ex})
                           : q.memcpy(C.bdev, C.hb, BB);                     tick(1);
     sycl::event e1 = q.submit([&](sycl::handler& cgh) {
@@ -99,6 +106,7 @@ static sycl::event chain(sycl::queue& q, Ctx& C, double* t, bool deps, bool nacc
     });                                                                     tick(5);
     sycl::event e5 = deps ? q.memcpy(C.hout, C.d, 10240, {e4})
                           : q.memcpy(C.hout, C.d, 10240);                   tick(6);
+    if (C.carry) { *C.carry = e5; C.carry_valid = true; }
     return e5;
 }
 
@@ -165,11 +173,20 @@ int main(int argc, char** argv) {
     show("in_order + deps", qio, 0, true);
     show("in_order, no deps", qio, 0, false);
     show("OOO + deps, NO local_accessors", qooo, 0, true, true);
+    sycl::event carry;
+    C.carry = &carry;
+    show("OOO + deps + carried last-ev (MODEL)", qooo, 0, true);
+    show("in_order + deps + carried last-ev", qio, 0, true);
+    C.carry = nullptr; C.carry_valid = false;
     printf("\nDRAINED + 200 us idle per chain (the model's cadence):\n");
     show("OOO + deps  (production shape)", qooo, 1, true);
     show("in_order + deps", qio, 1, true);
     show("in_order, no deps", qio, 1, false);
     show("OOO + deps, NO local_accessors", qooo, 1, true, true);
+    C.carry = &carry; C.carry_valid = false;
+    show("OOO + deps + carried last-ev (MODEL)", qooo, 1, true);
+    show("in_order + deps + carried last-ev", qio, 1, true);
+    C.carry = nullptr;
     printf("\ncompare: the MODEL measures blob-h2d 3.3 | K1 11.9 | gemv 4.6 | K34 4.5 | down 5.2 us\n");
     return 0;
 }

@@ -97,16 +97,37 @@ struct HostProf
     double mark = 0.0, gap[NCLS][NSLOT] = {}, sub[NCLS][NSLOT] = {}, tailv[NCLS] = {};
     double body[NCLS][NSLOT] = {};
     double bmark = 0.0;
+    // MIN per stage per window. The MEAN alone proved unusable for attribution: the same binary
+    // reported prologue 0.7 us in one 256-forward window and 5.7 us in another, and K1 anywhere from
+    // 5.3 to 17.3, while the per-forward total held at 30-34 us. A handful of preemption-length
+    // samples moves a mean by microseconds; the minimum over a window is what EVERY layer job
+    // demonstrably pays, so quote min when arguing where the fixed cost sits and mean when adding up.
+    double smin[NCLS][NSLOT];
+    // MAX and a >10us counter per stage, next to min and mean. Together they are what turned this
+    // instrument from a liar into an answer: K1-prep reads min 5.0 / mean 13.8, which is not a stage
+    // that costs 14 us - it is a stage that usually costs 5 and sometimes costs a lot. Mean alone
+    // hid that; min+mean alone only hinted at it.
+    double smax[NCLS][NSLOT];
+    unsigned slowcnt[NCLS][NSLOT];
+    HostProf() { reset_windows(); }
     const char* lbl[NCLS][NSLOT] = {};
     int idx = 0, cls = 0, n = 0, nsamp[NCLS] = {}, stages[NCLS] = {};
     static HostProf& me() { static HostProf h; return h; }
     void begin(int c) { mark = now_us(); idx = 0; cls = c; ++n; ++nsamp[c]; }
+    void reset_windows()
+    { for (int c = 0; c < NCLS; ++c) for (int i = 0; i < NSLOT; ++i)
+      { smin[c][i] = 1e30; smax[c][i] = 0.0; slowcnt[c][i] = 0u; } }
     double start_region(const char* nm = nullptr)
     { const double t = now_us(); if (idx < NSLOT) { gap[cls][idx] += t - mark;
                                                     if (nm && !lbl[cls][idx]) lbl[cls][idx] = nm; }
       return t; }
     void end_region(double t0)
-    { const double t = now_us(); if (idx < NSLOT) sub[cls][idx] += t - t0; mark = t; ++idx; }
+    { const double t = now_us();
+      if (idx < NSLOT) { const double d = t - t0; sub[cls][idx] += d;
+                         if (d < smin[cls][idx]) smin[cls][idx] = d;
+                         if (d > smax[cls][idx]) smax[cls][idx] = d;
+                         if (d > 10.0) ++slowcnt[cls][idx]; }
+      mark = t; ++idx; }
     void body_begin() { bmark = now_us(); }
     void body_end() { if (idx > 0 && idx <= NSLOT) body[cls][idx - 1] += now_us() - bmark; }
     void end()
@@ -123,15 +144,17 @@ struct HostProf
             {
                 if (sub[c][i] + gap[c][i] <= 0.0) continue;
                 tg += gap[c][i]; ts += sub[c][i];
-                printf(" [%d %s %.2f|%.2f|b%.2f]", i, lbl[c][i] ? lbl[c][i] : "-",
-                       gap[c][i] / nsamp[c], sub[c][i] / nsamp[c], body[c][i] / nsamp[c]);
+                printf(" [%d %s mean %.2f min %.2f|max %.0f|slow %u]", i, lbl[c][i] ? lbl[c][i] : "-",
+                       sub[c][i] / nsamp[c], smin[c][i] > 1e29 ? 0.0 : smin[c][i],
+                       smax[c][i], slowcnt[c][i]);
             }
             printf("  || pre %.2f + enqueue %.2f + tail %.2f = host %.2f us/fwd (%d stages)\n",
                    tg / nsamp[c], ts / nsamp[c], tailv[c] / nsamp[c],
                    (tg + ts + tailv[c]) / nsamp[c], stages[c]);
             fflush(stdout);
             for (int i = 0; i < NSLOT; ++i)
-            { gap[c][i] = sub[c][i] = body[c][i] = 0.0; lbl[c][i] = nullptr; }
+            { gap[c][i] = sub[c][i] = body[c][i] = 0.0; lbl[c][i] = nullptr; smin[c][i] = 1e30;
+              smax[c][i] = 0.0; slowcnt[c][i] = 0u; }
             tailv[c] = 0.0; nsamp[c] = 0; stages[c] = 0;
         }
     }
@@ -1901,6 +1924,20 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
         const int ctr_cells = coopD || coopGU
             ? (int)(ctrG_n + ctr1_n + ctr2_n) : 0;
         const int clr_rows = ctr_cells ? (ctr_cells + nbk * 128 - 1) / (nbk * 128) : 0;
+        // DIAGNOSTIC ONLY (EXL3_MOE_B70_PROBE_FIRST=1). K1 measures ~13 us in the model where every
+        // other submit measures ~5, and its own handler body is only ~0.35 us - so the extra ~8 us is
+        // the runtime's bookkeeping for THAT launch. Two candidate reasons, distinguishable only by
+        // experiment: POSITIONAL (it is the first KERNEL after the two host->device copies, so it is
+        // whoever closes the copy->compute edge) or INTRINSIC (something about this kernel's
+        // dispatch). Submitting a trivial 1-WG kernel with no local_accessor immediately before K1
+        // moves the edge to the probe: if the ~8 us follows it, the cost is positional.
+        // Timing-only knob: it writes tin[0], which K1 overwrites in the same forward.
+        static const int probe_first = []{ const char* e = std::getenv("EXL3_MOE_B70_PROBE_FIRST");
+                                          return e && e[0] == '1'; }();
+        if (probe_first)
+            launchN("probe-first", [&](sycl::handler& cgh) {
+                cgh.single_task([=] { tin[0] += 1.0f; });
+            });
         launchN("K1-prep", [&](sycl::handler& cgh) {
             sycl::local_accessor<float, 1> sh({128}, cgh);
             cgh.parallel_for(sycl::nd_range<2>({(size_t)nbk * 128, (size_t)(nc * nm + clr_rows)}, {128, 1}),

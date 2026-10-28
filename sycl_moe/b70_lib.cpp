@@ -89,18 +89,41 @@ bool ensure_ctx()
         // NOTE the explicit async_handler: the DEFAULT one calls std::terminate, and this
         // stack routes some device-selector/adapter init failures through the async path
         // (e.g. a malformed ONEAPI_DEVICE_SELECTOR kills the worker despite try/catch).
-        static sycl::queue queue{sycl::gpu_selector_v,
-                                 sycl::async_handler{[](sycl::exception_list el) {
-                                     for (auto& e : el) {
-                                         try { std::rethrow_exception(e); }
-                                         catch (const sycl::exception& se) {
-                                             fprintf(stderr, "[b70moe] async: %s\n", se.what());
-                                         } catch (...) {}
-                                     }
-                                 }}};
-        g.q = &queue;
-        printf("[b70moe] device: %s\n",
-               g.q->get_device().get_info<sycl::info::device::name>().c_str());
+        // EXL3_MOE_B70_INORDER=1 builds the queue with property::queue::in_order.
+        // WHY THIS EXISTS: the plugin's queue has never been in-order, which is what P1 turned out
+        // to be mis-diagnosing (see platform-pitfalls.md), and lab_inorder_cost measured the same
+        // q.submit+functor launch at 2.53 us on an in_order queue vs 3.15 us on an out-of-order one
+        // (~0.6 us per launch, presumably the runtime allocating an event per command because
+        // commands COULD overlap). Semantically in_order only ADDS ordering and every op here is
+        // already chained with explicit events, so correctness cannot regress; what could regress is
+        // any place that relied on two command streams overlapping on this one queue (b70_warm
+        // shares it, serialized by exec_mu), so it is a knob to A/B, not a default.
+        // Prints is_in_order() so a silently-ignored property can never be read as a result.
+        static const bool inorder = []{
+            const char* e = getenv("EXL3_MOE_B70_INORDER");
+            return e && e[0] == '1';
+        }();
+        auto ash = sycl::async_handler{[](sycl::exception_list el) {
+            for (auto& e : el) {
+                try { std::rethrow_exception(e); }
+                catch (const sycl::exception& se) { fprintf(stderr, "[b70moe] async: %s\n", se.what()); }
+                catch (...) {}
+            }
+        }};
+        // std::vector form of the properties argument, which is the overload that also accepts an
+        // async_handler (selector + single-property + handler is not a constructor that exists).
+        (void)0;
+        static sycl::queue queue_oos{sycl::gpu_selector_v, sycl::async_handler{ash}};
+        // The overload that takes properties AND an async handler is
+        // (device_or_selector, async_handler, property_list) - not (context, device, props, handler).
+        static sycl::queue queue_io{sycl::device{sycl::gpu_selector_v}, sycl::async_handler{ash},
+                                   sycl::property_list{sycl::property::queue::in_order{}}};
+        g.q = inorder ? &queue_io : &queue_oos;
+        if (inorder && !g.q->is_in_order())
+            fprintf(stderr, "[b70moe] WARNING: in_order requested but NOT in effect\n");
+        printf("[b70moe] device: %s | queue in_order=%d\n",
+               g.q->get_device().get_info<sycl::info::device::name>().c_str(),
+               (int)g.q->is_in_order());
         // Leave a fat margin for scratch pools, queue/page-table allocations and driver
         // bookkeeping; running right up to physical VRAM makes LAUNCHES fault asynchronously
         // with UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY instead of failing an allocation cleanly.
