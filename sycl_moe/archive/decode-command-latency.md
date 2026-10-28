@@ -293,3 +293,70 @@ answer to its arg-mutation and SLM-binding problems) as the follow-up if the res
    path creates/signals/polls ~4-8 events per forward, and the completion wait polls
    `event::get_info<command_execution_status>()` (a driver call per poll). Reusing an event pool
    instead of fresh event objects is the cheap version of the counter-based-event idea above.
+
+## Correction after the production-shaped lab (`lab_graph4.cpp`) — graphs are ~1%, not 1.5x
+
+`lab_graph.cpp`/`lab_graph3.cpp` above used near-trivial kernels, so *submission* dominated the
+measurement and the ratio looked like 1.47-1.62x. `lab_graph4.cpp` replays the chain with
+production shapes (`nd_range<2>` + `local_accessor` + device-scope `atomic_ref` RMW on the blob's
+counter zone + an external dependency event + a job-block H2D node) and the ratio collapses:
+
+| commands in the forward | submits | graph | saved | saving/command |
+|---|---|---|---|---|
+| ~5 (memcpy + 3 kernels + gather) | 14.84 us | 13.12 us | **1.74 us** | ~1.2 us |
+| 7 | 19.46 us | 16.72 us | 2.74 us | ~1.1 us |
+| 9 | 25.89 us | 20.36 us | 5.53 us | ~1.2 us |
+| 13 | 36.10 us | 27.48 us | 8.62 us | ~1.1 us |
+
+Correctness result stands and is the useful part: **graphs do carry our kernel shapes** (0 bad /
+300 replays with the host rewriting the pinned job block and an external dep event each time), so
+the mechanism is available if it is ever needed. But the payoff is ~1.2 us per command *only when
+the kernels are big enough to hide submission already* — i.e. 48 forwards/token x ~2-5 us =
++0.7-1.4% decode on 2.05bpw, at or below the ±3% / 1 t/s noise floor. **Verdict: do not spend the
+complexity** (per-geometry graph caches, invalidation on every moving pointer, an experimental API
+in the hot path) for that. Lesson for the archive: a command-overhead lab must use kernels with
+production-like duration, or it measures the wrong thing — the same class of error as
+`measurement-discipline.md`'s "short benches lie".
+
+## What decode is actually bound by: gemv weight bandwidth at 11-24% of peak
+
+`bench_layer --e 260 --topk 10 --iters 800` (harness prints `weights => GB/s`; sustained, this is
+the same E as the model's worker tier; rms columns confirm tier/rate: float 1.1-1.4e-6, int8
+1.3-1.4e-3):
+
+| rows | float tier | int8 tier |
+|---|---|---|
+| 1 | 161.3 us — **76.2 GB/s** | 185.1 us — 66.4 GB/s |
+| 2 | 327.7 us — 71.2 GB/s | 225.5 us — 103.5 GB/s |
+| 4 | 566.4 us — 84.6 GB/s | 370.2 us — 129.4 GB/s |
+| 8 | 912.7 us — 92.9 GB/s | 578.8 us — 146.5 GB/s |
+| 16 | 1664.4 us — 87.9 GB/s | 1004.5 us — 145.6 GB/s |
+| 32 | 2724.7 us — 84.3 GB/s | 1615.7 us — 142.2 GB/s |
+
+Against 608 GB/s spec (674 GB/s measured D2D in `measurements-ledger.md`), the best we ever do is
+**24%**, and decode (rows=1, the shape every token pays 48 times) sits at **12-13%**. Neither the
+FLOPs nor the bandwidth is saturated at rows=1: 12.3 MB of weights ~ 46 M weights x 2 flop x 1 row
+= 92 MFLOP in 161 us = 0.57 TFLOP/s of 22.7, and 76 of 608 GB/s — so the kernels are
+**latency/dependency bound**, not resource bound. That single fact explains both workloads'
+residual cost: prefill's cold tail (11.8 us per nearly-empty chunk) and decode's floor are the same
+problem, and it is the one lever left worth real effort.
+
+Free-knob probe of the obvious hypothesis (too few workgroups in flight → deepen split-K):
+**rejected, and the current auto choice is already the best** (`bench_layer --e 260`, median):
+
+| `MOE_NSL` | rows=1 | rows=4 |
+|---|---|---|
+| 0 (auto) | **161.5 us / 76.1 GB/s** | **370.3 us / 129.4 GB/s** |
+| 2 | 171.3 / 71.8 | 379.0 / 126.5 |
+| 4 | 177.5 / 69.2 | 379.7 / 126.2 |
+| 8 | 186.9 / 65.8 | 412.7 / 116.1 |
+| 12 | 190.7 / 64.4 | 412.7 / 116.1 |
+| 16 | 202.3 / 60.7 | 412.5 / 116.2 |
+
+More slices cost monotonic time, so the limit is not WG count in the k dimension — it is the
+per-workgroup serial k-walk (load -> trellis decode -> FMA dependency chain) not being deep enough
+to keep memory busy. Which points the investigation at: outstanding-load depth per thread, the
+decode/bytesum chain length between loads, and per-WG tile shape (n-subgroup count) rather than at
+more split-K or at submission mechanics. (Related negative results already on file: `(tk&3)`
+depth-4 prefetch array, wide 128-lane WGs without the ring, annotated_ptr hints —
+`archive/kernel-microopt.md`, `archive/platform-pitfalls.md` P10.)

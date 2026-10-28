@@ -18,6 +18,39 @@ noted, "VOID" = invalidated by a confounder listed in `measurement-discipline.md
 | per-command host cost | SYCL submit ~3.7 µs; raw ze append ~2 µs (12-15 µs for a 6-kernel chain) |
 | per-command GPU cost at decode | ~8-15 µs per chained queue op; `--bare` barrier round trip 33 µs |
 
+## 2026-10-28 (late night): decode cost structure — quote these, not the queue-mechanic numbers
+
+`bench_layer --e 260 --topk 10 --iters 800`, harness's own `weights => GB/s` column, 608 GB/s spec
+/ 674 GB/s measured D2D. rms columns confirm tiers (float 1.1-1.4e-6, int8 1.3-1.4e-3).
+
+| rows | float tier | int8 tier |
+|---|---|---|
+| 1 | 161.3 us / **76.2 GB/s** | 185.1 us / 66.4 GB/s |
+| 2 | 327.7 us / 71.2 GB/s | 225.5 us / 103.5 GB/s |
+| 4 | 566.4 us / 84.6 GB/s | 370.2 us / 129.4 GB/s |
+| 8 | 912.7 us / 92.9 GB/s | 578.8 us / 146.5 GB/s |
+| 16 | 1664.4 us / 87.9 GB/s | 1004.5 us / 145.6 GB/s |
+| 32 | 2724.7 us / 84.3 GB/s | 1615.7 us / 142.2 GB/s |
+
+At rows=1: 0.57 TFLOP/s of 22.7 (2.5%) **and** 76 of 608 GB/s (12%) ⇒ the gemvs are
+latency/dependency bound, not resource bound. Supersedes the "~200 GB/s of 608" figure that
+appeared in NOTES/README prefill-economics prose.
+
+Split-K depth sweep (`MOE_NSL`, rows=1 / rows=4 medians): auto **161.5/370.3**, 2: 171.3/379.0,
+4: 177.5/379.7, 8: 186.9/412.7, 12: 190.7/412.7, 16: 202.3/412.5 → monotonic loss; the existing
+auto pick is optimal, "more workgroups via split-K" is refuted.
+
+Command mechanics (production-shaped `lab_graph4.cpp`, min-of-3, chain incl. job-block H2D):
+submits vs graph replay = 14.84/13.12 us at 5 commands, 19.46/16.72 at 7, 25.89/20.36 at 9,
+36.10/27.48 at 13 → **~1.2 us saved per command**, i.e. ≤1.5% decode. Graphs are correct for our
+kernel shapes (0 bad/300) but are not a decode lever; the earlier 1.47-1.62x figures came from
+trivial-duration kernels (`lab_graph.cpp`, `lab_graph3.cpp`).
+
+Decode env-knob screen (`perfab.sh decenv`, `perf.py -spf -dr 3`, control 68.3 t/s):
+`SYCL_UR_USE_LEVEL_ZERO_V2=0` 65.9, `USE_IMMEDIATE_COMMANDLISTS=0` 65.1, `USE_COPY_ENGINE=1` 61.8,
+copy-engine for H2D/D2H 64.1, event-cleanup-threshold=64 66.5, `USE_COMPUTE_ENGINE=1` 67.4.
+Driver surface: 63 extensions, **no IPA/ML-IPA, no mutable calls**, `max_compute_queue_indices=1`.
+
 ## 2026-10-28 (night): device-tier prefill split, 2.05bpw — the shipped default
 
 `perfab.sh policy` = `perf.py -mcs 256 -ngr -mct 15 -mcpa --max_length 4096 -dr 5`, 2 arms x 2

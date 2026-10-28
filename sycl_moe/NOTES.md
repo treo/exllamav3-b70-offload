@@ -274,28 +274,33 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
 1. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
    retune measured on real 4.05 decode (C-ABI prefers 2, bench prefers 7 — a wave cliff at 3) and
    per-(entry) 2-arrival units. Summation order must stay bit-identical.
-2. **SYCL command graphs for the decode chain** — the cheapest big decode lever found 2026-10-28
-   and measured (`lab_graph.cpp`/`lab_graph3.cpp`, `archive/decode-command-latency.md` §“Research
-   2026-10-28”): a captured graph of the forward's command chain replays at **1.47-1.62x lower
-   cost** than building it with submits (8 commands: 23.0 -> 14.2 us; 4 commands: 15.4 -> 10.5 us;
-   1-command floor 5.9 us), because UR command buffers become ONE
-   `zeCommandListImmediateAppendCommandListsExp` instead of N submits through UR->PI->L0. Per-job
-   values go through a **pinned host job block whose H2D is inside the graph** (validated: a replay
-   re-reads the host buffer, 500/500 trials bit-exact) plus nc-bucketed grids with an early exit -
-   no `dynamic`/`updatable` graph machinery needed, and no own-SPIR-V module either. Expect ~5-9 us
-   off every B70 forward (~+2-4% decode on 2.05bpw, more for the 6-7-command int8 chain that
-   rows 2-8 / spec-decode run). Gate: build at registration, re-capture on ANY pointer that can
-   move (`ensure_capacity`, `grow_p`), fall back to submits if the experimental path throws.
-   **Native-L0 submission (`PLAN_L0.md`) drops to 2b**: graphs already take the multi-submit
-   overhead, leaving only the few us between 'graph replay' and the 1-command floor; and if it is
-   attempted, `ZE_experimental_mutable_command_list` 1.1 (present on this driver) is the answer to
-   both its arg-buffer-rebuild and its SLM-binding problems.
+2. **B70 gemv weight bandwidth = 11-24% of peak — the one lever left that matters, and it is the
+   SAME one for both workloads.** Measured ladder (`bench_layer --e 260 --topk 10`, harness's own
+   GB/s column, `archive/decode-command-latency.md`): decode rows=1 float **76.2 GB/s** / int8
+   66.4; rows 4-32 float 84-93, int8 129-147 — against 608 spec / 674 measured D2D. At rows=1
+   neither resource is saturated (0.57 of 22.7 TFLOPS, 76 of 608 GB/s) ⇒ the gemvs are
+   latency/dependency bound on their serial k-walk, so prefill's cold-tail cost (11.8 us per
+   nearly-empty chunk) and decode's floor are one problem. Checked and rejected already: deeper
+   split-K (monotonically worse, auto is optimal), more WGs via k-slicing, and graph-based
+   submission (see 2b). Investigation should go to per-thread outstanding-load depth and the
+   decode/bytesum chain between loads, not to queue mechanics.
+2b. **SYCL command graphs — mechanism PROVEN, payoff measured too small, do not ship.** A graph
+   replay of the forward chain works with our real kernel shapes (`lab_graph4.cpp`: job-block H2D
+   node + `nd_range<2>` + `local_accessor` + device-scope `atomic_ref` RMW + external dep event,
+   0 bad / 300 replays rewriting the pinned job block), and it saves ~1.2 us per command
+   (5 commands 14.84->13.12 us; 13 commands 36.10->27.48 us) — ~+0.7-1.4% decode, at/below the
+   noise floor, not worth per-geometry graph caches and pointer-invalidation risk. (The 1.47-1.62x
+   in `lab_graph.cpp`/`lab_graph3.cpp` was an artifact of trivial-duration kernels; keeping those
+   labs because they are the correctness proof, but read the slope table before quoting them.)
+   Native-L0 (`PLAN_L0.md`) sits behind the same wall and keeps its known SLM blocker.
 3. **Per-fragment DPAS efficiency** (was "DPAS kernel-side prefill gap"). The cost model is now
    measured, not guessed: **run time is proportional to the number of m8 FRAGMENTS executed**
    (MAXM=16 ran 1.2x the fragments of MAXM=8 at E260/rows1024 and took 1.20x the time, while
    doing 1.67x FEWER weight traversals; at rows128 it ran 2x the fragments and took 1.95x).
-   Weight streaming is therefore NOT the limiter (the int8 gemv runs at ~200 GB/s of 608), and
-   wide-M is a dead end - see `moe_layout.hpp`. Fragments/token is also near a floor: m8 rows
+   Traversal is cheap per pass but the passes are slow - the fat int8 gemv sustains only
+   ~130-147 GB/s of 608 at these shapes (measured ladder, lever 2), which is why fragment count
+   and not bandwidth is the binding term *within* a launch while bandwidth is the binding term
+   *across* shapes; wide-M is a dead end - see `moe_layout.hpp`. Fragments/token is also near a floor: m8 rows
    ÷ (vh,vl) = 4 tokens per fragment, and an int8 m16 accumulator does not exist on this device
    (lab_jm9_m16: the runtime rejects `joint_matrix<sint32, accumulator, 16, 16>`). What is left:
    (a) esimd `xmx::dpas<8,8,int>` (t40, operand layouts verified bit-exact there) to remove the
