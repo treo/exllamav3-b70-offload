@@ -42,8 +42,9 @@ top-10, K=2.5/3).
    `experts_touched × expert_bytes / ~45 GB/s` plus a ~20-35 µs handshake tax; ~28% of a streamed
    prefill's device time is pinned→VRAM expert DMA running at exactly the measured link rate
    (12.9 GB/s over 3.9 GiB in the profiled 2048-token chunk), against 8% for the fused MoE kernel.
-3. **`stream_t` is the knob.** Turning GPU streaming off costs 2.1× at 2048 prefill tokens; nothing
-   else measured moves prefill more than 6%.
+3. **`stream_t` is the knob.** Turning GPU streaming off costs 2.1× at 2048 prefill tokens; letting
+    the parent DMA expert bytes straight out of the worker's page-locked arena (`-mcpa`) is worth
+    another 1.3×; nothing else measured moved prefill by more than 6%.
 4. **The worker's throughput does not scale with queue depth** at decode shapes (pipelined 48 jobs
    = same per-layer cost as serial), because a single job already saturates the pool; extra slots
    buy overlap with the *GPU*, not with the worker.

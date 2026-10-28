@@ -104,7 +104,7 @@ Qwen3.5-35B, `-mcs`-style split (all 256 experts in the worker), 15 worker threa
 | 16 | 34.8 µs | 1967.9 µs | 1992.4 µs/layer | 97 |
 | 32 | 34.1 µs | 4211.1 µs | 4257.8 µs/layer | 150 |
 
-Qwen3.8-Flash-Next (K=2.5 experts, 1.76 MiB each, topk 10, 15 threads):
+Qwen3.8-Flash-Next (K=2.5 experts, 1.465 MiB each, topk 10, 15 threads):
 
 | rows | serial layer, med | 48-job pipeline |
 |---|---|---|
@@ -140,7 +140,7 @@ Qwen3.5-35B (K=3 packed band-2+planar, 1.125 MiB/expert, topk 8):
 Per token: 196 µs at 1 row → 76 µs at 128 rows, because ≥2 assignments increasingly share an expert
 (4.1 assignments/expert at 128 rows) and the trellis read is amortized. Scaling is bandwidth-bound
 beyond ~8 threads (45-47 GB/s ≈ the DRAM wall), so extra cores buy little on this host; the
-`EXL3_MOE_CPU_THREADS` sweep in §7 confirms it end to end.
+`EXL3_MOE_CPU_THREADS` sweep in §8 confirms it end to end.
 
 Qwen3.8-Flash-Next, µs/call at 15 threads, rows 1 / 4 / 16 / 64:
 
@@ -153,14 +153,18 @@ Qwen3.8-Flash-Next, µs/call at 15 threads, rows 1 / 4 / 16 / 64:
 | rate | 40 GB/s | 31 GB/s |
 
 *(arch)* K=2.5 with and without `EXL3_MOE_CPU_SWIZZLE` measured identically (490 vs 484 µs at
-rows 1) because the AVX2 tier does not band half rates; for K=3 the same knob is worth
-§7's decode delta. Expect both columns to change on an AVX-512 (band-8) host.
+rows 1) because the AVX2 tier does not band half rates; for K=3 the same knob is worth the decode
+delta in §8. Expect both columns to change on an AVX-512 (band-8) host.
 
-Phase split from a live run (`EXL3_MOE_CPU_PROF=1`, steady-state decode, `-mcs 192`):
-`gemv_gu 380-460 µs (29 GB/s) | gemv_d 200-230 µs (27 GB/s)` per job, with the transform/activation
-phases reported as 0 because the SIMD path runs them inside the two dispatches (`decode_phase`):
-the gate/up GEMV is ~2× the down GEMV, and both are reported at 27-30 GB/s, i.e. under the 45 GB/s
-achievable — small jobs (5.8 CPU assignments/token over 8-10 experts) do not fill 15 threads.
+Phase split: `EXL3_MOE_CPU_PROF=1` reports **cumulative** averages over the whole run (its
+accumulators are never reset, `moe_mul1.cpp:3900,3977,3985`), so with prefill and decode jobs in one run
+the printed per-phase numbers are a mixture that converges only slowly — from `gemv_gu 1840 µs
+(33 GB/s) | gemv_d 1012 µs` early (prefill-dominated) to `154 µs (35 GB/s) | 81 µs (33 GB/s)` after
+73k jobs. Usable as a *ratio* (gate/up ≈ 2× down, both at 33-35 GB/s, i.e. below the 45 GB/s the
+microbenchmark reaches, because a decode job is only ~5.8 assignments over 6-8 experts and does not
+fill 15 threads). The absolute decode cost should come from `EXL3_MOE_HANDOFF_PROF`, which resets
+every 64 jobs: `compute 0.181-0.194 ms/job`, `spin 0.114-0.135 ms` (the worker waiting for the GPU
+to publish inputs — the worker is *ahead*), `gap 0.015-0.036 ms` (queue idle).
 
 ## 6. GPU kernels on the decode path
 
@@ -187,8 +191,9 @@ the two kernels above); the 64 memcpys in the log are unrelated (sampler/state r
 
 ## 7. Prefill: the streamed path
 
-Same script, one 2048-row chunk, `-mcs 192` (all 192 CPU experts of every layer crossed
-`stream_t = 11`, so nothing was left on the CPU tail):
+Same script, one 2048-row chunk, `-mcs 192`. (`prof_e2e` feeds random token ids, so only 3 571 of
+the 7 680 CPU assignments-in-range crossed `stream_t = 11` here; with real text the count is
+~181 of 192 experts per layer — `notes/m_e2e_streamdbg.txt`.)
 
 | activity | calls | µs/call | total ms | share |
 |---|---|---|---|---|
@@ -226,8 +231,13 @@ arena path costs the link copy + unswizzle only.
 
 ## 8. End-to-end effect of the knobs
 
-`eval/perf.py` on Qwen3.5-35B, all-GPU reference vs 25%-of-experts-on-the-CPU etc. Prefill at
-2048 tokens (4096-chunk), decode at 1024 context, 1 rep; `notes/m_e2e_*.txt`. Tok/s.
+`eval/perf.py` on Qwen3.5-35B: all-GPU reference, then 75% of every layer's experts on the CPU
+(`-mcs 192`) and variants. Prefill = the 2048-token point of the prefill sweep (4096-token chunk
+size), decode = 100 tokens at 1024 context. `notes/m_e2e_*.txt`. Tok/s.
+
+**Read this table with a ±6% band**: four runs of the same `-mcs 192` configuration (with and
+without profiler env) measured 93.2, 98.1, 98.9 and 104.2 tok/s at that decode point, and the
+profiler-enabled run measured 66.9. Differences below ~10% are not resolved by single-shot runs.
 
 | configuration | prefill | decode |
 |---|---|---|
@@ -255,11 +265,13 @@ Interpretation, in the order the levers matter:
 1. **Streaming decides prefill.** Disabling it (`STREAM_T` absurd, or `MIN_ROWS` above the chunk
    size) costs 2.1-2.2× at 2048 rows; everything else moves prefill by <6%.
 2. **Pinned arena** buys another +32% prefill (no stager `memcpy`, direct DMA from the worker's
-   weights) but *costs* decode here (78 vs 93), because `-mcpa` also turns on promote-on-miss with
-   4 spare slots per layer and the per-step transfer bookkeeping + DMA competes with decode.
+   weights) but appears to *cost* decode (78 vs 93-104): `-mcpa` also switches placement from the
+   periodic sweep to promote-on-miss with 4 spare slots per layer, whose per-step transfers and
+   bookkeeping land on the critical path.
 3. **Decode is set by expert bytes × hit rate ÷ DRAM bandwidth**, and only secondarily by knobs:
-   halving the pool (15→8 threads) is free, `SLOT_ROWS=32` (smaller, more numerous chunks) is worth
-   ~10%, and the placement mode is worth ~5% in either direction on this workload. `-mcl 40` — no
+   halving the pool (15→8 threads) is free, `SLOT_ROWS=32` is at the top of the range (105) and
+   `-mcpa`'s promote-on-miss at the bottom (78), while static placement (99) is indistinguishable
+   from dynamic (93-104) on this workload. `-mcl 40` — no
    GPU-resident experts at all — costs 56% of decode, matching the model in §4: 40 layers ×
    (8 experts × 1.125 MiB ÷ ~45 GB/s) ≈ 8.8 ms of unavoidable CPU streaming per token on top of the
    ~8.5 ms of GPU work, i.e. ~55 tok/s against the measured 54.5.

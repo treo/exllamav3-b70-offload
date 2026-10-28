@@ -329,3 +329,53 @@ BlockSparseMLP.forward
 `autosplit_measure` forwards skip the CPU work entirely (they only observe VRAM allocations), but
 still request the streamed path's persistent buffers via `prefill_worst_case_parts` so the autosplit
 planner budgets them.
+
+---
+
+## 9. What the paths require *from the accelerator*
+
+The handoff protocol, the shared-memory layout, the job descriptors, the flag semantics and the CPU
+worker are all accelerator-independent. Everything device-specific is this short list, and each item
+already has a second implementation in-tree: `moe_handoff.{h,cu}` dual-targets CUDA and HIP
+(`USE_ROCM` selects 64-bit flags and `hipStreamWaitValue64`), and `rocm/quant/` carries RDNA
+instances of the same MoE/dequant kernels.
+
+1. **Page-locked host memory with a device-visible mapping.** One `cudaHostRegister(PORTABLE |
+   MAPPED)` per handoff region (`model_tp_cuda.py:20`, `cuda_host.cpp:16,61`) plus
+   `cudaHostGetDevicePointer` for the alias the kernels and flag ops use. The alias is *not*
+   assumed to equal the host VA (it differs under WDDM). Every offloaded expert byte also has to be
+   registrable if the pinned-arena path is wanted (`_attach_chunk` registers 1 GiB chunks as they
+   appear).
+2. **Kernels that store to and load from that mapping**, with system-scope ordering:
+   `moe_split_issue_kernel` writes the slot payload, `moe_split_collect_add_kernel` reads it through
+   `volatile`, both end in `__threadfence_system()`; the flag kernels use
+   `ldg_acquire_sys_*` / `stg_release_sys_*` (`ptx.cuh`). A port needs equivalent acquire/release
+   atomics and a system-scope fence, plus write-combining-friendly wide stores (the kernel stores
+   `int4`s deliberately).
+3. **Stream-ordered flag waits and writes without SM occupancy**
+   (`cuStreamWaitValue32` / `cuStreamWriteValue32`, `hipStreamWaitValue64`, resolved via `dlopen`),
+   because the collect wait sits in the middle of the model's own stream and a resident spin kernel
+   would fight the fused decode kernel for blocks. A fallback spin kernel must exist anyway
+   (`EXL3_MOE_MEMOPS=0`), and it needs a timeout + abort flag since only the kernel path has one.
+4. **Multiple streams with events, and correct stream semantics for async copies.** The streamed
+   path runs a copy stream in parallel with the compute stream and synchronizes them only through
+   `wready_ev` / `wconsumed_ev`; the parent may be on a different device than the layer
+   (`OptionalCUDAGuard` on the tensor's device everywhere). Copies must be *contiguous* — a strided
+   host↔device copy is illegal in this design because torch (and most runtimes) satisfy it with a
+   host-side staging pass at enqueue time, outside stream order.
+5. **Device kernels used by the GPU tiers** (existing CUDA entry points a port must cover, in
+   decreasing order of importance for the streamed path): `exl3_moe` (pointer-table fused MoE, with
+   the 16/32/64-row tile instances and `exl3_moe_max_concurrency` for buffer sizing),
+   `exl3_moe_gather` (deterministic accumulation), `reconstruct` / `reconstruct_had*`,
+   `had_r_128`, `hgemm` / `hgemm_recon` (incl. the fp16-accumulator variant),
+   `moe_unswizzle_trellis`, and the bsz≤8 decode path (`exl3_moe_coop`) that provides the overlap
+   the CPU work hides behind.
+6. **Multi-device invariants:** slot reuse gates on `consumed` (written on the *reader's* stream);
+   `dev_count` and the streamed buffers are keyed per device index; swap/promote sweeps must
+   synchronize every device holding a split layer (`run_pending_swap_sweeps`).
+
+Nothing in the CPU side changes when the accelerator changes — except the packed-layout rule, which
+follows the *CPU's* ISA tier and is consumed by `moe_unswizzle_trellis` on the device. If a port
+changes how the weights are laid out in the arena, it must change the un-swizzle kernel (or the
+`_stream_layout` policy that decides restore-vs-direct) in the same commit: three places read
+`exl3_moe_cpu_swizzle_group` (child loader, staging/parent views, GPU restore) and they must agree.
