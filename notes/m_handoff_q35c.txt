@@ -1,0 +1,13 @@
+# layer 7: H=2048 I=512 K=3 E=256 topk=8 expert=1.125 MiB | slots=4 cap_rows=64 slot=771.0 KiB region=67.3 MiB memops=True threads=15
+flags: host enqueue: write 1.83 us, satisfied wait 1.79 us
+flags: handshake round trip (stream idle 0 ms beforehand): med 6.4 us p90 14.9 us max 106.6 us
+flags: handshake round trip (stream idle 2 ms beforehand): med 18.6 us p90 25.9 us max 247.7 us
+flags: GPU write -> host sees it (incl. enqueue+launch): med 4.3 us p90 4.8 us
+copies rows=  1: D2H      4 KiB stream    3.9 us (  1.0 GB/s), enqueue  3.5 us | H2D      8 KiB stream    4.7 us (  1.8 GB/s)
+copies rows=  4: D2H     16 KiB stream    3.7 us (  4.4 GB/s), enqueue  3.4 us | H2D     32 KiB stream    4.0 us (  8.1 GB/s)
+copies rows= 16: D2H     64 KiB stream    5.9 us ( 11.2 GB/s), enqueue  3.4 us | H2D    128 KiB stream   11.2 us ( 11.7 GB/s)
+copies rows= 32: D2H    128 KiB stream   10.9 us ( 12.0 GB/s), enqueue  5.3 us | H2D    256 KiB stream   22.6 us ( 11.6 GB/s)
+copies rows= 64: D2H    256 KiB stream   21.6 us ( 12.2 GB/s), enqueue 10.5 us | H2D    512 KiB stream   41.3 us ( 12.7 GB/s)
+reference pinned H2D 64 MiB: 5164 us (13.0 GB/s); D2H 5331 us (12.6 GB/s)
+/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

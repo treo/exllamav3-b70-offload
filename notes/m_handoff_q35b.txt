@@ -1,0 +1,12 @@
+# layer 7: H=2048 I=512 K=3 E=256 topk=8 expert=1.125 MiB | slots=4 cap_rows=64 slot=771.0 KiB region=67.3 MiB memops=True threads=15
+flags: host enqueue: write 1.81 us, satisfied wait 1.92 us
+flags: host write -> parked GPU wait released: med -1.7 us p90 -0.6 us
+flags: GPU write -> host sees it (incl. enqueue+launch): med 4.8 us p90 5.3 us
+stage n=  1 (   1.1 MiB): worker memcpy med    240.5 us (  4.9 GB/s, 4 threads) | pinned->VRAM DMA med    107.5 us ( 11.0 GB/s)
+stage n=  6 (   6.8 MiB): worker memcpy med    523.6 us ( 13.5 GB/s, 4 threads) | pinned->VRAM DMA med    545.6 us ( 13.0 GB/s)
+stage n= 28 (  31.5 MiB): worker memcpy med   1990.3 us ( 16.6 GB/s, 4 threads) | pinned->VRAM DMA med   2478.3 us ( 13.3 GB/s)
+unswizzle g: 28 experts   10.5 MiB r+w, group=2 planar=1:    51.3 us (429.6 GB/s effective)
+unswizzle u: 28 experts   10.5 MiB r+w, group=2 planar=1:    49.6 us (444.4 GB/s effective)
+unswizzle d: 28 experts   10.5 MiB r+w, group=2 planar=1:    49.4 us (445.5 GB/s effective)
+/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
