@@ -19,6 +19,10 @@
 //   D  like B, but ONE submit of a 5-command graph (needs graph support; skipped if absent)
 //   icpx -fsycl -O3 lab_submit_busy.cpp -o lab_submit_busy && ./lab_submit_busy
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/experimental/enqueue_functions.hpp>
+#include <sycl/ext/oneapi/experimental/raw_kernel_arg.hpp>
+#include <sycl/ext/oneapi/free_function_queries.hpp>
+#include <sycl/kernel_bundle.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +32,50 @@ static double us() {
     return std::chrono::duration<double, std::micro>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+namespace gx = sycl::ext::oneapi::experimental;
+
+// Handler-free enqueue path, from the upstream e2e tree (EnqueueFunctions/
+// nd_launch_kernel_obj_direct.cpp: "takes an already built sycl::kernel and its arguments as a
+// parameter pack, which bypass the handler when every argument can be bound as plain bytes").
+// Worth pricing because the plugin's HOT launches - the two float gemvs - declare no local_accessor,
+// so every one of their arguments is already a plain byte blob.
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((gx::nd_range_kernel<1>))
+void kTiny(float *p, int n, int seed) {
+  const size_t i = sycl::ext::oneapi::this_work_item::get_nd_item<1>().get_global_linear_id();
+  p[i] = p[i] * 1.000001f + (float)(n + seed);
+}
+
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((gx::nd_range_kernel<1>))
+void kWide(const float *a, const float *b, float *c, float *e, float *f, float *g2,
+           const unsigned long long *tab, int E, int nc, int nm, int H, int I, int nbk, int cfg) {
+  const size_t i = sycl::ext::oneapi::this_work_item::get_nd_item<1>().get_global_linear_id();
+  float v = a[i & 1023] + (float)E + (float)nbk + (float)(*tab);
+  c[i & 1023] = v + b[i & 1023] + c[(i + 1) & 1023] + e[i & 1023] + f[i & 1023] +
+               g2[i & 1023] + (float)(nc + nm + H + I + cfg);
+}
+
+template <auto *Func>
+sycl::kernel getKernel(sycl::queue &q) {
+  auto bundle = gx::get_kernel_bundle<Func, sycl::bundle_state::executable>(q.get_context());
+  return bundle.template ext_oneapi_get_kernel<Func>();
+}
+
+// Production GemvK requests 16-lane subgroups through the properties_tag hook; check whether that
+// hook costs anything per launch (regime J).
+struct PropKernel {
+    float* d;
+    sycl::local_accessor<float, 1> sh;
+    auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+        return sycl::ext::oneapi::experimental::properties{
+            sycl::ext::oneapi::experimental::sub_group_size<16>};
+    }
+    void operator()(sycl::nd_item<1> it) const {
+        const int l = (int)it.get_local_id(0);
+        sh[l] = 1.f;
+        d[it.get_global_id(0)] = sh[l];
+    }
+};
 
 int main() {
     sycl::queue q{sycl::gpu_selector_v, sycl::property::queue::in_order{}};
@@ -125,13 +173,18 @@ int main() {
     {
         auto reg = [&](const char* nm, auto submit1) {
             double best = 1e30;
-            for (int w = 0; w < 5; ++w) {
-                q.wait();
-                double t0 = us();
-                for (int i = 0; i < 5; ++i) submit1();
-                double dt = us() - t0;
-                q.wait();
-                best = std::min(best, dt);
+            try {
+                for (int w = 0; w < 5; ++w) {
+                    q.wait();
+                    double t0 = us();
+                    for (int i = 0; i < 5; ++i) submit1();
+                    double dt = us() - t0;
+                    q.wait();
+                    best = std::min(best, dt);
+                }
+            } catch (const sycl::exception& e) {
+                printf("  %-56s THROWS: %s\n", nm, e.what());
+                return;
             }
             printf("  %-56s %6.2f us for 5 submits = %5.2f us/submit\n", nm, best, best / 5);
         };
@@ -174,6 +227,63 @@ int main() {
                     [=](sycl::nd_item<1> it) { d[it.get_global_id(0)] = big.p[it.get_global_id(0)] + big.a[3]; });
             });
         });
+
+        reg("J like E but requesting 16-lane subgroups (GemvK's property)", [&] {
+            return q.submit([&](sycl::handler& cgh) {
+                sycl::local_accessor<float, 1> sh({128}, cgh);
+                cgh.parallel_for(sycl::nd_range<1>({512}, {128}), PropKernel{d, sh});
+            });
+        });
+
+        // K-O: the handler-free enqueue path vs the handler path for the same work.
+        {
+            sycl::nd_range<1> ndr{sycl::range<1>{512}, sycl::range<1>{128}};
+            sycl::kernel kt = getKernel<kTiny>(q);
+            sycl::kernel kw = getKernel<kWide>(q);
+            unsigned long long tab[8] = {0};
+            int nn = 3, seed = 7;
+            int c11[11] = {10, 1, 2, 2560, 640, 5, 4, 1, 0, 1, 0};
+            reg("K q.submit lambda, 3 args (handler path)", [&] {
+                return q.submit([&](sycl::handler& cgh) {
+                    cgh.parallel_for(ndr, [=](sycl::nd_item<1> it) {
+                        const size_t i = it.get_global_linear_id();
+                        d[i] = d[i] * 1.000001f + (float)(nn + seed);
+                    });
+                });
+            });
+            reg("L nd_launch, prebuilt kernel, typed args (no handler)", [&] {
+                return gx::nd_launch(q, ndr, kt, d, nn, seed);
+            });
+            reg("M nd_launch, same via raw_kernel_arg bytes", [&] {
+                return gx::nd_launch(q, ndr, kt, d,
+                                     gx::raw_kernel_arg{&nn, sizeof(nn)},
+                                     gx::raw_kernel_arg{&seed, sizeof(seed)});
+            });
+            reg("N nd_launch, GemvBase-shaped 7 ptr + 11 int args", [&] {
+                return gx::nd_launch(q, ndr, kw, d, d, d, d, d, d, tab,
+                                     gx::raw_kernel_arg{&c11[0], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[1], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[2], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[3], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[4], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[5], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[6], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[7], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[8], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[9], sizeof(int)},
+                                     gx::raw_kernel_arg{&c11[10], sizeof(int)});
+            });
+            reg("O q.submit lambda, same work and arg count (handler path)", [&] {
+                return q.submit([&](sycl::handler& cgh) {
+                    cgh.parallel_for(ndr, [=](sycl::nd_item<1> it) {
+                        const size_t i = it.get_global_linear_id();
+                        float v = d[i & 1023] + (float)c11[0] + (float)c11[6] + (float)tab[0];
+                        d[i & 1023] = v + d[(i + 1) & 1023] + (float)(c11[1] + c11[2] + c11[3] +
+                            c11[4] + c11[5] + c11[7] + c11[8] + c11[9] + c11[10]);
+                    });
+                });
+            });
+        }
     }
 
     // How much of that is the memcpy vs a kernel submit?

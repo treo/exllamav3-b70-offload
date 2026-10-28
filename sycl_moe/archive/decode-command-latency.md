@@ -486,16 +486,25 @@ a job 4.6x bigger than the model's. Model-level A/B is the only valid arbiter fo
 | H `nd_range<2>` (K1/K6 launch shape) | 2.62 |
 | I 40-word functor (GemvBase bulk), no accessors | 2.54 |
 | J E + requested 16-lane subgroups (GemvK's property hook) | 2.70 |
+| K `q.submit` lambda, 3 args (handler path) | 2.63 |
+| **L `oneapiext::nd_launch`, prebuilt `sycl::kernel`, typed args (NO handler)** | **2.67** |
+| **M same, args passed as `raw_kernel_arg` byte blobs** | **2.66** |
+| N `nd_launch`, GemvBase-shaped 7 ptr + 11 int args | throws `UR_RESULT_ERROR_INVALID_KERNEL_ARGUMENT_INDEX` (free-function kernels carry an implicit arg; not pursued once L/M showed no gain) |
+| O `q.submit` lambda, same work and arg count (handler path) | 2.83 |
 | 1 pinned-memcpy submit | 2.32 |
 | **plugin `moe_sycl::forward`, in the model** | **3.4 / 10.3 / 4.8 / 5.0 / 5.9 (mean 5.4)** |
 | **same code under `bench_layer`** | **21-23** |
 
 Queue state, dependency chaining, barrier bracketing, SLM allocation, argument bulk and the subgroup
-property are ALL ruled out. The 2.6 → 5.4 → 21 us progression is unexplained; it tracks neither
-dependencies nor kernel shape. Next (and last) experiment on this thread: raw
-`zeCommandListAppendLaunchKernel` ×4 + one `zeCommandListExecute` for the same chain — if that lands
-near 2.6 us, PLAN_L0's value is "avoid the runtime's per-action cost", priced at ~20 us/forward
-(~0.9 ms/token, ~6% decode), and nothing less is worth building.
+property are ALL ruled out. So is the idea that looked most promising after reading
+`EnqueueFunctions/nd_launch_kernel_obj_direct.cpp` ("no handler is created for these"): **bypassing
+the command-group handler changes nothing (2.66-2.67 us vs the handler path's 2.63 us)**, so the
+per-action cost is the L0 commit path itself rather than SYCL bookkeeping - which also predicts that
+PLAN_L0 would not deliver what it was billed for, and makes the raw-`zeCommandListAppendLaunchKernel`
+experiment low-priority. The 2.6 → 5.4 → 21 us progression across lab/model/harness is still
+unexplained; this lab also has ~15% run-to-run drift, so read 2.6-3.5 us as one number. Routes now
+closed: fewer-API-overhead, graphs, fusion (`CoopGuK` wash). The route left is to stop enqueuing per
+layer: lever 1b, a persistent kernel on `ext_oneapi_device_wait`.
 
 ### 4. Command graphs, re-priced on the HOST axis — still no
 
@@ -543,3 +552,33 @@ bits per state. At K2=4 that is 2 bits of new information per 16-bit read. Byte-
 windows therefore require 32/K2 duplication (8x at 2 bits/weight, 2x at 8 bits/weight) — i.e. the
 "free math" lab rows were bought with bytes we do not have. There is no density-neutral nibble
 repack to build.
+
+### 8. What the upstream SYCL e2e tree contributed (asked for directly)
+
+`~/projects/vendor/llvm/sycl/test-e2e` was mined for anything about per-submit cost, graph
+Capability, and long-lived execution. Useful outcomes:
+
+* **`EventMode/low_power_event_mode.cpp`** — `event_mode` property (`low_power`) exists; the plugin's
+  default poll already busy-yields, so this is a knob for the *sleeping* tail, not the decode path.
+* **Runtime env knobs found by stringing the installed `libsycl.so`:**
+  `SYCL_DISABLE_EXECUTION_GRAPH_CLEANUP` (and its deprecated alias
+  `SYCL_DISABLE_POST_ENQUEUE_CLEANUP` — the runtime prints that rename itself),
+  `SYCL_GRAPH_FORCE_NATIVE_RECORDING`, `SYCL_PRINT_EXECUTION_GRAPH`,
+  `SYCL_DISABLE_PARALLEL_FOR_RANGE_ROUNDING`, `SYCL_QUEUE_THREAD_POOL_SIZE`,
+  `SYCL_PI_LEVEL_ZERO_SINGLE_THREAD_MODE`. **Tested the two cleanup ones: per-submit cost unchanged
+  (21-23 us in the harness, identical stage profile).** No arena/async-allocator env exists in this
+  build, so "per-launch device allocation" is not a tunable - it is either real and structural, or
+  not the cause (the lab says the latter for allocation-shaped kernels).
+* **Aspects this stack actually advertises** (probe, B70 + 2026.2): `ext_oneapi_device_wait` YES,
+  `ext_oneapi_graph` (executable graphs with `update_node_parameters`, cf. `Graph/Update/*`, 50+ tests
+  including `update_nd_range.cpp` and `dyn_cgf_*`) YES, `ext_oneapi_limited_graph` YES,
+  `ext_oneapi_external_semaphore_import` YES, images no; **256 compute units, 128 KB SLM,
+  max_work_group_size 1024, 64 sub-groups/WG**. `device_wait` YES is the interesting one: it makes a
+  persistent, doorbell-fed worker kernel (the only design that removes the 57.6 us fixed cost
+  instead of trimming ~20 us of it) implementable without spinning a whole GPU context blind.
+  `Graph/NativeCommand/level-zero_usm.cpp` shows the supported way to mix native L0 nodes into a
+  SYCL graph if the native-submission experiment (lever 1) is ever built.
+* `WorkGroupScratchMemory/{dynamic_alloc_local_accessor,missing_launch_property}.cpp` and
+  `AsyncAlloc/device` document the runtime's dynamic-SLM and async-allocation paths; my per-submit
+  measurement already varied exactly those shapes (2.55-2.62 us), so they are ruled out as the cause
+  of the model's 5.4 us / harness's 21 us.

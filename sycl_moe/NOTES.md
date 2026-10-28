@@ -311,15 +311,36 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
 1. **Per-action host submission cost - 27.2 us of every 66.1 us decode forward.** ~5.4 us per
    action x 5 actions (job-blob H2D + K1 + K2 + K34 + K56), on the parent thread, ahead of ~29 us
    of device work. This is the only decode lever of remaining size: ~0.9-1.2 ms of the 14.7 ms
-   token, 6-8%, if it went away. Two obvious answers are already measured NO: command graphs (see
-   5) and kernel fusion (`CoopGuK`: a wash - the device-side arrival chain costs what the dropped
-   command saved). The open question is why the *same* `q.submit` costs 2.6 us in
-   `lab_submit_busy.cpp` - flat across drained/busy/no-dep/barrier-bracket queue regimes and across
-   `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property kernel
-   shapes - ~5.4 us inside the plugin, and ~21 us under `bench_layer`. One cheap experiment closes
-   it: raw `zeCommandListAppendLaunchKernel` x4 + a single execute for this chain. If it lands near
-   2.6 us, a thin native submission path recovers ~20 us/forward, and that - not command-count
-   folding - is PLAN_L0's only remaining justification. Price it per action before building.
+   token, 6-8%, if it went away. Three candidate answers are already measured NO: command graphs
+   (see 5), kernel fusion (`CoopGuK`: a wash - the device-side arrival chain costs what the dropped
+   command saved), and **bypassing the runtime's command-group handler** - the promising one from
+   `test-e2e/EnqueueFunctions/nd_launch_kernel_obj_direct.cpp` ("no handler is created for these"),
+   which measures identical to the handler path (2.66-2.67 vs 2.63 us, regimes K-O of
+   `lab_submit_busy.cpp`), i.e. the cost is the L0 commit itself, not SYCL bookkeeping. That also
+   predicts PLAN_L0 would not deliver its headline benefit, so the raw
+   `zeCommandListAppendLaunchKernel` experiment is deprioritized. Still unexplained: the *same*
+   `q.submit` costs 2.6 us in the lab (flat across drained/busy/no-dep/barrier-bracket regimes and
+   across `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property
+   shapes), ~5.4 us inside the plugin, ~21 us under `bench_layer`; the lab also drifts ~15% run to
+   run, so read 2.6-3.5 us as one number. **Consequence: 1b is the only route left.**
+1b. **The bigger version of the same prize: a persistent worker kernel - now feasibility-checked.**
+    From the LLVM sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
+    `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
+    `WorkGroupScratchMemory`) plus an aspect probe on this box: B70 + oneAPI 2026.2 reports
+    **`ext_oneapi_device_wait` YES**, `ext_oneapi_graph` (executable, WITH node updates) YES,
+    `ext_oneapi_limited_graph` YES, `ext_oneapi_external_semaphore_import` YES, and geometry
+    **256 compute units, 128 KB SLM, max_work_group_size 1024, 64 sub-groups per WG**.
+    `device_wait` is the primitive that lets ONE long-lived kernel block on-device until a job is
+    posted instead of ending and being relaunched: parent writes a pinned doorbell, kernel waits,
+    runs the chain, signals completion - so no layer pays a submit at all. Its ceiling is the whole
+    fixed cost (57.6 us/forward, up to ~2.8 ms/token = ~19% of decode) minus the doorbell round
+    trip, versus lever 1's ~20 us. Price in a lab BEFORE any production code: (i) the actual
+    doorbell -> observed-complete round trip (if it is ~30 us the design is dead - measure first,
+    as graphs taught us); (ii) cross-scope visibility for the flag (system-scope atomics, not
+    volatile reads); (iii) keeping the prefill path and the poison/timeout path intact; (iv) power
+    draw of a resident kernel. The 256-EU figure also explains lever 4's lab curve: 50 WGs x 8
+    sub-groups is ~1.6 SIMD16 streams per EU, so the decode gemv really is under-distributed - true,
+    just not on the critical path.
 2. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
    retune measured on real 4.05 decode (C-ABI prefers 2, bench prefers 7 — a wave cliff at 3) and
    per-(entry) 2-arrival units. Summation order must stay bit-identical.
