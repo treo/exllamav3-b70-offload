@@ -10,6 +10,7 @@ repository; every code claim carries a `file:line`.
 | [`mul1-trellis.md`](mul1-trellis.md) | The weight format: bit-ring container, tile element order, the `mul1` codebook and why it makes the CPU GEMV an integer dot product, the CPU "packed" layouts and who restores them, and the invariants a new consumer must keep. |
 | [`tuning-knobs.md`](tuning-knobs.md) | Every env var and hard-coded constant that shapes or routes the data, grouped by whether it changes a *shape*, a *decision*, or only an *implementation*, with a cheat sheet of knob → shape changed. |
 | [`measured-costs.md`](measured-costs.md) | Timings for each hop on the reference box, the CPU-GEMM cost curve, the kernel-level decode/prefill breakdown, the end-to-end knob sweep, and a list of what to measure first on new hardware. |
+| [`port-acceptance.md`](port-acceptance.md) | What "done" means for a port: five acceptance levels (format bit-exactness, kernel numerical class, whole-model agreement, protocol/liveness invariants, performance floors), each with the threshold, the measured reference value and the test or harness that checks it — plus the explicit non-goals. |
 
 Reproduce with the scripts kept in `notes/` on this branch (`git log --oneline -- notes`):
 
@@ -18,6 +19,9 @@ source notes/env.sh            # venv + CUDAHOSTCXX=g++-15 for the JIT extension
 python notes/geom.py           # handoff-region and ring geometry for the models below
 python notes/scan_widths.py    # bitrate/tile-width census of the local checkpoints
 python notes/verify_trellis.py # every format claim in mul1-trellis.md
+python notes/acceptance_kernel.py MODEL_DIR ...   # CPU kernel vs fp64 oracle (acceptance level B)
+python notes/acceptance_model.py MODEL_DIR ...    # model logits per placement (level C, part 1)
+python notes/acceptance_report.py /tmp/m1.pt      # score them under the suite's policy (part 2)
 python notes/bench_cpu_moe.py  MODEL_DIR ...       # cold-expert CPU GEMV sweeps
 python notes/bench_handoff.py  MODEL_DIR ...       # flags, copies, decode loop, staging, unswizzle
 python notes/bench_link.py                          # pinned bandwidth + negotiated PCIe width

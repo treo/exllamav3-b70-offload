@@ -52,6 +52,7 @@ def test_queue_drained_hook_enters_inference_mode():
     class Stub:
         recurrent_cache = None
         disk_page_cache = None
+        sparse_head = None          # Generator.on_queue_drained saves the sparse-head profile first
         pagetable = SimpleNamespace(defrag = lambda: seen.append(torch.is_inference_mode_enabled()))
         model = SimpleNamespace(config = SimpleNamespace(infer_params = SimpleNamespace(moe_cpu_swap_pending = False)))
 

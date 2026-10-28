@@ -1,0 +1,4 @@
+# Qwen3.5-35B-A3B-3bpw-hq2 layer 5: E=12 H=2048 I=512 K=3 topk=8 gated=True ISA=avx2:True group=2 planar=1 wide=True
+ rows    source  CPU relRMS CPU maxabs  GPU relRMS  CPU/GPU  bitwise-stable
+    1     randn   1.783e-02  1.660e-03   8.246e-04    21.62            True
+    4     randn   1.750e-02  2.355e-03   8.146e-04    21.49            True

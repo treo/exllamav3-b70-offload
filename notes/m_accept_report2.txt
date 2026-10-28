@@ -1,0 +1,28 @@
+# reference: all-GPU load; noise-floor median 2.43e-04 mean 3.07e-04; placement {'gpu': 40}
+
+## teacher-forced cache-less logits (forward_logits)
+           forward  KL med  7.09e-04 mean  1.15e-03 max  1.52e-02 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of  114 | PASS | headroom med x14.1
+           forward  KL med  4.93e-04 mean  1.10e-03 max  3.03e-02 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of  114 | PASS | headroom med x20.3
+           forward  KL med  5.03e-04 mean  1.04e-03 max  3.09e-02 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of  114 | PASS | headroom med x19.9
+           forward  KL med  5.09e-04 mean  1.13e-03 max  2.75e-02 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of  114 | PASS | headroom med x19.6
+
+## cached prefill + single-token decode logits (prefill_decode_logits)
+    prefill+decode  KL med  4.85e-04 mean  1.45e-03 max  1.87e-02 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of   16 | PASS | headroom med x20.6
+    prefill+decode  KL med  3.17e-04 mean  1.46e-03 max  1.62e-02 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of   16 | PASS | headroom med x31.6
+    prefill+decode  KL med  4.57e-04 mean  1.16e-03 max  7.64e-03 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of   16 | PASS | headroom med x21.9
+    prefill+decode  KL med  3.52e-04 mean  8.79e-04 max  8.88e-03 | floor med 2.43e-04 mean 3.07e-04 | top1 1.000 of   16 | PASS | headroom med x28.4
+
+## greedy trajectory (informational: the CPU path is NOT required to be greedy-identical;
+   test_moe_offload asserts statistical agreement instead. Near-tie judgement needs the
+   run's own generated logits, captured by acceptance_model.py --decode ...)
+             split  identical tokens (24)
+          split_pa  identical tokens (24)
+      split_nowide  diverges at token 4/24; reference lead there +0.234 logits -> near-tie (allowed)
+           layer20  identical tokens (24)
+
+## placement actually reached
+               ref  (none)                   {} -> {'gpu': 40}
+             split  -mcs 192                 {} -> {'split@64': 40}
+          split_pa  -mcs 192 -mcpa           {} -> {'split@64': 40}
+      split_nowide  -mcs 192                 {'EXL3_MOE_CPU_WIDE': '0'} -> {'split@64': 40}
+           layer20  -mcl 20                  {} -> {'layer_offload': 20, 'gpu': 20}

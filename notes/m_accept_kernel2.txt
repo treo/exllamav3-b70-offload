@@ -1,0 +1,22 @@
+# Qwen3.5-35B-A3B-3bpw-hq2 layer 5: E=24 H=2048 I=512 K=3 topk=8 gated=True ISA=avx2:True group=2 planar=1 wide=True
+# activations from /tmp/acts_q35.pt: prefill (193, 2048), decode []
+ rows    source  CPU relRMS CPU maxabs  GPU relRMS  CPU/GPU  bitwise-stable
+    1     randn   1.818e-02  1.737e-03   8.362e-04    21.75            True
+    4      real   1.447e-02  8.284e-04   8.005e-04    18.08            True
+   16      real   1.498e-02  1.412e-03   7.954e-04    18.84            True
+
+== half-rate model (K=2.5, layer 7):
+# Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 layer 7: E=24 H=2560 I=640 K=2.5 topk=10 gated=True ISA=avx2:True group=0 planar=0 wide=True
+# activations from /tmp/acts_q35.pt: prefill (193, 2048), decode []
+ rows    source  CPU relRMS CPU maxabs  GPU relRMS  CPU/GPU  bitwise-stable
+    1     randn   1.913e-02  6.705e-03   8.297e-04    23.06            True
+Traceback (most recent call last):
+  File "/home/treo/projects/pdc/exllamav3/notes/acceptance_kernel.py", line 196, in <module>
+    main()
+  File "/home/treo/projects/pdc/exllamav3/notes/acceptance_kernel.py", line 156, in main
+    ref[t] += (w64[t, j] * expert_fwd(x64[t:t + 1], Wd["gate"][e], Wd["up"][e],
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/treo/projects/pdc/exllamav3/notes/acceptance_kernel.py", line 53, in expert_fwd
+    g = x @ (wg if gated else ug)
+        ~~^~~~~~~~~~~~~~~~~~~~~~~
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (1x2048 and 2560x640)
