@@ -398,6 +398,13 @@ indicative, not additive).
 
 Three conclusions, in priority order:
 
+> **[SUPERSEDED 2026-10-29.] Conclusion 2 below is wrong: at these rates the weights are 16-bit
+> trellis states advancing K2/2 bits, so a byte-adjacent per-lane window needs 32/K2 = 8x
+> duplication at K2=4 — there is no density-neutral repack to build. Conclusions 1 and 3 survive
+> only as statements about access patterns; the "268-301 GB/s packed-equivalent ceiling" was bought
+> with 4x the bytes and is not a ceiling for the packed tier. See the 2026-10-29 section, and note
+> that the paragraph this section ends with (about host submission) is also void — broken profiler.**
+
 1. **B ≡ C to within 0.1 us: with a byte-aligned weight layout the dot product is FREE — that
    kernel is pure memory.** So decode's gemv cost is *representation*, not arithmetic: the trellis
    bit-window read (7 overlapping u32 gathers per 16 columns per lane) is what caps us at
@@ -421,3 +428,118 @@ Three conclusions, in priority order:
 a per-forward one; it vanished in every later window.) Independently confirms the `lab_graph4`
 slope: there is nothing left for command graphs or host-side trimming to win here, and it retires
 the last argument for PLAN_L0.
+
+**[SUPERSEDED 2026-10-29 — this paragraph is VOID: the profiler was broken (`begin()` never reset
+its stage index, so nothing accumulated after ~2 forwards and later windows printed nothing). The
+same submits measure 2.6 us in an isolated lab, ~5.4 us in the model, ~21 us in the harness. See
+the correction below. The `lab_graph4` *wall* slope (~1.2 us/command) still stands independently.]**
+
+## 2026-10-29 (08:20-09:40): CORRECTION — decode's wall is per-forward FIXED cost, and 41% of it is host submission
+
+Started as "implement the nibble-aligned repack". It died on the encoding's actual atomic unit, and
+the follow-up measurement inverted the picture. All numbers below are from the MODEL (2.05bpw,
+decode-only `perf.py -spf -dr 3`) with `EXL3_MOE_B70_ALLOCLOG` phase fields, except where a lab is
+named.
+
+### 1. The decode budget (29 432 rows=1 job pairs; log `/tmp/dec_c.log`)
+
+| phase | p50 us | mean | p90 | what it is |
+|---|---|---|---|---|
+| prep | 0.8 | 0.8 | 1.1 | expert lookup + chunk/token-map build |
+| h2d | 3.2 | 4.3 | 6.0 | x host copy + x H2D submit (dep = previous forward's D2H) |
+| **sub** | **27.2** | 30.2 | 38.5 | **`moe_sycl::forward`: blob H2D + 4 kernel submits** |
+| d2h | 2.9 | 3.1 | 3.8 | out D2H submit |
+| wait | 28.6 | 33.8 | 50.3 | blocked until completion is observed |
+| cp | 0.4 | 0.5 | 0.7 | copy out |
+| **total** | **66.1** | 72.7 | 88.7 | |
+
+By job size (medians): nc=1 63.9, 2 67.0, 3 71.0, 4 82.0, 5 87.0, 6 88.2, 7 100.9, 8 104.9, 9
+114.0 → **t(nc) = 57.6 + 6.3·nc**. Per token: 48 × 66 = 3.2 ms of 14.7 ms = **22% of decode is the
+B70 path, 87% of that is fixed cost**, and the *marginal* expert already runs at 1.2288 MB /
+6.3 us = **195 GB/s** (isolated-lab ceiling for this access pattern: 254). Streaming is not the
+problem; per-forward latency is.
+
+Average decode job touches only **2.15 experts** (65 468 chunks / 30 432 jobs) — the harness's
+`--topk 10` decode shape is 4.6x the model's real job, which is one reason harness work kept
+failing to transfer.
+
+### 2. The harness number is inflated ~2.4x by its own submission cost
+
+`bench_layer` reports 161 us/"decode forward" (median of `e1.command_end - e0.command_end` around
+one forward). With HOSTPROF fixed, that same run spends **110 us of host time in 5 submits
+(~21 us each)**; the model spends ~29 us on the same 5 actions. `--bare` (two barriers, no work)
+measures a 33.5 us floor for the pattern. Consequences: the harness's "76 GB/s" and "gemv = 46% of
+the forward" readings are harness properties, and its `--v` spans (gu 51.4 us at 10 experts) describe
+a job 4.6x bigger than the model's. Model-level A/B is the only valid arbiter for decode work.
+
+### 3. Why a submit costs what it costs — `lab_submit_busy.cpp` (host time, 5 chained actions)
+
+| regime | us/submit |
+|---|---|
+| A drained queue, chained `depends_on` | 2.70 |
+| B ~1 ms kernel occupying the queue, chained | 2.81 |
+| C busy queue, NO `depends_on` (in-order only) | 2.58 |
+| D drained but inside the harness's barrier-bracket pattern | 2.72 |
+| E + `local_accessor<float>{128}` | 2.62 |
+| F + two local_accessors ({128},{2}) | 2.55 |
+| G + RUNTIME-sized `local_accessor` (int8-tier shape) | 2.62 |
+| H `nd_range<2>` (K1/K6 launch shape) | 2.62 |
+| I 40-word functor (GemvBase bulk), no accessors | 2.54 |
+| J E + requested 16-lane subgroups (GemvK's property hook) | 2.70 |
+| 1 pinned-memcpy submit | 2.32 |
+| **plugin `moe_sycl::forward`, in the model** | **3.4 / 10.3 / 4.8 / 5.0 / 5.9 (mean 5.4)** |
+| **same code under `bench_layer`** | **21-23** |
+
+Queue state, dependency chaining, barrier bracketing, SLM allocation, argument bulk and the subgroup
+property are ALL ruled out. The 2.6 → 5.4 → 21 us progression is unexplained; it tracks neither
+dependencies nor kernel shape. Next (and last) experiment on this thread: raw
+`zeCommandListAppendLaunchKernel` ×4 + one `zeCommandListExecute` for the same chain — if that lands
+near 2.6 us, PLAN_L0's value is "avoid the runtime's per-action cost", priced at ~20 us/forward
+(~0.9 ms/token, ~6% decode), and nothing less is worth building.
+
+### 4. Command graphs, re-priced on the HOST axis — still no
+
+`lab_graph4.cpp` gained a host-only arm (burst of 50 chains submitted without waiting, device busy):
+**submits 9.95 us vs graph replay 12.24 us** for the same production-shaped chain. A replay costs at
+least as much parent-thread time as the commands it replaces, so graphs cannot attack `sub` either —
+independent of the earlier wall-axis verdict (~1.2 us/command). Yesterday's "graphs are dead" was
+right for the wrong reason; this is the right reason.
+
+### 5. `MOE_GEMV_NC` (column-block width) — kernel win, model loss
+
+`lab_gemv_shape.cpp` at fixed lanes and bytes: 128 cols → 64.9 us, 64 → 33.2, 32 → 18.0, 16 → 10.9,
+256 → 130.3; DEPTH 1/2/4 within 0.2 us (so: not latency-hiding, but work distribution). Implemented
+in `GemvK` (single-slot decode path only, contract rates only, `nbk = N/ncwg`, grid patched with it).
+Bit-identical as predicted (max_rel 1.882e-06 / rms_rel 1.070e-06 at every width; each column's
+k-order untouched, no partial sums, unlike `nsl`). gu span 51.5 → 31.7 us. Model: dec_avg 68.9
+(128) / 67.8 (16) / 67.5 (32), prefill unchanged → keep default 128, knob retained.
+
+### 6. Ablation ladder on the real K2=4 loop — `lab_gemv_ablate.cpp`
+
+Baseline mode 0 reproduces the production inner loop faithfully (16-lane subgroups, NW=5 ring
+gathers, per-tile pre-shift, depth-2 pipeline, per-weight extract+magic-multiply+bytesum+cvt+FMA,
+activations read per lane per tile): 64.5 us for one 4.10 MB matrix (E=10, K=2560, N=640).
+
+| ablation | us | reading |
+|---|---|---|
+| 0 full | 64.5 | reference |
+| 1 no weight loads | 48.1 | loads are ~25% |
+| 2 **no activation loads** | **84.0** | removing work made it SLOWER → not issue-bound |
+| 3 no bytesum | 52.7 | the multiply+pairsum idiom ≈ 18% |
+| 4 no state extract | 49.2 | the funnel-shift path ≈ 24% |
+| 5 activations staged in SLM | 66.3 | neutral |
+| 6 whole-ring `uint4` loads | 67.1 | neutral (coalescing the ring does not help) |
+| 7 activations as 4 × `float4` | 63.9 | neutral |
+
+Lab hygiene note: the first version hoisted all 16 activations into a register array before the
+consume loop and came out 2.5x SLOWER than the kernel it modelled (63 vs 160 GB/s); inline-per-rk
+loading, as production does, is mandatory for a faithful proxy.
+
+### 7. Repack premise, closed
+
+`archive/mul1-trellis-spec.md` + `moe_sycl.cpp:363-500` settled it: the stream layout stores a ring
+of `W = 4·K2` u32 per 16×16 tile, and each weight's state is 16 ascending bits advancing by K2/2
+bits per state. At K2=4 that is 2 bits of new information per 16-bit read. Byte-adjacent per-lane
+windows therefore require 32/K2 duplication (8x at 2 bits/weight, 2x at 8 bits/weight) — i.e. the
+"free math" lab rows were bought with bytes we do not have. There is no density-neutral nibble
+repack to build.

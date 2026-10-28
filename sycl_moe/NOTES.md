@@ -110,6 +110,14 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
     pass, 5-7 k afterwards; streamed experts 260 → ~70-110, tail rows 0 → ~300-770). Every
     policy/threshold experiment run on cold state measures a different workload. `pb.py`'s reps
     (or perf.py run 2) are the steady state; `split_report.py` shows the split per forward.
+11. **An instrument that prints nothing may be BROKEN, not silent.** The first version of
+    `EXL3_MOE_B70_HOSTPROF` never reset its stage counter in `begin()`, so after ~2 forwards
+    nothing accumulated and every later window printed an empty line. I read that silence as
+    "submits cost <0.05 us", published it as proof that command submission is not decode's problem,
+    and used it to close the graph question. With the counter fixed, the same submits measure 2.6 us
+    (isolated lab), ~5.4 us (model), ~21 us (harness). Rule: a diagnostic must print its own
+    denominator and emit at least one unconditional line per window, so that "zero" is always a
+    measured zero rather than an absent one.
 
 ## Verification rules
 
@@ -269,41 +277,88 @@ model-visible: `ppl.py` + `perf.py` run TWICE, scored off the second. Flags + to
   before. Staging A for the narrow bucket is REQUIRED (it shares the wide launch's ring
   decision): the 16-lane no-ring narrow launch gave back everything (+1% vs no bucketing).
 
+## The decode budget, measured IN THE MODEL (2026-10-29) — read this before optimizing decode
+
+ALLOCLOG now carries four (then six) host phases per forward and microsecond timestamps, so the
+model was measured directly (2.05bpw, decode-only pass, 29.4k rows=1 jobs, `/tmp/dec_c.log`):
+
+| phase | p50 us | what it is |
+|---|---|---|
+| prep | 0.8 | expert lookup + chunk/token-map building |
+| h2d | 3.2 | x host copy + x H2D submit (carries the PREVIOUS forward's dep) |
+| **sub** | **27.2** | **`moe_sycl::forward`: job-blob H2D + 4 kernel submits - parent-thread time** |
+| d2h | 2.9 | out D2H submit |
+| wait | 28.6 | blocked until the last command is observed complete |
+| cp | 0.4 | copy out to the caller's buffer |
+| **total** | **66.1** | p90 88.7, mean 72.7 |
+
+By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 4 82.0, 6 88.2,
+9 114.0). Three consequences, each of which invalidated a prior belief:
+
+* **The marginal expert costs 6.3 us = 195 GB/s of packed bytes**, close to the isolated-lab
+  ceiling (254 GB/s) - weight *streaming* is basically fine. ~87% of a decode forward is FIXED
+  cost, and 41% of the forward is host time spent enqueueing.
+* **`bench_layer`'s "decode forward = 161 us / 76 GB/s" is not the model's number.** The harness
+  pays ~21 us per submit (HOSTPROF host total 110 us/fwd) where the model pays ~5.4, so the
+  harness's decode wall is ~2.4x the model's 66 us and is mostly submission. Every decode
+  conclusion previously drawn from the harness wall - including "the gemv is 46% of decode" - needs
+  re-deriving from the model budget above.
+* Kernel-level wins under ~30 us per forward are invisible at the model level. Measured directly:
+  `MOE_GEMV_NC=16` halved the gu kernel (span 51.5 -> 31.7 us) and the model got 1.6% WORSE.
+
 ## Levers, ranked (with what's already known)
 
-1. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
+1. **Per-action host submission cost - 27.2 us of every 66.1 us decode forward.** ~5.4 us per
+   action x 5 actions (job-blob H2D + K1 + K2 + K34 + K56), on the parent thread, ahead of ~29 us
+   of device work. This is the only decode lever of remaining size: ~0.9-1.2 ms of the 14.7 ms
+   token, 6-8%, if it went away. Two obvious answers are already measured NO: command graphs (see
+   5) and kernel fusion (`CoopGuK`: a wash - the device-side arrival chain costs what the dropped
+   command saved). The open question is why the *same* `q.submit` costs 2.6 us in
+   `lab_submit_busy.cpp` - flat across drained/busy/no-dep/barrier-bracket queue regimes and across
+   `local_accessor` / runtime-sized SLM / `nd_range<2>` / 40-word-functor / SIMD16-property kernel
+   shapes - ~5.4 us inside the plugin, and ~21 us under `bench_layer`. One cheap experiment closes
+   it: raw `zeCommandListAppendLaunchKernel` x4 + a single execute for this chain. If it lands near
+   2.6 us, a thin native submission path recovers ~20 us/forward, and that - not command-count
+   folding - is PLAN_L0's only remaining justification. Price it per action before building.
+2. **Counter-fed GU fusion** (`CoopGuK` built, parked neutral): retry only bundled with an NSL_GU
    retune measured on real 4.05 decode (C-ABI prefers 2, bench prefers 7 — a wave cliff at 3) and
    per-(entry) 2-arrival units. Summation order must stay bit-identical.
-2. **Weight *representation*, not arithmetic — the decode gemv ceiling (`lab_i8gemv.cpp`).** With a
-   byte-aligned layout the dot product is FREE (loads-only variant equals the dot variant to 0.1 us,
-   ~530-600 GB/s of bytes read), while today's packed bit-window gather tops out at 145-260 GB/s
-   even in an isolated lab with no pipeline. Both production gemvs already run at that lab rate
-   (gu 51.4 us/8.2 MB = 160 GB/s, coop-down 28.4/4.1 = 145), so the win is in the ORDER of the
-   bytes, not in fewer instructions or more bandwidth: a nibble-aligned, k-contiguous repack of the
-   SAME 4 bits/weight costs no extra VRAM and measured 1.8-2.1x packed-equivalent (268-301 GB/s) in
-   the lab. That is the current top decode lever (and it also prices pre-decoded int8: 4x bytes for
-   no gain over the reorder - rejected). Full table + reasoning:
-   `archive/decode-command-latency.md` §2026-10-28 (03:00-04:00).
-2a. **B70 gemv weight bandwidth = 11-24% of peak — the one lever left that matters, and it is the
-   SAME one for both workloads.** Measured ladder (`bench_layer --e 260 --topk 10`, harness's own
-   GB/s column, `archive/decode-command-latency.md`): decode rows=1 float **76.2 GB/s** / int8
-   66.4; rows 4-32 float 84-93, int8 129-147 — against 608 spec / 674 measured D2D. At rows=1
-   neither resource is saturated (0.57 of 22.7 TFLOPS, 76 of 608 GB/s) ⇒ the gemvs are
-   latency/dependency bound on their serial k-walk, so prefill's cold-tail cost (11.8 us per
-   nearly-empty chunk) and decode's floor are one problem. Checked and rejected already: deeper
-   split-K (monotonically worse, auto is optimal), more WGs via k-slicing, and graph-based
-   submission (see 2b). Investigation should go to per-thread outstanding-load depth and the
-   decode/bytesum chain between loads, not to queue mechanics.
-2c. **SYCL command graphs — mechanism PROVEN, payoff measured too small, do not ship.** A graph
-   replay of the forward chain works with our real kernel shapes (`lab_graph4.cpp`: job-block H2D
-   node + `nd_range<2>` + `local_accessor` + device-scope `atomic_ref` RMW + external dep event,
-   0 bad / 300 replays rewriting the pinned job block), and it saves ~1.2 us per command
-   (5 commands 14.84->13.12 us; 13 commands 36.10->27.48 us) — ~+0.7-1.4% decode, at/below the
-   noise floor, not worth per-geometry graph caches and pointer-invalidation risk. (The 1.47-1.62x
-   in `lab_graph.cpp`/`lab_graph3.cpp` was an artifact of trivial-duration kernels; keeping those
-   labs because they are the correctness proof, but read the slope table before quoting them.)
-   Native-L0 (`PLAN_L0.md`) sits behind the same wall and keeps its known SLM blocker.
-3. **Per-fragment DPAS efficiency** (was "DPAS kernel-side prefill gap"). The cost model is now
+3. **REFUTED, do not retry: the "nibble-aligned repack" of decode weights.** The proposal was to
+   reorder the same 4 bits/weight so a lane's 16 k-values sit byte-adjacent, priced at ~2x by
+   `lab_i8gemv`'s int8 rows. It is impossible at these rates: mul1 stores 16-bit trellis STATES that
+   advance by K2/2 bits (2 bits/weight at K2=4 == 2.05bpw), so a lane's 16 windows overlap by 14
+   bits and de-overlapping duplicates the arena by 32/K2 = **8x** at K2=4 (still 2x at K2=16). The
+   lab rows that made byte-alignment look free (B == C at 535-603 GB/s) were moving 4x the bytes:
+   valid about access PATTERNS, worthless as a packed-equivalent ceiling. What the honest ablation
+   ladder on the real K2=4 loop (`lab_gemv_ablate.cpp`) shows instead: deleting the 16 activation
+   loads per tile makes the loop *slower* (84.0 vs 64.5 us), removing bytesum buys 18% (52.7),
+   removing the state extract 24% (49.2), while SLM-staged activations (66.3) and float4 activation
+   loads (63.9) are neutral. A prior "we are at the instruction-issue floor" claim was really "at
+   the floor of this access pattern"; the loop is latency/distribution-limited, which is what lever
+   4 tested.
+4. **Narrower decode workgroups - measured NEGATIVE, kept as `MOE_GEMV_NC` (default 128 = shipped
+   geometry).** `lab_gemv_shape.cpp`, fixed total lanes and fixed bytes: NCWG 128 -> 64.9 us,
+   64 -> 33.2, 32 -> 18.0, 16 -> 10.9, 256 -> 130.3, while software-pipeline DEPTH 1/2/4 sat inside
+   0.2 us of each other. Time is inverse to the WORKGROUP COUNT at constant work: distribution
+   granularity, not per-lane latency. Implemented in `GemvK` as a column-block width (`ncwg`,
+   nbk = N/ncwg, grid/arg patched together, only the single-slot decode path; contract-rate check
+   keeps `GemvFallback` at 128). Bit-identical by construction and verified so - max_rel 1.882e-06
+   / rms_rel 1.070e-06 unchanged at 128/64/32/16 - and the kernel really did halve (gu span 51.5 ->
+   31.7 us). Model: dec_avg 68.9 / 67.8 / 67.5 for NC 128 / 16 / 32 (2 interleaved rounds each,
+   prefill unchanged) => 1.6-2.0% WORSE. Decode is not gemv-bound (see the budget), so the win had
+   nowhere to go and the extra WGs cost scheduler work.
+5. **SYCL command graphs - do not ship; now refuted on two independent axes.** Wall axis: a replay
+   of the forward chain works with our real kernel shapes (`lab_graph4.cpp`: job-block H2D node +
+   `nd_range<2>` + `local_accessor` + device-scope `atomic_ref` RMW + external dep event, 0 bad /
+   300 replays rewriting the pinned job block) and saves ~1.2 us per command (5 commands
+   14.84->13.12 us; 13 commands 36.10->27.48 us) - ~+0.7-1.4% decode, at/below noise. The
+   1.47-1.62x in `lab_graph.cpp`/`lab_graph3.cpp` was a trivial-duration-kernel artifact; those labs
+   stay as the correctness proof. Host axis (2026-10-29, `lab_graph4` gained a host-only arm: 50
+   chains burst-submitted without waiting, device busy): **replay 12.24 us vs the 4-action chain's
+   9.95 us** - a graph costs at least as much host time as the commands it replaces, so it cannot
+   attack the 27 us of `sub` either. Native-L0 (`PLAN_L0.md`) is NOT the same wall: it survives or
+   dies on lever 1's per-action question, not on command counting.
+6. **Per-fragment DPAS efficiency** (was "DPAS kernel-side prefill gap"). The cost model is now
    measured, not guessed: **run time is proportional to the number of m8 FRAGMENTS executed**
    (MAXM=16 ran 1.2x the fragments of MAXM=8 at E260/rows1024 and took 1.20x the time, while
    doing 1.67x FEWER weight traversals; at rows128 it ran 2x the fragments and took 1.95x).

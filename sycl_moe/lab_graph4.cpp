@@ -192,6 +192,29 @@ int main() {
         printf("\nus per production-shaped decode forward (job-blob H2D + 3 kernels + wait):\n");
         printf("  submits : %7.2f\n  graph   : %7.2f  (%.2fx, saved %.2f us/forward)\n",
                bs, bg, bs / bg, bs - bg);
+
+        // HOST-ONLY cost, which is the quantity the plugin actually pays: the model's phase timer
+        // measured sub = 27-29 us per decode forward for 5 actions (blob H2D + K1 + K2 + K34 +
+        // K56) while the device work overlaps. Submit 50 chains WITHOUT waiting (so the device
+        // stays busy, like the model), average the host time, then drain once; same for replay.
+        const int burst = 50;
+        auto host_cost = [&](auto&& one) {
+            double best = 1e30;
+            for (int w = 0; w < 6; ++w) {
+                q.wait();
+                double t0 = now_us();
+                for (int i = 0; i < burst; ++i) one();
+                double dt = (now_us() - t0) / burst;
+                q.wait();
+                best = std::min(best, dt);
+            }
+            return best;
+        };
+        const double hs = host_cost([&] { submit_chain(); });
+        const double hg = host_cost([&] { q.ext_oneapi_graph(eg3); });
+        printf("  HOST-ONLY us/forward (50-deep burst, device busy, no wait): submits %.2f | graph %.2f"
+               "  -> saves %.2f us/forward = %.1f ms/token at 48 layers\n",
+               hs, hg, hs - hg, (hs - hg) * 48 / 1e3);
     }
     sycl::free(hb, q); sycl::free(db, q); sycl::free(tin, q);
     sycl::free(mid, q); sycl::free(out, q); sycl::free(hout, q);

@@ -211,6 +211,30 @@ depending on slim and phase. CPU comparison points: CPU native-ISA 295 µs (swiz
 Arena + threaded fill: 168 → 50 ms per E=256 layer (~-5.7 s across 48 layers). See
 `memory-and-registration.md`.
 
+## Decode forward budget, IN THE MODEL (2026-10-29, 2.05bpw, 29 432 rows=1 jobs)
+
+```
+phase p50/mean/p90 us:  prep 0.8/0.8/1.1   h2d 3.2/4.3/6.0   sub 27.2/30.2/38.5
+                        d2h 2.9/3.1/3.8    wait 28.6/33.8/50.3   cp 0.4/0.5/0.7
+                        TOTAL 66.1/72.7/88.7
+t(nc) median us:  1:63.9  2:67.0  3:71.0  4:82.0  5:87.0  6:88.2  7:100.9  8:104.9  9:114.0
+                 => 57.6 us FIXED + 6.3 us per expert (1.2288 MB / 6.3 us = 195 GB/s packed)
+job size: 2.15 experts/decode-job avg (65468 chunks / 30432 jobs) - NOT topk 10
+per token: 48 x 66.1 = 3.2 ms of a 14.7 ms token = 22% of decode, 87% of it FIXED cost
+bench_layer cross-check: 161 us median for a 10-expert job, of which HOSTPROF measures 110 us in 5
+                 submits (~21 us each); --bare (barrier bracket, no work) = 33.5 us
+per-submit us: 2.3-2.8 in lab_submit_busy's ten regimes (queue state, deps, barrier brackets,
+                 local_accessor, runtime-sized SLM, nd_range<2>, 40-word functor, SIMD16 property
+                 ALL ruled out) | 3.4-10.3 in the model | 21-23 under bench_layer
+decode gemv spans (bench_layer --v, inflated, 10-expert job): K1 2.6  K2 gu 51.4  K34 4.1  K56 28.4
+```
+
+Rejected the same day, each with a measurement: nibble-aligned repack (states are 16 bits advancing
+K2/2 bits => 32/K2 = 8x duplication at K2=4); command graphs on the host axis (replay 12.24 us vs
+chain 9.95 us); `MOE_GEMV_NC=16` (gu span 51.5 -> 31.7 us but model dec 68.9 -> 67.8);
+activations-in-SLM 66.3 / float4 activation loads 63.9 vs 64.5 baseline; pipeline depth 1/2/4 flat.
+Full tables and reasoning: `decode-command-latency.md` §2026-10-29.
+
 ## Sweep tables not repeated here
 
 `placement-policy.md` holds mcs / stream_t / SUB / guard sweeps; `int8-dpas-tier.md` holds the

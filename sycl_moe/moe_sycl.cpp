@@ -71,25 +71,34 @@ namespace {
 //   gap = host time from the previous stage's end to this stage's submit start,
 //   sub = duration of the submit/memcpy CALL itself.
 // Means print every 256 forwards; the gettimeofday pair costs ~1-2 us per stage, so these numbers
-// are diagnostic, not an A/B result.
+// are diagnostic, not an A/B result. (Original version reset `mark` but not `idx` in begin(), so
+// only the first ~2 forwards of the first window ever accumulated and every later window printed
+// nothing - which read as "submits are free" and was used to reject command graphs. `n` and the
+// always-printed totals are here so that class of silence cannot recur.)
 struct HostProf
 {
     static double now_us()
     { struct timeval tv; gettimeofday(&tv, nullptr); return tv.tv_sec * 1e6 + tv.tv_usec; }
     double mark = 0.0, gap[12] = {}, sub[12] = {};
-    int idx = 0;
+    int idx = 0, n = 0, stages = 0;
     static HostProf& me() { static HostProf h; return h; }
-    void begin() { mark = now_us(); }
+    void begin() { mark = now_us(); idx = 0; ++n; }
     double start_region() { const double t = now_us(); if (idx < 12) gap[idx] += t - mark; return t; }
     void end_region(double t0) { const double t = now_us(); if (idx < 12) sub[idx] += t - t0; mark = t; ++idx; }
     void end()
     {
-        static int calls = 0;
-        if ((++calls % 256) != 0) return;
-        printf(" -- hostprof (%d fwd, us gap|sub per stage):", calls / 256);
-        for (int i = 0; i < idx && i < 12; ++i)
-            if (sub[i] + gap[i] > 0.05) printf(" [%d %.2f|%.2f]", i, gap[i] / 256.0, sub[i] / 256.0);
-        printf("\n"); fflush(stdout);
+        stages = std::max(stages, idx);
+        if ((n % 256) != 0) return;
+        double tg = 0.0, ts = 0.0;
+        printf(" -- hostprof (%d fwd, us gap|sub per stage):", n / 256);
+        for (int i = 0; i < 12; ++i)
+        {
+            if (sub[i] + gap[i] <= 0.0) continue;
+            tg += gap[i]; ts += sub[i];
+            printf(" [%d %.2f|%.2f]", i, gap[i] / 256.0, sub[i] / 256.0);
+        }
+        printf("  || host total %.2f us/fwd (%d stages)\n", (tg + ts) / 256.0, stages);
+        fflush(stdout);
         for (int i = 0; i < 12; ++i) gap[i] = sub[i] = 0.0;
     }
 };
@@ -357,6 +366,7 @@ struct GemvBase
     float *tout, *toutd;
     int E, nc, nm, H, I, nbk, tiles_n, tiles_k, gated, down;
     int nsl;                 // k-slices per unit
+    int ncwg = 128;          // columns per workgroup (nbk = N/ncwg); 128 == the classic geometry
 };
 
 template <int K2V, bool MMA>
@@ -406,7 +416,7 @@ struct GemvK
         const int K = down ? b.I : b.H;
         const int N = down ? b.H : b.I;
 
-        const int cG = blk * 128 + tid;
+        const int cG = blk * b.ncwg + tid;      // ncwg==128 reproduces the classic geometry
         const int tile_n = cG >> 4, cin = cG & 15;
         const int A2 = (K2V * (32 * (cin & 7) + 4 * ((cin >> 3) & 1))) >> 1;
         const int G = (32 - (K2V >> 1)) - A2 - AD27;
@@ -2274,6 +2284,15 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     }
 
     // ---- K2/K5: GEMV over mul1 tiles for one matrix class
+    // Column-block width for the single-slot (decode) path. lab_gemv_shape measured, at fixed
+    // total lanes and fixed bytes: NCWG 128 -> 64.9 us, 64 -> 33.2, 32 -> 18.0, 16 -> 10.9,
+    // 256 -> 130.3, while pipeline DEPTH 1/2/4 was within 0.2 us. Inverse-proportional to the
+    // WORKGROUP COUNT at constant work = work DISTRIBUTION granularity, not per-lane latency.
+    // Narrowing N is free where splitting K (nsl) is not: no partial sums, no second reduction,
+    // and each column's k accumulation order is untouched, so output is bit-identical per column.
+    // 128 == shipped behaviour; MOE_GEMV_NC is the A/B knob.
+    static const int gemv_nc_req = []{ const char* e = getenv("MOE_GEMV_NC");
+                                      return e ? atoi(e) : 128; }();
     GemvBase gb;
     gb.tab = d_tab; gb.chunks = w_chunk;
     gb.tin = w_tin; gb.tout = w_tout; gb.tind = w_tind; gb.toutd = w_toutd;
@@ -2282,19 +2301,29 @@ sycl::event MoeSyclLayer::forward(const ChunkDev* chunks_host, int num_chunks, c
     auto gemv = [&](bool down) {
         gb.tiles_n = (down ? H : I) / 16;
         gb.tiles_k = (down ? I : H) / 16;
-        gb.nbk = (down ? H : I) / 128;
         gb.down = down ? 1 : 0;
         gb.nsl = down ? NSL_D : NSL_GU;
         // single-slot chunks (decode) take the MMA=false specialization: the m>1 FMA chains
         // were predicated off but still issued ~30% of the inner loop (VTune, Xe2)
         const bool single = down ? (maxm_rows == 1) : (maxm_nm == 1);
+        const int Nx = down ? H : I;
+        int ncwg = gemv_nc_req;
+        // narrow only the GemvK single-slot path: GemvFallback and the MMA variant hardcode 128,
+        // and ncwg must split N into whole 16-column trellis tiles.
+        if (!single || !moe_k2_float(k2) || ncwg < 16 || (ncwg & 15) || (Nx % ncwg) != 0) ncwg = 128;
+        gb.ncwg = ncwg;
+        gb.nbk = Nx / ncwg;
         const int units = (down ? nc * gb.nbk : nc * nm * gb.nbk) * gb.nsl;
-        const size_t gn = (size_t)units * 128;
+        const size_t gn = (size_t)units * ncwg;
+        if (hpf) { static int geo_logged[2] = {};   // one-time geometry echo (host-only diagnostic)
+            if (!geo_logged[down ? 1 : 0]) { geo_logged[down ? 1 : 0] = 1;
+                printf(" -- gemv geometry: down=%d single=%d ncwg=%d nbk=%d units=%d nsl=%d gn=%zu\n",
+                       down, single, ncwg, gb.nbk, units, gb.nsl, gn); } }
         launch([&](sycl::handler& cgh) {
             k2_float(k2, [&](auto R) {
                 constexpr int V = decltype(R)::value;
                 if constexpr (V > 0) {
-                    if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<V, false>{gb});
+                    if (single) cgh.parallel_for(sycl::nd_range<1>({gn}, {(size_t)ncwg}), GemvK<V, false>{gb});
                     else        cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvK<V, true>{gb});
                 } else
                     cgh.parallel_for(sycl::nd_range<1>({gn}, {128}), GemvFallback{gb, k2});

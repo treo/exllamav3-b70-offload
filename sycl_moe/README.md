@@ -237,6 +237,33 @@ python3 split_report.py /tmp/arms_<tag>.log
         # experts/picks/rows (the placement converges - never analyse the first forward)
 ```
 
+**Per-forward host phases** (this is how decode's budget was finally measured; host-only, no device
+hooks). With `EXL3_MOE_B70_ALLOCLOG=<file>` every forward logs, in microseconds:
+
+```
+<t.ts pid> FWD exit h <handle> rows <r> nc <n> ph <prep> <h2d> <sub> <d2h> <wait> <cp> <total>
+```
+
+`sub` is parent-thread time inside `moe_sycl::forward` (job-blob H2D + kernel submits) and `wait` is
+blocked-until-observed-complete; `fwd_stats.py` still aggregates enter/exit by rows. Pair with
+`EXL3_MOE_B70_HOSTPROF=1`, which prints per-stage `gap|submit` host cost inside `moe_sycl::forward`
+every 256 forwards plus an unconditional `host total us/fwd` line (a diagnostic that can print
+nothing is a diagnostic that can lie - see NOTES measurement rule 11).
+
+Submission/geometry labs (all standalone, `icpx -fsycl -O3 <f>.cpp -o <f>`):
+
+```
+lab_submit_busy.cpp    # host us per submit: drained vs busy vs no-dep vs barrier-bracket, and
+                       # +local_accessor / runtime-sized SLM / nd_range<2> / 40-word functor / SIMD16
+lab_gemv_shape.cpp     # decode gemv at fixed lanes+bytes: columns-per-WG x pipeline depth
+lab_gemv_ablate.cpp    # instruction-class ablation of the real K2=4 inner loop (7 modes)
+```
+
+Knob added by those experiments: `MOE_GEMV_NC=<16|32|64|128>` (default 128) sets `GemvK`'s
+column-block width on the single-slot decode path. Bit-identical at every value and it does halve
+the gu kernel (span 51.5 -> 31.7 us), but it is 1.6-2.0% WORSE end-to-end - decode is not gemv-bound
+(NOTES lever 4).
+
 ### Layer microbenchmark (standalone, no exllamav3 needed)
 
 ```bash

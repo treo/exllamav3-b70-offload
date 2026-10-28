@@ -531,6 +531,18 @@ static void forward_impl
     auto* layer = (moe_sycl::MoeSyclLayer*)(intptr_t)handle;
     if (!layer) return;
     std::lock_guard<std::mutex> exec_lk(g.exec_mu);   // shared bounce/stage + growth
+    // Host-phase split, on whenever ALLOCLOG is on (calibrated: one log line = 0.72 us, and the
+    // exit line carries all four phases, so the cost is one line per forward).
+    //   prep = expert lookup + chunk/token-map building (pure parent-thread CPU)
+    //   h2d  = host->host x copy + the x H2D submit (carries g_last_ev from the PREVIOUS forward)
+    //   sub  = moe_sycl::forward: job-blob H2D + every kernel submit
+    //   d2h  = the out D2H submit
+    //   wait = blocked until the device's last command is observed complete
+    //   cp   = the fp32 out copy into the caller's buffer
+    const bool ph_log = moe_sycl::alog() != nullptr;
+    const auto ph_t0 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point ph_t1 = ph_t0, ph_t2 = ph_t0, ph_t3 = ph_t0;
+    std::chrono::steady_clock::time_point ph_ta = ph_t0, ph_tb = ph_t0;
     using moe_sycl::ChunkDev;
     using moe_sycl::TokenMap;
     const int E = layer->params().num_experts;
@@ -583,12 +595,16 @@ static void forward_impl
     if ((size_t)rows > g_bounce.cap_rows) ensure_capacity(rows, H);   // grows (or throws)
     d_x = g_bounce.d_x; d_out = g_bounce.d_out;   // re-read: growth replaced the buffers
     // all queue ops carry explicit event dependencies; implicit ordering is unreliable here
+    ph_t1 = std::chrono::steady_clock::now();
     memcpy(g_stage.stage_u16, x, (size_t)rows * H * 2);
     sycl::event e_x = g.q->memcpy(d_x, g_stage.stage_u16, (size_t)rows * H * 2, {g_last_ev});
+    ph_ta = std::chrono::steady_clock::now();
     sycl::event e_done = e_x;
     if (!chunks.empty())
         e_done = layer->forward(chunks.data(), (int)chunks.size(), tmap, d_x, d_out, rows, &e_x);
+    ph_tb = std::chrono::steady_clock::now();
     sycl::event e_rd = g.q->memcpy(g_stage.stage, d_out, (size_t)rows * H * 4, {e_done});
+    ph_t2 = std::chrono::steady_clock::now();
     // bounded completion: a kernel wedged on a dead context must not strand the worker
     // thread holding exec_mu (parent would spin on the job's done flag forever).
     // sycl::event has no timed wait in DPC++ - poll with a deadline.
@@ -626,9 +642,20 @@ static void forward_impl
             e_rd.wait();
         }
     }
+    ph_t3 = std::chrono::steady_clock::now();
     memcpy(out, g_stage.stage, (size_t)rows * H * 4);
     g_last_ev = e_rd;
-    if (moe_sycl::alog()) moe_sycl::alog_msg("FWD exit h %lld rows %d nc %d", (long long)handle, rows, (int)chunks.size());
+    if (ph_log)
+    {
+        const auto ph_t4 = std::chrono::steady_clock::now();
+        auto dus = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
+                   { return std::chrono::duration<double, std::micro>(b - a).count(); };
+        moe_sycl::alog_msg("FWD exit h %lld rows %d nc %d ph %.1f %.1f %.1f %.1f %.1f %.1f %.1f",
+                           (long long)handle, rows, (int)chunks.size(),
+                           dus(ph_t0, ph_t1), dus(ph_t1, ph_ta), dus(ph_ta, ph_tb),
+                           dus(ph_tb, ph_t2), dus(ph_t2, ph_t3), dus(ph_t3, ph_t4),
+                           dus(ph_t0, ph_t4));
+    }
 }
 
 void b70_free_layer(int64_t handle)
