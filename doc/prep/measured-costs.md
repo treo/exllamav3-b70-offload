@@ -173,6 +173,17 @@ Qwen3.8-Flash-Next, µs/call at 15 threads, rows 1 / 4 / 16 / 64:
 rows 1) because the AVX2 tier does not band half rates; for K=3 the same knob is worth the decode
 delta in §8. Expect both columns to change on an AVX-512 (band-8) host.
 
+Reference points for the *other* CPU schedulers, same data (`EXL3_MOE_CPU_MAX_ISA`), rows/threads
+as in the tables above:
+
+| tier | rows 1, 16 thr | GiB/s | notes |
+|---|---|---|---|
+| `avx2` (band-2 + planar, 2-dispatch `decode_phase`) | 196 µs | 47.4 | the numbers above |
+| `scalar` (native layout, 5/6-phase `forward_phase`) | **6207 µs** | 1.5 | 32× slower, and it also forces `swizzle_group = 0`, so the packed bytes are never used: this tier is a correctness oracle, not a performance fallback (`notes/m_cpu_qwen35_scalar.txt`) |
+
+The `bw` / `vnni` / `vbmi` tiers could not be measured here (Zen 3 has no AVX-512), so the band-8
+layout, the K8 dword kernel and VBMI split-K (`decode_parts`, P ≤ 4) are documented from source only.
+
 Phase split: `EXL3_MOE_CPU_PROF=1` reports **cumulative** averages over the whole run (its
 accumulators are never reset, `moe_mul1.cpp:3900,3977,3985`), so with prefill and decode jobs in one run
 the printed per-phase numbers are a mixture that converges only slowly — from `gemv_gu 1840 µs
