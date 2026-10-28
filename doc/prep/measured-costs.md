@@ -192,8 +192,8 @@ kernel; device self-time only:
 |---|---|---|---|
 | `moe_split_issue_kernel` | 1280 | **3.89** | 2.4% |
 | `moe_split_collect_add_kernel` | 1280 | **4.00** | 2.4% |
-| `exl3_moe_coop_a_kernel` (GPU experts, part A) | 1280 ×2 | 18.0 / 15.6 | 20.3% |
-| `exl3_moe_coop_b_kernel` (part B) | 1280 ×2 | 10.9 / 9.6 | 15.3% |
+| `exl3_moe_coop_a_kernel<7,…>` / `<3,…>` (part A: shared expert at 7 bpw, routed slice at 3 bpw) | 1280 each | 18.0 / 15.6 | 20.3% |
+| `exl3_moe_coop_b_kernel<7,…>` / `<3,…>` (part B) | 1280 each | 10.9 / 9.6 | 12.4% |
 | `routing_gemv_kernel` + `routing_std_topk_kernel` | 1280 each | 3.83 / 3.31 | 4.3% |
 | `exl3_mgemm_kernel<7,…>` (attention/dense GEMV) | 960 | 38.5 | 17.5% |
 | total device time | | **6.61 ms/token** | |
@@ -209,12 +209,12 @@ the two kernels above); the 64 memcpys in the log are unrelated (sampler/state r
 ## 7. Prefill: the streamed path
 
 Same script, one 2048-row chunk, `-mcs 192`. (`prof_e2e` feeds random token ids, so only 3 571 of
-the 7 680 CPU assignments-in-range crossed `stream_t = 11` here; with real text the count is
-~181 of 192 experts per layer — `notes/m_e2e_streamdbg.txt`.)
+the 7 680 CPU expert slots (192 × 40 layers) had enough assignments to cross `stream_t = 11` and get
+streamed; with real text the figure is ~181 of 192 per layer — `notes/m_e2e_streamdbg.txt`.)
 
 | activity | calls | µs/call | total ms | share |
 |---|---|---|---|---|
-| `Memcpy HtoD (Pinned → Device)` | 332 | 982.0 | 326.0 | **28.2%** |
+| `Memcpy HtoD (Pinned → Device)` | 325 | 999.6 | 324.9 | **28.6%** |
 | `aten::copy_` (self, incl. the above) | 2285 | 146.7 | 335.2 | 29.5% |
 | `exl3_moe_kernel<3,128,2,64,…>` (fused tier, 64-row tile) | 207 | 460.5 | 95.3 | 8.4% |
 | `f16acc::gemm_kernel` ×2 variants (batched recon / dense) | 404 | 648 / 145 | 105.9 | 9.3% |
@@ -225,9 +225,10 @@ the 7 680 CPU assignments-in-range crossed `stream_t = 11` here; with real text 
 | total | | | 1136.7 ms | |
 
 Weight movement, not arithmetic, dominates the streamed tier. That prefill streamed 3 571 experts =
-**3.92 GiB** of trellis bytes (counted from the run's own `EXL3_MOE_STREAM_DEBUG` batch lines),
-which the 326 ms of `Memcpy HtoD` puts at **12.9 GB/s** — i.e. the DMA runs at the measured link
-ceiling and nothing else about it can be optimized except moving fewer bytes. With real text
+**3.92 GiB** of trellis bytes (counted from the batch lines of the rerun with
+`EXL3_MOE_STREAM_DEBUG=1`, which reported 332 `Memcpy HtoD` totalling 326 ms out of 1155 ms of
+device time), i.e. **12.9 GB/s** — the DMA runs at the measured link ceiling and nothing about it
+can be optimized except moving fewer bytes. With real text
 (`eval/perf.py`) 181 of the 192 CPU experts cross `stream_t` at 2048 rows, so the same chunk costs
 8.2 GiB ≈ 610 ms of link time. Two consequences: the `stream_t` threshold exists to keep *cold*
 experts off this path, and `EXL3_MOE_PINNED_ARENA=1` (which removes the intermediate worker
