@@ -1,0 +1,24 @@
+parent: shm=psm_b3c37404 host=0x7f763c300000 gpu=0x7f763c300000 (UVA identity: True)
+  [PASS] X0 child attached, registered the region and ran a kernel: tag=child rc=0 err='ok' child_va=0x7fd7f0500000
+  [PASS] X0b child maps the bytes at a different virtual address: parent 0x7f763c300000 vs child 0x7fd7f0500000
+  [PASS] X1 child kernel's payload visible to the parent: word10=0xc0ffee0a want 0xc0ffee0a; flag=0xbeef
+  [PASS] X1b flag published by the fenced store: 0xbeef
+  (parent view: cpu-stored word=0xc0ffee, memop word=0x5a5a)
+  (after 2 polls: child saw cpu-word 0xc0ffee, memop-word 0x5a5a)
+  [PASS] X2a parent's plain CPU store visible in the child: saw 0xc0ffee
+  [PASS] X2b parent's 3090 stream memop visible in the child: saw 0x5a5a
+  [PASS] X2c a kernel in the child process reads the memop-written word back: echo=(0, 'ok') slot=0x5a5a
+  [PASS] X3 3090 stream wait retires on a flag published by the child's kernel: retired in 0.01 ms
+  [PASS] X4 3090 DMAs the child-written region: word10=0xc0ffee0a want 0xc0ffee0a
+  [PASS] X5 child exited cleanly (registration released): exitcode=0
+ (note: shm cleanup hit cannot close exported pointers exist; the segment leaks until the resource tracker runs)
+10/10 passed
+Exception ignored in: <function SharedMemory.__del__ at 0x7f7779c53240>
+Traceback (most recent call last):
+  File "/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/shared_memory.py", line 187, in __del__
+    self.close()
+  File "/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/shared_memory.py", line 230, in close
+    self._mmap.close()
+BufferError: cannot close exported pointers exist
+/home/treo/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

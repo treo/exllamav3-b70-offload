@@ -29,7 +29,7 @@ Why that framing rather than "make the B70 a second compute device the model loa
 | requirement | CUDA today | B70 engine | status |
 |---|---|---|---|
 | page-locked host memory with a device mapping | `cudaHostRegister(PORTABLE\|MAPPED)` + `cudaHostGetDevicePointer` | `register_host_memory(ptr, len, ctx)` on the region the parent already registered | **[M]** works; the region must be pinned by CUDA, *not* by the xe driver (`cudaHostRegister` on `sycl::malloc_host` fails `invalid argument`) |
-| kernels that store to / load from it, system-scope ordered | `int4` stores, `__threadfence_system()`, `ldg_acquire_sys` | plain volatile stores + `sycl::atomic_fence(acq_rel, system)` | **[M]** works for stores; **loads are latency-bound (~65 ns each)**, so the payload comes in by DMA; a system-scope `sycl::atomic_ref` on a *registered foreign* pointer faults the queue — do not use one |
+| kernels that store to / load from it, system-scope ordered | `int4` stores, `__threadfence_system()`, `ldg_acquire_sys` | plain volatile stores + `sycl::atomic_fence(acq_rel, system)` | **[M]** works for stores (100/100 reps, cold and host-dirtied lines, in-process and cross-process); **loads are latency-bound (~65 ns each)**, so the payload comes in by DMA; a `sycl::atomic_ref` at *any* scope on a registered foreign pointer loses the device (`UR_RESULT_ERROR_DEVICE_LOST`) — publish flags with a fenced volatile store (`LESSONS` 4) |
 | stream-ordered flag wait/write without SM occupancy | `cuStreamWaitValue32` / `cuStreamWriteValue32` | not needed on the B70 side: it *produces* flags (kernel store) and *consumes* them by spinning host-side, exactly as the CPU worker does | no Level Zero equivalent exists (checked `ze_api.h` 1.18: only events/timestamps); not required |
 | multiple streams + events, contiguous async copies | compute + copy streams, `wready_ev`/`wconsumed_ev` | one in-order queue for jobs + one for weight transfer; `sycl::event` for the engine thread only (**never** on the parent's path) | **[M]** `.wait()` costs 24 µs, so event waits belong to the engine thread's idle path, not the per-job path |
 | the GPU-side expert kernels | `exl3_moe*`, `reconstruct*`, `hgemm*`, `moe_unswizzle_trellis` | unchanged on the 3090; a *new* implementation for the B70 (see `b70-kernels.md`) | this is the port |
@@ -296,10 +296,11 @@ the *payload* needs the link, not the notification.
   a wedged queue kills the child, and the existing parent-side watchdog (`moe_cpu_host.py:1310`)
   already knows how to unblock pending stream waits and raise on the next `begin_pass`; (c) the
   load/upload pipeline (`("layer", spec)` messages, acks, deferred safetensors reads) is reused.
-  It needs one new capability, which Phase 0 must prove: `register_host_memory` on a
-  `multiprocessing.shared_memory` segment mapped *in the child* (the parent has already
-  `cudaHostRegister`ed the same bytes). Fallback if that fails: run the engine as a thread in the
-  parent (protocol unchanged; only (a) and (b) are lost).
+  The one capability this needs was proven in Phase 0: `probe_crossproc.py` passes 11/11 — the child
+  maps the parent's `shared_memory` segment at a different VA, registers it with its SYCL context,
+  a kernel there writes payload + flag that the parent and a 3090 DMA both see, and a `cuStreamWriteValue32`
+  from the parent is seen by a kernel in the child. (The in-process-thread fallback is therefore not
+  needed, but keep it as the documented Plan B for a machine where registration is refused.)
 * **Ownership**: the parent owns and registers the control region; the engine never allocates memory
   the 3090 must see (§2.1, measured constraint). The engine owns all B70 VRAM: expert weights,
   staging, scratch. Nothing on the B70 is shared with the 3090 except the handoff region.
@@ -396,14 +397,29 @@ by a measurement but not waived. (Gate definitions: `b70-harness.md`.)
 
 ---
 
+## 10a. Standing rules the probes earned
+
+Three rules that are not optional, because each was bought with a silent-failure bug:
+
+1. **Payload movement is asymmetric.** In: `memcpy` (DMA) into B70 VRAM. Out: kernel stores to the
+   pinned slot, then `sycl::atomic_fence(acq_rel, system)`, then the flag store. Never let a kernel
+   chase host pointers for input (`LESSONS` 7: 16 KiB as one dependent chain = 280 µs).
+2. **No `sycl::atomic_ref` on the shared region at any scope** (`LESSONS` 4 — it loses the device);
+   flags are fenced volatile stores, and the only atomics allowed on shared memory are host-side
+   `std::atomic`/`volatile` reads by the engine thread.
+3. **Kernel index arithmetic is spelled out** (`i[0]`, explicit casts) and **every kernel test
+   compares every payload word it wrote**, not a return code or a flag (`LESSONS` 4a — the sloppy
+   form compiles, "succeeds", and stores nothing).
+
 ## 11. Open questions that could still change this design
 
 Each is answerable by one probe or one benchmark, listed in the order that would hurt most if the
 answer goes the wrong way:
 
-1. **Does `register_host_memory` work on a segment mapped in a second process?** If not, the engine
-   becomes a parent-side thread (§6) and the SYCL enqueue cost lands on the forward thread — which
-   then makes T1/T2 (graph replay, resident engine) mandatory rather than optional.
+1. ~~Does `register_host_memory` work on a segment mapped in a second process?~~ **Answered: yes**
+   (`probe_crossproc.py`, 11/11, `out_crossproc.txt`). Closed 2026-10-28; §6 keeps the child-process
+   design. The residual risk is that this is driver-version-specific, so the test belongs in the
+   per-commit set rather than in the archive.
 2. **Does `dot_4x8packed_us_int` / `sycl::ext::oneapi::dot_acc` compile to one Xe2 instruction?**
    Seven ops per weight instead of one pushes decode past the ALU budget (§1 of
    `b70-kernels.md`) and the answer becomes "decode on the B70 is XMX-only", which changes the tier

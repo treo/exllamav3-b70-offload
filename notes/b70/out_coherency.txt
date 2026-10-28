@@ -1,0 +1,20 @@
+region 0x7fbbe9cfe000, 4096 words per trial, mlocked, registered with the SYCL context
+
+  R1 host dirties, device stores, host reads     rep0: ok (0/4096 wrong, 0 zero)
+  R1 host dirties, device stores, host reads     rep1: ok (0/4096 wrong, 0 zero)
+  R1 host dirties, device stores, host reads     rep2: ok (0/4096 wrong, 0 zero)
+  R2 device stores into an area the host never touched rep0: STALE/ZERO (4096/4096 wrong, 1024 zero)
+  R2 device stores into an area the host never touched rep1: STALE/ZERO (4096/4096 wrong, 1024 zero)
+  R2 device stores into an area the host never touched rep2: STALE/ZERO (4096/4096 wrong, 1024 zero)
+  R3 as R1 + host clflush before reading         rep0: ok (0/4096 wrong, 0 zero)
+  R3 as R1 + host clflush before reading         rep1: ok (0/4096 wrong, 0 zero)
+  R3 as R1 + host clflush before reading         rep2: ok (0/4096 wrong, 0 zero)
+  R4 as R1 + an empty fenced kernel before reading rep0: ok (0/4096 wrong, 0 zero)
+  R4 as R1 + an empty fenced kernel before reading rep1: ok (0/4096 wrong, 0 zero)
+  R4 as R1 + an empty fenced kernel before reading rep2: ok (0/4096 wrong, 0 zero)
+  R5 host zeroes, device reads back a fingerprint rep0: device fingerprint 00000007 (host-zeroed input would give 00000007, all-ones 00000007)
+  R5 host zeroes, device reads back a fingerprint rep1: device fingerprint 00000007 (host-zeroed input would give 00000007, all-ones 00000007)
+  R5 host zeroes, device reads back a fingerprint rep2: device fingerprint 00000007 (host-zeroed input would give 00000007, all-ones 00000007)
+
+reverse direction (device polls a flag the host writes):
+  host sees 0xa11ce after a device store to a line it owns [ok]

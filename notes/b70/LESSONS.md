@@ -45,19 +45,59 @@ trip, in every configuration, including 1 group of 32 lanes. The corrected shape
 Related: `fetch_add` on a host flag must be issued at a **uniform call site**
 (`aack.fetch_add(sl == 0 ? 1u : 0u)`) — the same divergence rule applies to cross-device atomics.
 
-## 4. A system-scope `sycl::atomic_ref` on *foreign* (registered) host memory faults the queue
+## 4. A `sycl::atomic_ref` on *foreign* (registered) host memory takes the device down
 
-`sycl::malloc_host` memory and memory brought in with
-`sycl::ext::oneapi::experimental::register_host_memory` are **not** equivalent. Publishing the
-`done` flag with `atomic_ref<uint32_t, ..., memory_scope::system>::store()` on a registered
-CUDA-pinned pointer took a device fault: `wait()` returned success, nothing had been written, and
-the queue was poisoned so the *next* unrelated kernel also silently wrote nothing (which is how
-test A4b failed until the cause was fixed in A3a).
+Any scope. `probe_stores.cpp` used `atomic_ref<uint32_t, relaxed, memory_scope::device>` on a
+`register_host_memory` pointer and the next call returned
+`level_zero backend failed with error: 20 (UR_RESULT_ERROR_DEVICE_LOST)` — the *device* was lost, not
+just the queue. With `memory_scope::system` the same mistake was quieter: `wait()` returned success,
+nothing had been written, and the poisoned queue made the *next*, unrelated kernel also silently
+write nothing (that is how test A4b failed until the cause, three tests earlier, was fixed).
 
-Publishing a flag with `sycl::atomic_fence(acq_rel, system)` + a plain volatile store works, and
-the 3090's `cuStreamWaitValue32` retires on it (`probe_cross.py` A3a/A3b). Use that. Re-test the
-atomic version before relying on it, and always assert that the *payload* landed, not just the
-flag, so a poisoned queue cannot masquerade as a passing test.
+Publish flags with `sycl::atomic_fence(acq_rel, system)` + a plain volatile store instead: that is
+measured to work, in-process and cross-process, and the 3090's `cuStreamWaitValue32` retires on it
+(`probe_cross.py` A3a/A3b, `probe_crossproc.py` X1/X3). Plain kernel stores into the same region are
+also fine and reliably visible — 100 repetitions across five patterns, cold and host-dirtied lines,
+with and without a following fence, registering 5 pages or 4 MiB, and before or after
+`unregister_host_memory` (`probe_stores2.cpp`, `probe_unreg.cpp`).
+
+Corollary for every B70 test: **assert that the payload landed, never only the flag.** A test that
+checks a flag and a return code passes happily while 16 KiB of results are missing.
+
+## 4a. Kernel index arithmetic (the expensive one): spell `i[0]` out, or the kernel silently writes nothing
+
+The single most expensive bug in this directory. This compiles, runs, returns success, and does not
+write anything:
+
+```c++
+uint32_t *p = (uint32_t *) ptr;
+g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i] = 0xC0FFEE00u + i; });   // payload stays ZERO
+g_q->single_task([=] { ...fence...; *(volatile uint32_t *) (p + n_words) = seq; });  // this lands
+```
+
+`sycl::id<1>` has an implicit conversion to `size_t`, so the expression type-checks; the kernel is
+accepted by the compiler, submitted, completes without error, the *neighbouring* word written by the
+next command is visible to the host, and the payload itself is never stored. Writing it the
+explicit way
+
+```c++
+g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i[0]] = 0xC0FFEE00u + uint32_t(i[0]); });
+```
+
+stores every word, first time, in every memory type tried. The `+=` (read-modify-write) form of the
+sloppy expression happened to work, which is what made it take so long to find: the first probe that
+looked correct (A1) masked the pattern that did not (A3a), and the failure then looked like a PCIe
+coherency problem, sending two full probe rewrites down that path (`probe_coherency.cpp` is kept as
+the artefact that *disproved* the coherency theory).
+
+Rules adopted: index with `i[0]` / `it.get_global_id(0)` and cast to the value type explicitly; never
+mix `sycl::id` into arithmetic; and give every kernel test a "wrote it, read it back, compared every
+word" assertion.
+
+Related: `sycl::malloc_host` memory (allocated by the xe driver) and memory brought in with
+`register_host_memory` are *not* equivalent: the former accepts atomics, the latter does not, and
+only the former is refused by `cudaHostRegister` (item 8). Nothing in the design should depend on
+either being interchangeable.
 
 ## 5. `register_host_memory` requires a whole number of host pages
 
@@ -98,8 +138,8 @@ style probing is the only trustworthy source, for either card.)
 
 ## 10. `sycl::ext::oneapi::experimental::clock<clock_scope::device>` is not available
 
-Submitting a kernel that uses it fails at launch with `Required aspect ext_oneapi_clock_device is
-not supported on the device`. Bounded loops in tests must use spin budgets, not a GPU clock. Same
+Submitting a kernel that uses it fails at launch with `Required aspect ext_oneapi_clock_device is not
+supported on the device`. Bounded loops in tests must use spin budgets, not a GPU clock. Same
 for `aspect::ext_intel_matrix` (the Intel-specific `joint_matrix` extras in
 `doc/b70/sycl/doc/extensions/experimental/sycl_ext_matrix/`): the *documented* extension is newer
 than the installed 2026.2 runtime headers, so check `__has_include` and fall back to plain

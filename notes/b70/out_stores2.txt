@@ -1,0 +1,11 @@
+region 0x7f41b87fe000 (4 MiB), 4096 words per area, areas 16384 words apart
+
+  plain store, host dirtied lines first         0/20 reps wrong
+  plain store, host lines cold                  0/20 reps wrong
+  plain store + fenced kernel after, cold       0/20 reps wrong
+  volatile store, host lines cold               0/20 reps wrong
+  plain store + fence, host dirtied             0/20 reps wrong
+
+usm host allocation (runtime-pinned) for reference:
+  plain store into sycl::malloc_host            0/20 reps wrong
+  plain store into sycl::malloc_shared          0/20 reps wrong

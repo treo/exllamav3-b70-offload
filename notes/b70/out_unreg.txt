@@ -1,0 +1,4 @@
+  fenced flag, unregister AFTER read                   payload    0/4096 wrong, flag 0x1234
+  fenced flag, unregister BEFORE read                  payload    0/4096 wrong, flag 0x1234
+  no flag, unregister AFTER read                       payload    0/4096 wrong, flag 0x0
+  no flag, unregister BEFORE read                      payload    0/4096 wrong, flag 0x0

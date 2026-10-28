@@ -5,13 +5,13 @@ CUDA: NVIDIA GeForce RTX 3090   B70 shim: loaded
 == A2 value written by the 3090 (stream memop) seen by a B70 kernel
   [PASS] A2 CUDA memop write -> B70 kernel read: rc=0 echoed=0x5a5a err='ok'
 == A3 value written by a B70 kernel satisfies a 3090 stream wait
-  [PASS] A3a B70 published payload+flag: rc=0 flag=0x1234 payload_word10=0x0 landed=False
+  [PASS] A3a B70 published payload+flag: rc=0 flag=0x1234 payload_word10=-0x3f0011f6 landed=True
   [PASS] A3b 3090 stream wait on the B70-written flag retired: no hang, stream advanced
   [PASS] A3c control: same wait satisfied by a CUDA-side write
 == A4 memory pinned by the B70 runtime registered with CUDA
-  [PASS] A4a sycl::malloc_host returns: ptr=0x7f063fd00000
+  [PASS] A4a sycl::malloc_host returns: ptr=0x7febabb00000
   [PASS] A4b B70 kernel wrote its own pinned region: arr[10]=17 want 17
-  [FAIL] A4c cudaHostRegister on B70-pinned memory: cudaHostRegister(0x7f063fd00000, 1048576) failed: invalid argument
+  [FAIL] A4c cudaHostRegister on B70-pinned memory: cudaHostRegister(0x7febabb00000, 1048576) failed: invalid argument
 == summary
   ok    A1 B70 -> CUDA-pinned payload
   ok    A1b 3090 copies the same region after the B70 wrote it

@@ -84,7 +84,8 @@ each as a test rather than a note:
 
 | invariant | test |
 |---|---|
-| cross-process pinned sharing: the engine child can `register_host_memory` the parent's registered segment (page-multiple sizes, `LESSONS` 5) | `tests/b70/test_region_attach.py`; if it ever fails, the in-process-thread fallback (§6 of the architecture) must be exercised by the same test |
+| cross-process pinned sharing: the engine child can `register_host_memory` the parent's registered segment (page-multiple sizes, `LESSONS` 5) | **proven**, `notes/b70/probe_crossproc.py` 11/11 (`out_crossproc.txt`) — promoted to `tests/b70/test_region_attach.py` so a driver update cannot silently break it |
+| every kernel that writes the shared region writes *all* of it, and publishes last | `tests/b70/test_store_discipline.py`, from `probe_stores2.cpp` / `probe_unreg.cpp`: N×20 reps per pattern, **comparing every word**, plus the negative case that a `sycl::atomic_ref` on the region loses the device (`probe_stores.cpp` case 7) so no code path can regress into it |
 | publishing `done` from a B70 kernel is ordered after the payload stores | `test_flag_order.py`: 10 000 rounds of `write payload → fence → flag`, host/3090 verify the payload matches the seq every time (this is the `LESSONS` 4 bug class: `atomic_ref` on a foreign pointer poisons the queue *silently*, so also assert the payload, never only the flag) |
 | the engine never calls `.wait()`/blocks on the job path | an instrumented build counts blocking calls and asserts zero during a generation; a regression here costs 24 µs/layer silently |
 | device loss surfaces as an exception, not a hang | kill the engine mid-generation / inject `ZE_RESULT_ERROR_DEVICE_LOST`; the parent must raise within one `begin_pass` and leave no stream parked (mirrors the existing `EXL3_MOE_MEMOPS=0` timeout tests) |
@@ -149,7 +150,9 @@ Scripts (all in `notes/b70/`, extending the existing harnesses rather than repla
 | `build.sh` | builds the probes/shim (`icpx -fsycl`); run before any B70 test |
 | `probe_transport.cpp`, `probe_notify.cpp` | E1–E3, and the link/bandwidth constants the policy derives from |
 | `probe_resident.cpp`, `probe_doorbell.cpp` | T2 sizing, `D` poll-storm and drain tests |
-| `b70_shim.cpp` + `probe_cross.py` | D cross-vendor region tests (8 checks; run before anything else touches the protocol) |
+| `b70_shim.cpp` + `probe_cross.py` | D cross-vendor region tests (8/9; the exception is the one-way `cudaHostRegister` refusal) — run before anything else touches the protocol |
+| `probe_crossproc.py` | D cross-process region tests (11/11): engine child attaches, kernel writes reach parent *and* a 3090 DMA, a 3090 memop reaches a kernel in the child, wait retires on the child's flag |
+| `probe_stores.cpp`, `probe_stores2.cpp`, `probe_unreg.cpp`, `probe_coherency.cpp` | the store-visibility family behind the two rules in architecture §10a |
 | `b70_bench_kernel.py` | B′ + E4: GEMV/GEMM rate vs rows × experts × threads × rate × layout, cold selections |
 | `b70_bench_engine.py` | E1–E3, E8: real jobs through the ring with the engine child live (the `notes/bench_handoff.py` analogue) |
 | `b70_prof.py` | per-layer decode/prefill attribution + power phases (the `notes/prof_e2e.py` analogue; CUDA events on the parent, engine-side `EXL3_MOE_B70_PROF` gap/queue/compute per 64 jobs, hwmon sampler) |

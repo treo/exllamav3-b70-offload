@@ -1,6 +1,12 @@
-# build products and binaries of the B70 probes
+# probe binaries and the built shim (build.sh regenerates them)
 probe_transport
 probe_doorbell
 probe_notify
 probe_resident
+probe_stores
+probe_stores2
+probe_unreg
+probe_coherency
+probe_exact
 libb70shim.so
+__pycache__/

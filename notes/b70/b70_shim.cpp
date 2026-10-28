@@ -69,7 +69,7 @@ extern "C" int b70_touch_foreign(void *ptr, unsigned long n_words, unsigned seed
     TRY_TRY
         sycl::ext::oneapi::experimental::register_host_memory(ptr, page_up(n_words * 4), *g_ctx);
         uint32_t *p = (uint32_t *) ptr;
-        g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i] += seed + i; });
+        g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i[0]] += seed + uint32_t(i[0]); });
         g_q->wait();
         sycl::ext::oneapi::experimental::unregister_host_memory(ptr, *g_ctx);
     CATCH_FAIL
@@ -82,7 +82,11 @@ extern "C" int b70_write_flag(void *ptr, unsigned long n_words, unsigned seq)
     TRY_TRY
         sycl::ext::oneapi::experimental::register_host_memory(ptr, page_up((n_words + 16) * 4), *g_ctx);
         uint32_t *p = (uint32_t *) ptr;
-        g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i] = 0xC0FFEE00u + i; });
+        // NOTE the explicit i[0] and the uint32_t cast: with the original
+        //   `p[i] = 0xC0FFEE00u + i`  (id<1> implicitly converted) the kernel "succeeded", the
+        //   flag written after it landed, and the whole 16 KiB payload stayed zero - in every
+        //   memory type tested. Index arithmetic inside kernel lambdas is spelled out hereafter.
+        g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i[0]] = 0xC0FFEE00u + uint32_t(i[0]); });
         g_q->single_task([=]
         {
             // plain volatile store after a system fence. A sycl::atomic_ref with system scope on
@@ -129,7 +133,7 @@ extern "C" int b70_fill_pinned(void *ptr, unsigned long n_words, unsigned seed)
 {
     TRY_TRY
         uint32_t *p = (uint32_t *) ptr;
-        g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i] = seed + uint32_t(i[0]); });
+        g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i[0]] = seed + uint32_t(i[0]); });
         g_q->wait();
     CATCH_FAIL
 }

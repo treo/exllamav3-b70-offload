@@ -1,0 +1,12 @@
+registered 0x7fb8dcaff000, 256 pages, payload 4096 words
+
+  1 plain store, no fence                              ok  (0/4096 wrong, 0 of them still zero)
+  2 plain store, then in-kernel system fence           ok  (0/4096 wrong, 0 of them still zero)
+  3 volatile store                                     ok  (0/4096 wrong, 0 of them still zero)
+  4 read-modify-write (the pattern that appeared to work) ok  (0/4096 wrong, 0 of them still zero)
+  5 plain store from a single_task loop                ok  (0/4096 wrong, 0 of them still zero)
+  6 fence before and after, same kernel (group-wide)   ok  (0/4096 wrong, 0 of them still zero)
+  7 sycl::atomic_ref device-scope store                FAIL  (4096/4096 wrong, 4096 of them still zero)
+terminate called after throwing an instance of 'sycl::_V1::exception'
+  what():  level_zero backend failed with error: 20 (UR_RESULT_ERROR_DEVICE_LOST)
+timeout: the monitored command dumped core
