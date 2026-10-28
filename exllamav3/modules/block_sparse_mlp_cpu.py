@@ -897,6 +897,23 @@ class BlockSparseMLP_CPU:
                 counts = _expert_stats_load(self.config, self.num_experts).get(self.key)
         if counts is not None and len(counts) == self.num_experts:
             perm = sorted(range(self.num_experts), key = lambda e: -counts[e])
+            # EXL3_MOE_CPU_SPLIT_LAYOUT=parity: give each device HALF the hot set instead of the
+            # whole head. The shipped layout hands the main GPU ranks [0, first) - the most popular
+            # experts - and the worker/B70 the tail, so the B70 only ever sees tail traffic
+            # (measured on 2.05bpw: 2.21 of 10 routed picks per layer, card at ~80 W of 275 W).
+            # Reordering the hot-sorted list as even-ranks-then-odd-ranks changes NO slot count and
+            # no other invariant: the tail then holds the odd-ranked popular experts, i.e. roughly
+            # half the pick mass on each device, and the spare slots (the last GPU positions of the
+            # even block) still start out cold. Dynamic placement (promote-on-miss, sweep) is
+            # untouched - this only moves the STARTING partition.
+            if os.environ.get("EXL3_MOE_CPU_SPLIT_LAYOUT", "tail") == "parity":
+                perm = perm[0::2] + perm[1::2]
+            if os.environ.get("EXL3_MOE_CPU_SPLIT_DEBUG"):
+                tot = float(sum(counts)) or 1.0
+                wmass = sum(counts[e] for e in perm[wfirst:]) / tot
+                print(f" -- split layout[{os.environ.get('EXL3_MOE_CPU_SPLIT_LAYOUT', 'tail')}] "
+                      f"{self.key}: worker slots {self.num_experts - wfirst}, "
+                      f"worker pick mass {100 * wmass:.1f}%")
             self._split_perm = perm
             if self.gated:
                 self.gates = [self.gates[e] for e in perm]

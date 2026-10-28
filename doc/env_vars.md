@@ -673,6 +673,46 @@ experts instead of the checkpoint's arbitrary head. A profile from a different w
 what the default placement costs anyway, and the map adapts from there. `EXL3_MOE_CPU_SPLIT_STATS`
 (an explicit stats file in the same per-layer format) takes precedence.
 
+### `EXL3_MOE_CPU_SPLIT_LAYOUT` (default: `tail`)
+
+Which experts the worker slice starts out holding. `tail` (the shipped behaviour) puts the
+hot-sorted ranks `[0, first)` on the main GPU and the remaining ranks in the worker, so a B70 worker
+tier ends up holding only unpopular experts. `parity` reorders the hot-sorted rank list as
+even-ranks-then-odd-ranks before the same boundary is applied: no slot count changes, the spare
+slots still start cold, and the worker inherits roughly HALF the pick mass instead of the tail.
+Measured on Qwen3.8-Flash-Next 2.05bpw with `--moe_cpu_split 256`: routed picks handled by the B70
+2.44 of 10 -> 4.89, layers issuing a B70 job every step instead of 38% of them, per-job wall
+67 -> 84 us, B70 board power ~80 W -> ~115 W. Throughput is a TRADE, not a win: decode
++2.9% (65.4 -> 67.3 tok/s, 2 interleaved rounds) but prefill -6..-8% (1024: 1316 -> 1204,
+2048: 1681 -> 1550, 4096: 2022 -> 1893), because the main GPU loses its locally-resident popular
+experts and has to have them streamed or wait on the worker, and the worker's gemv/DPAS tiers run
+well below the main GPU's local bandwidth at prefill row counts. So `parity` is not a default; it is
+a dial and an instrument:
+
+* Workloads that are decode-dominated (long generations, short prompts) favour it; prompt-heavy ones
+  do not. A partial form (interleave only the top H ranks, leaving the cold tail as today) is the
+  obvious next step if a middle point is wanted.
+* More useful: under `tail` the child's work is mostly slack behind the main GPU's per-layer work, so
+  B70 device-side improvements are INVISIBLE end-to-end; under `parity` the card moves onto the
+  critical path (and 80 W -> 115 W) and such work can be judged honestly. Verified in both
+directions: `MOE_GEMV_NC=16` halves the decode gu gemv and read neutral-to-negative under `tail`,
+  and still ~neutral under `parity` (67.1 vs 67.3) - i.e. even there one gemv's saving is inside the
+  overlap budget, which is itself the measurement to act on (attack the per-job fixed cost, not the
+  kernels).
+`EXL3_MOE_CPU_SPLIT_DEBUG=1` prints each layer's worker-side pick mass at load, which is the
+mechanism check to run before believing any placement A/B. Pairs with `EXL3_MOE_B70_SUB` and, if the
+worker still has CPU-tier slots, with a high `EXL3_MOE_STREAM_T`.
+
+This is also the practical workaround for a trap in the dynamic policies: `EXL3_MOE_CPU_SWAP_INVERT`
+and `EXL3_MOE_CPU_SWAP_POLICY=hot2` are read only by the periodic sweep, and `_split_swap_tick`
+returns after the promote-on-miss pass whenever a layer has spare slots (the default with
+`--moe_cpu_pinned_arena`, `EXL3_MOE_CPU_PROMOTE=4`) - so neither env does anything until you set
+`EXL3_MOE_CPU_PROMOTE=0`. Worse, when `--moe_cpu_split` is sized so the worker registers ALL of its
+slots on a registered B70 (`b70n == E`, which is the case for 2.05bpw at 256), the promote candidate
+mask `>= b70n` is empty as well and placement is entirely static: an A/B of those envs then measures
+nothing (verified - zero `b70_update_expert` calls and byte-identical per-job pick counts with and
+without them).
+
 ### `EXL3_MOE_CPU_SWAP_INVERT` / `EXL3_MOE_CPU_SWAP_POLICY=hot2` (default: unset)
 
 Alternative placement directions for the periodic swap sweep, both aimed at the two-device
