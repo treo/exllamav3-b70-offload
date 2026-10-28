@@ -703,15 +703,18 @@ directions: `MOE_GEMV_NC=16` halves the decode gu gemv and read neutral-to-negat
 mechanism check to run before believing any placement A/B. Pairs with `EXL3_MOE_B70_SUB` and, if the
 worker still has CPU-tier slots, with a high `EXL3_MOE_STREAM_T`.
 
-This is also the practical workaround for a trap in the dynamic policies: `EXL3_MOE_CPU_SWAP_INVERT`
-and `EXL3_MOE_CPU_SWAP_POLICY=hot2` are read only by the periodic sweep, and `_split_swap_tick`
-returns after the promote-on-miss pass whenever a layer has spare slots (the default with
-`--moe_cpu_pinned_arena`, `EXL3_MOE_CPU_PROMOTE=4`) - so neither env does anything until you set
-`EXL3_MOE_CPU_PROMOTE=0`. Worse, when `--moe_cpu_split` is sized so the worker registers ALL of its
-slots on a registered B70 (`b70n == E`, which is the case for 2.05bpw at 256), the promote candidate
-mask `>= b70n` is empty as well and placement is entirely static: an A/B of those envs then measures
-nothing (verified - zero `b70_update_expert` calls and byte-identical per-job pick counts with and
-without them).
+History, because it bites anyone reading an old measurement: `EXL3_MOE_CPU_SWAP_INVERT` and
+`EXL3_MOE_CPU_SWAP_POLICY=hot2` are implemented only in the periodic sweep, and until now
+`_split_swap_tick` returned straight after the promote-on-miss pass whenever a layer had spare slots
+(the default under `--moe_cpu_pinned_arena`, `EXL3_MOE_CPU_PROMOTE=4`) - so neither env did anything
+unless you also set `EXL3_MOE_CPU_PROMOTE=0`. Worse, when `--moe_cpu_split` is sized so the worker
+registers ALL of its slots on a registered B70 (`b70n == E`, which is the case for 2.05bpw at 256),
+the promote candidate mask `>= b70n` is empty too, so placement was entirely static and an A/B of
+those envs measured nothing (verified: zero `b70_update_expert` calls, byte-identical per-job pick
+counts). That is fixed: requesting a policy now keeps the sweep alive alongside promote-on-miss
+(`EXL3_MOE_CPU_SWAP_SWEEP_WITH_PROMOTE=0` restores the old early return), and a policy sweep gets a
+smaller default budget (8 installs, not 64) because every install in an all-B70 layer re-uploads to
+the device.
 
 ### `EXL3_MOE_CPU_SWAP_INVERT` / `EXL3_MOE_CPU_SWAP_POLICY=hot2` (default: unset)
 
@@ -729,6 +732,25 @@ the device (`b70_update_expert`) - layers whose update fails are pinned to the C
 Sweeps cost ~2.5-3 ms per install (checkpoint read + arena copy + device upload) and quiesce
 the pipeline: let placement converge in a warmup run, then steady-state with
 `EXL3_MOE_CPU_SWAP_MAX=0` so measurement windows stay churn-free.
+
+`hot2` is the mechanism that keeps a hot partition balanced as traffic DRIFTS over a long session,
+which the static `EXL3_MOE_CPU_SPLIT_LAYOUT=parity` cannot do on its own. Measured on 2.05bpw
+(`-mcs 256`, all 260 worker slots B70-resident, `EXL3_MOE_CPU_SWAP_INTERVAL=32` to make the sweeps
+frequent enough to watch, `EXL3_MOE_CPU_SWAP_DEBUG=1`):
+
+* from an unbalanced `tail` start (layer 0 worker pick mass 15.2%), the first sweep moved 2 experts
+  and jumped the mass to 36.9%, settling at 40.8% - it converges in one or two sweeps;
+* from a balanced `parity` start (49.3%) it settled at ~1 install per layer per sweep with the mass
+  steady at 47.7-47.9% across 29 sweeps, i.e. it repairs drift instead of oscillating against
+  promote-on-miss (no conflict in this shape: with `b70n == E` promote-on-miss has no candidates;
+  with real CPU-tier slots the two mechanisms can trade the same expert back and forth, so prefer
+  `EXL3_MOE_CPU_PROMOTE=0` if you enable a policy on a mixed-tier worker).
+* cost: at the default interval (128 steps) decode measured -0.5-1% versus the static layout alone
+  (67.4 -> 66.9 tok/s); at interval 32 the quiesces cost ~4 tok/s, so do not tune it that far unless
+  placement really is moving. `perf.py` drives `model.forward` directly, so its sweeps run INLINE
+  rather than from the generator's queue-drained hook - a real serving session pays less than that.
+`EXL3_MOE_CPU_SPLIT_DEBUG=1` prints the per-layer pick mass at load and the `hot2 sweep` line prints
+it after each sweep: that is the difference between measuring a policy and watching it never run.
 
 ### `EXL3_MOE_CPU_PROMOTE_VERIFY` (default: unset)
 

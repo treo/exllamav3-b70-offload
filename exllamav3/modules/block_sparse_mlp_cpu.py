@@ -143,6 +143,16 @@ def save_expert_stats(infer_params):
         print(f" !! expert stats not saved ({path}): {e}")
 
 
+def _swap_policy_requested():
+    """True when an explicit placement POLICY was asked for (rank-parity hot split, or the
+    inverted sweep). Both are implemented only inside the periodic sweep, so they have to stay
+    reachable even when promote-on-miss owns the per-step placement - and they are the only
+    mechanism that can keep the hot partition balanced as the routing distribution drifts over a
+    long session."""
+    return os.environ.get("EXL3_MOE_CPU_SWAP_POLICY", "") == "hot2" \
+        or bool(os.environ.get("EXL3_MOE_CPU_SWAP_INVERT"))
+
+
 @torch.inference_mode()
 def run_pending_swap_sweeps(infer_params):
     """Run any pending dynamic-placement sweep (see BlockSparseMLP._split_swap_tick). Called
@@ -170,7 +180,12 @@ def run_pending_swap_sweeps(infer_params):
         for h in {m.cpu_host for m in reg}:
             assert int(h.v_jobs_head[0]) == int(h.v_jobs_tail[0]), \
                 "swap sweep: job ring not drained after all-device sync"
-    budget = int(os.environ.get("EXL3_MOE_CPU_SWAP_MAX", 64))
+    # Install cost is real: ~2.5-3 ms per swap (checkpoint read + arena copy + device upload), and
+    # when a registered B70 holds the worker slots every install re-uploads to the device. So a
+    # policy sweep - whose job is to repair DRIFT in an already-balanced partition, not to move the
+    # world - gets a deliberately small default budget; EXL3_MOE_CPU_SWAP_MAX still overrides both.
+    budget = int(os.environ.get("EXL3_MOE_CPU_SWAP_MAX",
+                                8 if _swap_policy_requested() else 64))
     total = 0
     for m in reg:
         if budget <= 0:
@@ -1005,7 +1020,15 @@ class BlockSparseMLP_CPU:
         if self._split_spares:
             # Promote-on-miss replaces the sweep: one pass over every split module per step
             _split_promote_step(ip, reg, self._split_submit_rows)
-            return
+            # ...UNLESS an explicit placement policy is set. hot2 / SWAP_INVERT exist only in the
+            # periodic sweep below, and promote-on-miss cannot express them - nor does it have any
+            # work at all when a registered B70 holds every worker slot, because its candidate mask
+            # (`>= b70n`, see _PromoteState) is then empty. Falling through to the interval check
+            # keeps the hot partition balanced as the routing distribution drifts over a long
+            # session; EXL3_MOE_CPU_SWAP_SWEEP_WITH_PROMOTE=0 restores the old early return.
+            if not _swap_policy_requested() \
+                    or os.environ.get("EXL3_MOE_CPU_SWAP_SWEEP_WITH_PROMOTE", "1") == "0":
+                return
         interval = int(os.environ.get("EXL3_MOE_CPU_SWAP_INTERVAL", 128))
         if self._swap_tick_count < interval:
             return
@@ -1071,6 +1094,16 @@ class BlockSparseMLP_CPU:
                     continue   # neither direction is confidently profitable
                 if self._split_swap_experts(r_gpu, r_want, mp):
                     nswaps += 1
+            if nswaps and os.environ.get("EXL3_MOE_CPU_SWAP_DEBUG"):
+                # Mechanism check, per layer: is the parity partition actually holding as the
+                # distribution moves? Without this line an A/B cannot tell "balanced" from "never
+                # ran" - which is precisely how hot2 read as a no-op for a whole session.
+                tot = float(sum(cnt.values())) or 1.0
+                wmass = sum(cnt[r] for r in range(self.num_experts)
+                            if int(mp[r]) >= first) / tot
+                print(f" -- hot2 sweep {self.key}: {nswaps} swaps, "
+                      f"worker pick mass {100 * wmass:.1f}% (hot {len(hot)}, "
+                      f"wanted on GPU {len(want_gpu)})", flush = True)
             if nswaps:
                 if os.environ.get("EXL3_MOE_CPU_SWAP_VERIFY"):
                     assert mp.sort().values.equal(torch.arange(self.num_experts)), \
