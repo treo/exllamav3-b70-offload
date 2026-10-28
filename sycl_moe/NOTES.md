@@ -149,10 +149,22 @@ stream_t, stream_t_dev, slot_rows_dev, WSLOTS, guards, overlap) are all at measu
 
 ## Top platform traps (full list: [`archive/platform-pitfalls.md`](archive/platform-pitfalls.md))
 
-- **P1 ordering**: on this stack an in-order queue does NOT serialize `q.memcpy` after
-  `q.submit` kernels; only explicit `depends_on`/`{deps}` edges are honored. "Retry/probe/second
-  call fixes it" = a missing dependency edge, check that before any cache theory. Harnesses must
-  chain exactly like production.
+- **P1 ordering**: **the queue production builds is NOT in-order** (`b70_lib.cpp`: selector +
+  async_handler only; `bench_layer.cpp`: `enable_profiling` only), so an unchained consumer has no
+  ordering relationship with anything — and that, not a runtime defect, is what this trap was actually
+  describing. Measured (`lab_p1_order.cpp`, 1000 iters/arm, `is_in_order()` printed per arm): a kernel
+  reading what a **preceding unchained `q.memcpy`** wrote fails **322/1000** on the production-shaped
+  queue and **0/1000** on one built with `property::queue::in_order{}`; a 200 µs delay between the two
+  makes it vanish (a timing race). The old wording — "an in-order queue does NOT serialize `q.memcpy`
+  after `q.submit` kernels, and `event.wait()` can return before the data is host-readable" — is wrong
+  on both counts: in-order ordering held in both directions, a chained copy read after
+  `event.wait()`-only was clean 0/1000, and `UR_L0_USE_COPY_ENGINE=0` /
+  `UR_L0_USE_DRIVER_COUNTER_BASED_EVENTS=0` change nothing, so there is nothing to file upstream.
+  **The rule is unchanged: chain EVERY op** (`cgh.depends_on(prev)` / `memcpy(..., {deps})`,
+  `g_last_ev` across calls), precisely because the shipped queue is out-of-order. "Retry/probe/second
+  call fixes it" = a missing dependency edge, check that before any cache theory. A bare
+  `ext_oneapi_submit_barrier()` also closed the gap (0/1000), but an explicit edge states the intent.
+  Harnesses must chain exactly like production; table + caveats in `archive/platform-pitfalls.md` P1.
 - **P3/P4/P5 memory**: `malloc_device` does not fail near capacity (async OOM throws across the C
   ABI); host writes into device USM segfault; `q.copy(a,b)` is `(Source,Dest)`, so a "readback"
   spelled the obvious way overwrites what you meant to read.

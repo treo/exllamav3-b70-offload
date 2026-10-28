@@ -2,34 +2,62 @@
 
 Everything here is a property of THIS stack (or at least was measured on it), not of the
 algorithm. Reread before touching anything async. Environment: oneAPI 2026.2, NEO 2.41+/CR
-26.35, DG2+/BMG-G31, in-order `sycl::queue`, `xe` kernel driver.
+26.35, DG2+/BMG-G31, `xe` kernel driver - and NOTE that the queue production builds is NOT
+in-order (no `property::queue::in_order`), which is what P1 turns out to have been about.
 
-## P1 — Queue ordering: only explicit dependency edges are honored (the one-day bug)
+## P1 — Queue ordering: production's queue is NOT in-order; the "in-order queue ignores
+memcpy ordering" story was a mis-diagnosis (corrected 2026-10-28, `lab_p1_order.cpp`)
 
-Within an **in-order** `sycl::queue`, `q.memcpy()` does NOT wait for kernels submitted
-earlier via `q.submit()`, and an event `.wait()` can complete before the data is
-host-readable. Consumers read STALE data (usually zeros). Barriers
-(`ext_oneapi_submit_barrier`) and empty separator kernels did NOT help; only true event
-dependencies do.
+The claim carried here for a long time read: *"within an **in-order** `sycl::queue`, `q.memcpy()`
+does NOT wait for kernels submitted earlier via `q.submit()`, and an event `.wait()` can complete
+before the data is host-readable."* Asked whether any spec allows that, the answer was correctly "no -
+either your code or the runtime is broken", which forced a re-test. The re-test says: **our code, and
+specifically our notes** - the queue was never in-order.
 
-- Fix (permanent, `moe_sycl.cpp`): EVERY op — H2D, kernel, D2H — is chained through
-  returned events (`cgh.depends_on(prev)` / `memcpy(..., {deps})`); `b70_forward` keeps
-  `g_last_ev` across calls. Handler signatures return the event for this reason.
-- Symptom catalogue, all ONE cause: "first forward wrong, later forwards right",
-  "retry fixes it", "adding a probe fixes it", "the second call is correct" — extra queue
-  ops acted as implicit syncs.
-- Corollary for harnesses: any lab that submits queue work MUST chain with `depends_on` /
-  `pre_dep` exactly like production. "Fails deterministically until I add a sync" ==
-  ordering race, full stop. This bit the port twice, the second time in our own bench
-  (`--alt` fired forward N+1's blob memcpy — which zeroes the coop counter zone —
-  unchained behind forward N's kernels; the fused epilogue flag never fired and `out` came
-  back BYTE-IDENTICAL to the previous dataset. Kernels were correct all along).
-- Unchained repeated launches of a publication microbench produced ~58% "failures"
-  INCLUDING reads of FUTURE launches' values (physically impossible under serialized
-  execution → the giveaway that launches overlapped). Once chained: 0/1.23M mismatches for
-  plain store + `it.barrier(global_space)` + acq_rel `fetch_add` + device atomic loads.
-  That publication chain IS sound on this stack, single-kernel; kernel boundaries handle
-  cross-kernel visibility.
+`b70_lib.cpp` builds `sycl::queue{gpu_selector_v, async_handler{...}}` and `bench_layer.cpp` builds
+`{gpu_selector_v, {enable_profiling()}}`; **neither passes `in_order`** (only the labs do). On an
+out-of-order queue an unchained command has no ordering relationship with anything, which is exactly
+the symptom set. Measured, 1000 iterations per arm, host always reads strictly after a wait, and the
+lab prints `is_in_order()` for every queue it uses so the property is asserted rather than assumed:
+
+| arm | violations |
+|---|---|
+| kernel reads what a **preceding, unchained `q.memcpy`** wrote — production-shaped queue | **322 / 1000** |
+| same, queue built with `property::queue::in_order{}` | **0 / 1000** |
+| same as row 1 but with a 200 µs host delay between copy and kernel | 0 / 300 → a timing race, as expected |
+| `q.memcpy` D2H after an unchained writer kernel (production-shaped queue) | 0 / 1000 (luck, not semantics) |
+| fully chained (`{deps}`), host waits on the **copy's own event** with no `q.wait()` | 0 / 1000 |
+| bare `q.ext_oneapi_submit_barrier()` between copy and kernel (out-of-order queue) | 0 / 1000 |
+| `submit_barrier({copy_event})` | 0 / 1000 |
+| kernel on one in-order queue, copy on a *second* in-order queue, no edge | 0 / 1000 (luck, not semantics) |
+| `UR_L0_USE_COPY_ENGINE=0`, `UR_L0_USE_DRIVER_COUNTER_BASED_EVENTS=0` | no arm's result changes |
+
+Consequences:
+
+* **Nothing to file upstream.** A real in-order queue on this stack does serialize copies and
+  kernels in both directions, and `event::wait()` does not return before the data is host-readable.
+  The copy-engine and counter-based-event knobs make no difference, so there is no cross-engine
+  ordering defect to demonstrate. Suspect list checked: host read too early (excluded structurally),
+  two queues (tested, row 8), property not applying (`is_in_order()` printed, and it *was* 0 for the
+  queue that failed), graph recording (not in use).
+* **Keep chaining.** The permanent fix in `moe_sycl.cpp` (every op carries `depends_on` / `{deps}`,
+  `b70_forward` keeps `g_last_ev` across calls) is still required, because the shipped queue is
+  out-of-order. Building the queue `in_order` instead is measured to be a *correct* alternative, not a
+  performance one - everything is already serialized by the chains - though it would also, for free,
+  properly order `b70_warm`'s traffic against forward traffic on the shared queue.
+* **The symptom catalogue is fully explained by the missing property.** "First forward wrong, later
+  forwards right", "retry fixes it", "adding a probe fixes it", "the second call is correct": extra
+  queue ops acted as implicit syncs. Unchained repeated launches giving ~58% publication-bench
+  failures *including reads of FUTURE launches' values* is the clincher - that is what a set of
+  concurrently running commands looks like. Once chained: 0/1.23M mismatches for plain store +
+  `it.barrier(global_space)` + acq_rel `fetch_add` + device atomic loads, so the publication chain
+  inside one kernel remains sound; kernel boundaries still handle cross-kernel visibility.
+* **Two cautions that the zeros above do NOT license.** (i) D2H-after-unchained-kernel and
+  cross-queue copies measured clean here; an out-of-order queue and a second queue respectively
+  promise nothing, so treat those as timing luck for these shapes. (ii) Bare `submit_barrier()`
+  working is not a reason to prefer it over an explicit edge: the edge states the intent.
+* Reproduce: `icpx -fsycl -O2 -w lab_p1_order.cpp -o lab_p1_order && ./lab_p1_order 1000 0`
+  (second arg injects the host delay between producer and consumer).
 
 ## P2 — Probe reads are queue ops
 
