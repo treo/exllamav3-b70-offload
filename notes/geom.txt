@@ -1,0 +1,38 @@
+control region: jobs@384 (1056 B/job x 256), flags@270720, stage jobs@273408, MOE_CTRL_SIZE=340992 B (333.0 KiB)
+
+== Qwen3.8-Flash-Next @2.68 (experts mostly 2.5bpw): H=2560 I=640 K=2.5 E=512 topk=10 layers=48
+   per-expert trellis bytes g/u/d = 512000/512000/512000 -> expert block 1536000 B (1.465 MiB); layer total 0.73 GiB; all layers 35.2 GiB
+   slot geo cap_rows=64 slots=4: x@0 (320 KiB) sel@327680 w@330240 out@331520 (640 KiB) slot_size=963.8 KiB all=3.76 MiB
+   slot geo cap_rows=32 slots=4: x@0 (160 KiB) sel@163840 w@165120 out@165760 (320 KiB) slot_size=481.9 KiB all=1.88 MiB
+   slot geo cap_rows=128 slots=4: x@0 (640 KiB) sel@655360 w@660480 out@663040 (1280 KiB) slot_size=1927.5 KiB all=7.53 MiB
+   slot geo cap_rows=64 slots=8: x@0 (320 KiB) sel@327680 w@330240 out@331520 (640 KiB) slot_size=963.8 KiB all=7.53 MiB
+   wslot 32 MiB, batch_experts 24: experts per stage batch = 21, bytes/batch = 30.8 MiB, DMA at 50 GB/s = 0.65 ms
+   wslot 32 MiB, batch_experts 18: experts per stage batch = 18, bytes/batch = 26.4 MiB, DMA at 50 GB/s = 0.55 ms
+   wslot 64 MiB, batch_experts 24: experts per stage batch = 24, bytes/batch = 35.2 MiB, DMA at 50 GB/s = 0.74 ms
+== Qwen3.8-Flash-Next @2.68 (3bpw layers): H=2560 I=640 K=3.0 E=512 topk=10 layers=48
+   per-expert trellis bytes g/u/d = 614400/614400/614400 -> expert block 1843200 B (1.758 MiB); layer total 0.88 GiB; all layers 42.2 GiB
+   slot geo cap_rows=64 slots=4: x@0 (320 KiB) sel@327680 w@330240 out@331520 (640 KiB) slot_size=963.8 KiB all=3.76 MiB
+   slot geo cap_rows=32 slots=4: x@0 (160 KiB) sel@163840 w@165120 out@165760 (320 KiB) slot_size=481.9 KiB all=1.88 MiB
+   slot geo cap_rows=128 slots=4: x@0 (640 KiB) sel@655360 w@660480 out@663040 (1280 KiB) slot_size=1927.5 KiB all=7.53 MiB
+   slot geo cap_rows=64 slots=8: x@0 (320 KiB) sel@327680 w@330240 out@331520 (640 KiB) slot_size=963.8 KiB all=7.53 MiB
+   wslot 32 MiB, batch_experts 24: experts per stage batch = 18, bytes/batch = 31.6 MiB, DMA at 50 GB/s = 0.66 ms
+   wslot 32 MiB, batch_experts 18: experts per stage batch = 18, bytes/batch = 31.6 MiB, DMA at 50 GB/s = 0.66 ms
+   wslot 64 MiB, batch_experts 24: experts per stage batch = 24, bytes/batch = 42.2 MiB, DMA at 50 GB/s = 0.88 ms
+== Qwen3.8-Flash-Next @2.05 (experts 2bpw): H=2560 I=640 K=2.0 E=512 topk=10 layers=48
+   per-expert trellis bytes g/u/d = 409600/409600/409600 -> expert block 1228800 B (1.172 MiB); layer total 0.59 GiB; all layers 28.1 GiB
+   slot geo cap_rows=64 slots=4: x@0 (320 KiB) sel@327680 w@330240 out@331520 (640 KiB) slot_size=963.8 KiB all=3.76 MiB
+   slot geo cap_rows=32 slots=4: x@0 (160 KiB) sel@163840 w@165120 out@165760 (320 KiB) slot_size=481.9 KiB all=1.88 MiB
+   slot geo cap_rows=128 slots=4: x@0 (640 KiB) sel@655360 w@660480 out@663040 (1280 KiB) slot_size=1927.5 KiB all=7.53 MiB
+   slot geo cap_rows=64 slots=8: x@0 (320 KiB) sel@327680 w@330240 out@331520 (640 KiB) slot_size=963.8 KiB all=7.53 MiB
+   wslot 32 MiB, batch_experts 24: experts per stage batch = 24, bytes/batch = 28.1 MiB, DMA at 50 GB/s = 0.59 ms
+   wslot 32 MiB, batch_experts 18: experts per stage batch = 18, bytes/batch = 21.1 MiB, DMA at 50 GB/s = 0.44 ms
+   wslot 64 MiB, batch_experts 24: experts per stage batch = 24, bytes/batch = 28.1 MiB, DMA at 50 GB/s = 0.59 ms
+== Qwen3.5-35B-A3B @3.17 (experts 3bpw): H=2048 I=512 K=3.0 E=256 topk=8 layers=40
+   per-expert trellis bytes g/u/d = 393216/393216/393216 -> expert block 1179648 B (1.125 MiB); layer total 0.28 GiB; all layers 11.2 GiB
+   slot geo cap_rows=64 slots=4: x@0 (256 KiB) sel@262144 w@264192 out@265216 (512 KiB) slot_size=771.0 KiB all=3.01 MiB
+   slot geo cap_rows=32 slots=4: x@0 (128 KiB) sel@131072 w@132096 out@132608 (256 KiB) slot_size=385.5 KiB all=1.51 MiB
+   slot geo cap_rows=128 slots=4: x@0 (512 KiB) sel@524288 w@528384 out@530432 (1024 KiB) slot_size=1542.0 KiB all=6.02 MiB
+   slot geo cap_rows=64 slots=8: x@0 (256 KiB) sel@262144 w@264192 out@265216 (512 KiB) slot_size=771.0 KiB all=6.02 MiB
+   wslot 32 MiB, batch_experts 24: experts per stage batch = 24, bytes/batch = 27.0 MiB, DMA at 50 GB/s = 0.57 ms
+   wslot 32 MiB, batch_experts 18: experts per stage batch = 18, bytes/batch = 20.2 MiB, DMA at 50 GB/s = 0.42 ms
+   wslot 64 MiB, batch_experts 24: experts per stage batch = 24, bytes/batch = 27.0 MiB, DMA at 50 GB/s = 0.57 ms

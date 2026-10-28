@@ -43,10 +43,12 @@ def slot_geometry(cap_rows, hi, ho, topk, num_slots):
 
 
 MODELS = {
-    # name: (hidden, interm, K_expert, E, topk, layers)
-    "Qwen3.8-Flash-Next @2.68 (experts 2.5bpw)": (2560, 640, 2.5, 512, 10, 48),
-    "Qwen3.8-Flash-Next @2.05 (experts 2bpw)":   (2560, 640, 2.0, 512, 10, 48),
-    "Qwen3.5-35B-A3B @3.17 (experts 2.5bpw)":    (2048, 512, 2.5, 256, 8, 40),
+    # name: (hidden, interm, K_expert, E, topk, layers)  -- K from the tile width in the checkpoint;
+    # Qwen3.8 @2.68 mixes rates by layer (2.5 in 42 layers, 3 in layers 1-3 and 44-47)
+    "Qwen3.8-Flash-Next @2.68 (experts mostly 2.5bpw)": (2560, 640, 2.5, 512, 10, 48),
+    "Qwen3.8-Flash-Next @2.68 (3bpw layers)":          (2560, 640, 3.0, 512, 10, 48),
+    "Qwen3.8-Flash-Next @2.05 (experts 2bpw)":         (2560, 640, 2.0, 512, 10, 48),
+    "Qwen3.5-35B-A3B @3.17 (experts 3bpw)":            (2048, 512, 3.0, 256, 8, 40),
 }
 
 if __name__ == "__main__":

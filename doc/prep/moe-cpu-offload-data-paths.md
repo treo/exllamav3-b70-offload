@@ -2,8 +2,9 @@
 
 Scope: every path a token's activations and an expert's weights take when routed experts run on
 the CPU, for both offload modes, plus the CUDA-side work each path performs. Companion documents:
-`tuning-knobs.md` (what each knob changes about these shapes), `timing.md` (measured cost of each
-hop), `mul1-trellis.md` (the weight format the CPU kernels read).
+[`tuning-knobs.md`](tuning-knobs.md) (what each knob changes about these shapes),
+[`measured-costs.md`](measured-costs.md) (measured cost of each hop),
+[`mul1-trellis.md`](mul1-trellis.md) (the weight format the CPU kernels read).
 
 Everything below is anchored in the tree at HEAD (`cdc785db`, v1.6.5). File:line references are
 given so each claim can be checked. Machine-readable geometry is reproduced by
@@ -85,14 +86,15 @@ off_out = align64(off_w + cap_rows * max_topk * 2)     # fp16 w  [cap_rows, max_
 slot_size = align64(off_out + cap_rows * max_ho * 4)   # fp32 out[cap_rows, max_ho]
 ```
 
-All `hi`, `ho`, `topk` must be equal across registered layers (assert at `moe_cpu_host.py:1200`),
-otherwise the D2H/H2D copies would be strided — torch implements those with a host-side staging
-pass performed *at enqueue time*, outside stream order, which would ship the slot's previous
-contents.
+All `hi`, `ho`, `topk` must be equal across registered layers (assert at
+`moe_cpu_host.py:1200`), otherwise the D2H/H2D copies would be strided — torch implements those
+with a host-side staging pass performed *at enqueue time*, outside stream order, which would ship
+the slot's previous contents.
 
 Concrete numbers (Qwen3.8-Flash-Next, `H = 2560`, `topk = 10`, defaults `num_slots = 4`,
 `cap_rows = 64`): `x` 320 KiB, `sel` 2.5 KiB, `w` 1.25 KiB, `out` 640 KiB, `slot_size` 963.8 KiB,
-4 slots = 3.76 MiB; plus 2 × 32 MiB weight-staging slots. Control region 333 KiB.
+4 slots = 3.76 MiB; plus 2 × 32 MiB weight-staging slots and 333 KiB of control ⇒ ~68 MiB pinned
+per worker (`region=68.1 MiB` in the harness logs).
 
 Job kinds (`MOE_JOB_KIND_{COMPUTE,STAGE,COMPUTE_GATED}`, `cpu/moe_handoff.h:56-70`): a
 `COMPUTE_GATED` job's payload may be entirely `-1` (no CPU-resident expert selected), and then both
@@ -105,8 +107,8 @@ is genuinely cold.
 
 Entered at `block_sparse_mlp.py:1138` (`cpu_split_submit`) with
 `y (bsz, H) fp16`, `selected_experts (bsz, topk) int64` **holding raw router ids**, `routing_weights
-(bsz, topk) fp16`. Requirements: `bsz <= cap_rows` and both `y` and `routing_weights` contiguous,
-else the function returns `None` and the caller falls back to P1' (copy path).
+(bsz, topk) fp16`. `submit_issue_fused` returns `None` when `bsz > cap_rows` or either tensor is
+non-contiguous, and the caller falls back to P1' (copy path).
 
 One Python call per half, each doing host + GPU work in one extension entry point:
 
@@ -128,7 +130,9 @@ One Python call per half, each doing host + GPU work in one extension entry poin
 4. Stream: `cuStreamWriteValue32(data_ready[slot] = seq)`.
 
 Data volume for a decode step, per offloaded layer: `sel` `topk×4 B`, `w` `topk×2 B`, and either 0
-or `x = hi×2 B` per row. On Qwen3.8 at bsz 1: 40 B + 20 B + 5 120 B (or nothing).
+or `x = hi×2 B` per row. On Qwen3.8 at bsz 1: 40 B + 20 B + 5 120 B (or nothing). Measured: the two
+kernels cost 3.9 and 4.0 µs of device time, the pair of host calls ~14-22 µs to enqueue, and a job
+whose selection is all `-1` costs 20-26 µs end to end (`measured-costs.md` §4, §6).
 
 **Between issue and collect** the caller enqueues its own GPU expert work (so it overlaps the CPU):
 `bc.run_bszN` for the GPU-resident experts (bsz ≤ `MAX_BSZN = 8` fused decode kernel), and the
@@ -288,17 +292,17 @@ a chunk is always ≤ 4 rows.
 
 ## 7. Weight movement summary
 
-| # | hop | mechanism | bytes |
-|---|---|---|---|
-| W1 | checkpoint → worker arena | safetensors deferred load → `_HugeArena.rehome` (with the packed-layout repack) | all offloaded experts, once, at load |
-| W2 | arena → pinned weight slot | stager thread `memcpy` (`stage_phase`) | `exp_b` per streamed expert |
-| W3 | pinned weight slot → VRAM ring | contiguous H2D on the copy stream | `len(batch) × exp_b` |
-| W2' | arena → VRAM ring (pinned arena) | direct DMA from the parent's registered mapping, per expert | same |
-| W4 | VRAM packed ring → VRAM native ring | `moe_unswizzle_trellis` (read+write) | `len(batch) × exp_b` |
-| W5 | GPU slot tensors ← arena (promote-on-miss) | `promote_expert`/`demote_expert` on a side stream, repacked with the same strided copies as W1 | `exp_b` per moved expert |
-| A1 | `y` VRAM → pinned `x` | kernel store (P1) or `copy_` (P2/P3) | `rows × hi × 2` |
-| A2 | worker `out` pinned → VRAM | add-in-place kernel (P1) or `copy_` (P2/P3) | `rows × ho × 4` |
-| A3 | `sel`/`w` | same mechanisms | `rows × topk × (4+2)` |
+| # | hop | mechanism | bytes | measured (§ numbers refer to `measured-costs.md`) |
+|---|---|---|---|---|
+| W1 | checkpoint → worker arena | safetensors deferred load → `_HugeArena.rehome` (with the packed-layout repack) | all offloaded experts, once, at load | 36.3 GiB for Qwen3.8 @2.68 with all 48 MoE layers offloaded |
+| W2 | arena → pinned weight slot | stager thread `memcpy` (`stage_phase`, `moe_mul1.cpp:3570`) | `exp_b` per streamed expert | 16.3 GB/s + ~175 µs fixed per job (§7) |
+| W3 | pinned weight slot → VRAM ring | contiguous H2D on the copy stream | `len(batch) × exp_b` | 13.3 GB/s sustained, 11 GB/s for one expert (§2, §7) |
+| W2' | arena → VRAM ring (pinned arena) | direct DMA from the parent's registered mapping, per expert | same | skips W2: +32% prefill (§8) |
+| W4 | VRAM packed ring → VRAM native ring | `moe_unswizzle_trellis` (read+write) | `len(batch) × exp_b` | ~440 GB/s effective, 49-51 µs per projection per 28-expert batch (§7) |
+| W5 | GPU slot tensors ← arena (promote-on-miss) | `promote_expert`/`demote_expert` on a side stream, repacked with the same strided copies as W1 | `exp_b` per moved expert | costs ~15 tok/s of decode at `-mcs 192 -mcpa` (§8) |
+| A1 | `y` VRAM → pinned `x` | kernel store (P1) or `copy_` (P2/P3) | `rows × hi × 2` | kernel: 3.9 µs; `copy_`: 3.5 µs + 12 GB/s (§6, §2) |
+| A2 | worker `out` pinned → VRAM | add-in-place kernel (P1) or `copy_` (P2/P3) | `rows × ho × 4` | kernel: 4.0 µs; `copy_`: 41 µs at 64 rows (§6, §2) |
+| A3 | `sel`/`w` | same mechanisms | `rows × topk × (4+2)` | folded into A1's kernel in P1 |
 
 Note that P1 never materialises a GPU copy of the output tensor beyond the in-place add, and never
 moves `x` when the job is empty; P2/P3 always move the full payload.

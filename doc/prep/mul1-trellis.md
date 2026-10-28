@@ -42,15 +42,21 @@ integer 1..8 bpw  -> width 16, 32, 48, 64, 80, 96, 112, 128
 half  1.5/2.5/3.5 -> width 24, 40, 56                (mul1 codebook only)
 ```
 
-Observed in the shipped checkpoints (`notes/scan_widths.py`): Qwen3.8-Flash-Next @2.68 bpw stores
-routed experts at **2.5 bpw** (width 40) in most layers and **3 bpw** (width 48) in layers 1-3 and
-44-47, its attention/shared experts at 6 bpw, `lm_head` at 6 bpw; Qwen3.5-35B-A3B @3.17 stores
-routed experts at 3 bpw, shared experts at 7 bpw, attention at 7 bpw, `lm_head` at 6 bpw. Rates can
-even differ **within** a layer (layer 0 of the Qwen3.8 model mixes 40 and 48): the CPU worker keeps
-`bits`/`hb` per matrix (`MoeCpuMatrix`, `cpu/moe_mul1.h:24-41`), but the staging/arena byte layout
-is computed from expert 0's dimensions (`register_layer`'s `proj_bytes`,
-`moe_cpu_host.py:1158-1164`; `stage_phase`, `moe_mul1.cpp:3570`), so a port must either preserve
-that assumption or fix it.
+Observed in the shipped checkpoints (`notes/scan_widths.py`, `notes/scan_mixed_rates.py`):
+Qwen3.8-Flash-Next @2.68 bpw stores routed experts at **2.5 bpw** (width 40) in layers 4-43 and at
+**3 bpw** (width 48) in layers 0-3 and 44-47, its MTP head's experts at 2.5 bpw, its attention and
+shared experts at 6 bpw, and `lm_head` at 6 bpw; Qwen3.5-35B-A3B @3.17 stores routed experts at
+3 bpw, its MTP experts at 4 bpw, shared experts and attention at 7 bpw, `lm_head` at 6 bpw. So the
+rate varies **per layer** (0.73 vs 0.88 GiB of expert trellis per layer, 36.33 GiB for the 48 MoE
+layers of Qwen3.8 @2.68), but every expert *inside* one layer shares a single rate in all local
+checkpoints — which is what the staging byte layout assumes. The CPU worker nevertheless keeps
+`bits`/`hb` per matrix (`MoeCpuMatrix`, `cpu/moe_mul1.h:24-41`), while `register_layer`'s
+`proj_bytes` and `stage_phase` derive the per-expert block from **expert 0's** dimensions
+(`moe_cpu_host.py:1158-1164`, `moe_mul1.cpp:3570`): a checkpoint that ever did mix rates inside a
+layer would stage wrong offsets, so a port should either enforce uniformity at load or key the
+layout per expert. (An earlier revision of this note claimed layer 0 of Qwen3.8 @2.68 was mixed;
+that was an artifact of the scan pattern conflating `model.language_model.layers.0` with
+`mtp.layers.0`. Re-checked per scope: it is uniform.)
 
 ## 2. The trellis container
 

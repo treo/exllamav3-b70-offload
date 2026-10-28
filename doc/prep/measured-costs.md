@@ -34,7 +34,11 @@ Method notes / caveats:
   faster and is meaningless.
 * Both `EXL3_SPLIT_PROF` and `EXL3_MOE_HANDOFF_PROF` add per-layer cost of their own: the profiled
   run measured 67 tok/s where the same configuration without profilers measured 93-98 tok/s
-  (§7). Treat the *ratios* inside those logs as indicative, their absolute levels as inflated.
+  (§8). Treat the *ratios* inside those logs as indicative, their absolute levels as inflated.
+* `notes/prof_e2e.py` feeds **random** token ids, so its routing (and therefore how many experts
+  cross `stream_t` in the prefill measurement) differs from real text: the profiled prefill streamed
+  3 571 of 7 680 CPU experts. Where a byte count matters it is recomputed from the
+  `EXL3_MOE_STREAM_DEBUG` batch lines of the same run (`notes/m_prof_e2e_sd.txt`).
 * Everything here is one AVX2 host + one Ampere GPU. Sections marked *(arch)* are the numbers that
   will move on a different CPU tier; the protocol for re-measuring is the point of the harnesses.
 
@@ -43,11 +47,12 @@ Method notes / caveats:
 From the checkpoint headers and `register_layer`'s byte layout (`moe_cpu_host.py:1158-1164`),
 i.e. `proj_bytes = (k/16)·(n/16)·16K·2` per projection:
 
-| model | gate = up = down | expert block `g+u+d` | layer (E×block) | all MoE layers |
+| model / rate | gate = up = down | expert block `g+u+d` | layer | all MoE layers |
 |---|---|---|---|---|
-| Qwen3.5-35B @K=3 | 327 680 B | **983 040 B (0.94 MiB)** | 0.23 GiB (256) | 9.4 GiB |
-| Qwen3.8-FN @K=2.5 | 614 400 B | **1 843 200 B (1.76 MiB)** | 0.88 GiB (512) | 42.2 GiB |
-| Qwen3.8-FN @K=3 (layers 1-3, 44-47) | 614 400 B | 1 843 200 B (1.76 MiB) | 0.88 GiB | — |
+| Qwen3.5-35B, K=3 (all 40 layers) | 393 216 B | **1 179 648 B (1.125 MiB)** | 0.28 GiB (256 experts) | 11.25 GiB |
+| Qwen3.8-FN, K=2.5 (layers 4-43) | 512 000 B | **1 536 000 B (1.465 MiB)** | 0.73 GiB (512 experts) | 29.2 GiB |
+| Qwen3.8-FN, K=3 (layers 0-3, 44-47) | 614 400 B | 1 843 200 B (1.758 MiB) | 0.88 GiB | 7.0 GiB |
+| Qwen3.8-FN, all 48 MoE layers (header sum) | | | | **36.33 GiB** |
 
 Handoff region sizes (`notes/geom.py`): control 333 KiB (of which the 256-entry job ring is
 270 KiB, 1056 B/descriptor); compute slot at `cap_rows=64, topk=10, H=2560`:
@@ -62,7 +67,7 @@ weight-staging ring 2 × 32 MiB. Total pinned footprint ≈ 68 MiB (`region=68.1
 | pinned D2H, 64 MiB | 12.6 GB/s | |
 | same, on the model's own probe | 13.4 GB/s | `EXL3_MOE_STREAM_DEBUG` prints `stream state cuda:0: pinned->device 13.4 GB/s, stream_t 11` |
 | copy latency floor (any size ≤ 16 KiB, pinned) | 3.5-4.7 µs | per `copy_`, stream time |
-| D2H 256 KiB / H2D 512 KiB (a `cap_rows=64` slot at H=2560…2048) | 21.6 / 41.3 µs | 12.2 / 12.7 GB/s |
+| D2H 256 KiB / H2D 512 KiB (a `cap_rows=64` slot at H=2048) | 21.6 / 41.3 µs | 12.2 / 12.7 GB/s |
 | single-thread host copy (read+write) of a 0.38 MiB block | 37.8 GB/s | reference for "one core's memcpy" |
 | CPU GEMV stream rate, 15 threads, K=3 packed | 47.4 GB/s | at the dual-channel DDR4 wall |
 | CPU GEMV stream rate, 15 threads, K=2.5 native | 31.1 GB/s *(arch)* | the AVX2 tier leaves half rates unpacked |
@@ -122,7 +127,7 @@ difference in handshake. The knob only matters for layers where the CPU job is s
 `notes/bench_cpu_moe.py`, real experts registered into one layer, cold selections, µs per
 `exl3_moe_cpu_forward` call (one layer's routed experts for `rows` tokens, `topk` picks each):
 
-Qwen3.5-35B (K=3 packed band-2+planar, 0.94 MiB/expert, topk 8):
+Qwen3.5-35B (K=3 packed band-2+planar, 1.125 MiB/expert, topk 8):
 
 | rows | 1 thr | 4 thr | 8 thr | 12 thr | 16 thr | GiB/s @16 |
 |---|---|---|---|---|---|---|
@@ -187,7 +192,7 @@ Same script, one 2048-row chunk, `-mcs 192` (all 192 CPU experts of every layer 
 
 | activity | calls | µs/call | total ms | share |
 |---|---|---|---|---|
-| `Memcpy HtoD (Pinned → Device)` | 325 | 999.6 | 324.9 | **28.6%** |
+| `Memcpy HtoD (Pinned → Device)` | 332 | 982.0 | 326.0 | **28.2%** |
 | `aten::copy_` (self, incl. the above) | 2285 | 146.7 | 335.2 | 29.5% |
 | `exl3_moe_kernel<3,128,2,64,…>` (fused tier, 64-row tile) | 207 | 460.5 | 95.3 | 8.4% |
 | `f16acc::gemm_kernel` ×2 variants (batched recon / dense) | 404 | 648 / 145 | 105.9 | 9.3% |
@@ -197,14 +202,17 @@ Same script, one 2048-row chunk, `-mcs 192` (all 192 CPU experts of every layer 
 | `exl3_moe_gather_kernel` (deterministic accumulation) | 40 | 134.9 | 5.4 | 0.5% |
 | total | | | 1136.7 ms | |
 
-Weight movement, not arithmetic, dominates the streamed tier: 192 experts × 0.94 MiB × 40 layers
-= 7.2 GiB of pinned→VRAM DMA per 2048-token prefill, i.e. ~550 ms at 13.3 GB/s. Two consequences:
-the `stream_t` threshold exists to keep *cold* experts off this path, and `EXL3_MOE_PINNED_ARENA=1`
-(which removes the intermediate worker `memcpy` and one copy pass) is worth the +32% prefill seen
-in §8.
+Weight movement, not arithmetic, dominates the streamed tier. That prefill streamed 3 571 experts =
+**3.92 GiB** of trellis bytes (counted from the run's own `EXL3_MOE_STREAM_DEBUG` batch lines),
+which the 326 ms of `Memcpy HtoD` puts at **12.9 GB/s** — i.e. the DMA runs at the measured link
+ceiling and nothing else about it can be optimized except moving fewer bytes. With real text
+(`eval/perf.py`) 181 of the 192 CPU experts cross `stream_t` at 2048 rows, so the same chunk costs
+8.2 GiB ≈ 610 ms of link time. Two consequences: the `stream_t` threshold exists to keep *cold*
+experts off this path, and `EXL3_MOE_PINNED_ARENA=1` (which removes the intermediate worker
+`memcpy` and one copy pass) is worth the +32% prefill seen in §8.
 
 Component costs of the staged path (`notes/bench_handoff.py --skip copies,loop,empty,flags`,
-Qwen3.5, 4 stage threads, 28 experts = 26 MiB per batch):
+Qwen3.5, 4 stage threads, 28 experts = 31.5 MiB per batch):
 
 | hop | measured |
 |---|---|
@@ -253,7 +261,8 @@ Interpretation, in the order the levers matter:
    halving the pool (15→8 threads) is free, `SLOT_ROWS=32` (smaller, more numerous chunks) is worth
    ~10%, and the placement mode is worth ~5% in either direction on this workload. `-mcl 40` — no
    GPU-resident experts at all — costs 56% of decode, matching the model in §4: 40 layers ×
-   (8 experts × 0.94 MiB ÷ ~45 GB/s) ≈ 6.1 ms of unavoidable CPU streaming per token.
+   (8 experts × 1.125 MiB ÷ ~45 GB/s) ≈ 8.8 ms of unavoidable CPU streaming per token on top of the
+   ~8.5 ms of GPU work, i.e. ~55 tok/s against the measured 54.5.
 4. `STREAM_BATCH_EXPERTS`, `STREAM_BATCH_RECON` and `STREAM_FUSED_T` were inert at these shapes
    (all experts land in the fused tier with 100-160 rows each, `EXL3_MOE_STREAM_DEBUG` batch lines
    in `notes/m_e2e_streamdbg.txt`); they need hotter-skewed routing (or a larger model, e.g. the
