@@ -305,6 +305,26 @@ Interpretation, in the order the levers matter:
    `STREAM_BATCH_EXPERTS`/`WSLOT_MB` (24→48 was neutral). They would separate on models with much
    more skewed routing or far larger experts.
 
+### 8.1 Second model: Qwen3.8-Flash-Next @2.68 (512 experts, top-10, K=2.5/3, half-rate experts)
+
+`-mcs 410` (80% of experts on the CPU), `-cs 4096 -chunk_size 2048 -max_length 1024`
+(`notes/m_e2e_q38split410.txt`). **No all-GPU reference exists on this box**: the model's expert
+trellis alone is 36.33 GiB, so this configuration is the practical minimum, and the numbers below
+are only comparable to the §5 microbenchmark, not to a GPU-only run.
+
+| metric | measured |
+|---|---|
+| prefill | 153 / 264 / **377** tok/s at 256 / 512 / 1024 rows |
+| decode | **32-33 tok/s** (30 ms/token), flat over context 0-768 |
+| worker | 48 layers registered, avx2 tier, 15 threads; probe `13.3 GB/s → stream_t 11` |
+| streaming engagement | at 1024 rows: 214 of 410 CPU experts crossed `stream_t`, carrying 7 382 of 7 929 CPU assignments (93%) — the remaining 196 experts (~550 rows) stayed on the CPU tail |
+| staged batch size | **18 experts** in the 3 bpw layers and 21 in the 2.5 bpw ones, i.e. `⌊32 MiB / expert_bytes⌋` (`WSLOT_MB` binds before `STREAM_BATCH_EXPERTS=24`) — the concrete shape consequence of §1's byte table |
+
+Predictive check with §5: 48 layers × (≈8 distinct CPU experts × 1.465 MiB ÷ 31 GB/s) ≈ **18.6 ms**
+of CPU streaming per token, against a measured 30.4 ms/token total, i.e. the GPU work this model
+cannot hide behind is ~12 ms — consistent with its 48 layers and 2560-wide hidden versus Qwen3.5's
+40 × 2048 at 10.2 ms (§6).
+
 ## 9. What a port should re-measure first
 
 1. Pinned H2D/D2H sustained bandwidth and latency floor (sets `stream_t`, `WSLOT_MB`, and whether

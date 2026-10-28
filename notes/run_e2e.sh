@@ -45,6 +45,8 @@ case "$1" in
     fusedT64)     run fusedT64     "EXL3_MOE_STREAM_FUSED_T=64" "-mcs 192" ;;
     fusedT64nb)   run fusedT64nb   "EXL3_MOE_STREAM_FUSED_T=64 EXL3_MOE_STREAM_BATCH_RECON=0" "-mcs 192" ;;
     fusedT32dbg)  run fusedT32dbg  "EXL3_MOE_STREAM_FUSED_T=32 EXL3_MOE_STREAM_DEBUG=1" "-mcs 192" ;;
+    q38split410)  run q38split410  "EXL3_MOE_STREAM_DEBUG=1" "-mcs 410" ;;
+    q38layer24)   run q38layer24   "" "-mcl 24" ;;
     nobatchrecon) run nobatchrecon "EXL3_MOE_STREAM_BATCH_RECON=0" "-mcs 192" ;;
     all)
         for c in split192 split192pa split255 layer20 streamdbg; do one "$c"; done ;;
