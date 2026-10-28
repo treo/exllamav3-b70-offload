@@ -65,9 +65,20 @@ It also measured the blocker: **20-75% of pings exceed 20 ms**, bimodal, and the
 tell which side stalls.
 
 Two clues point at GPU idle/clock states rather than coherence:
-* a resident spinner makes a *second* queue's 16 MB fill **faster** (17.5 µs vs 34.0 µs unspun);
-* the stalls show up while the card is otherwise doing nothing: it draws ~80 W of 275 W during decode
-  and falls as the run proceeds (user-observed), and with nothing resident xpu-smi reports 0% util.
+* a resident spinner makes a *second* queue's 16 MB fill **faster** (17.5 µs vs 34.0 us unspun);
+* the card draws ~80 W of 275 W during decode and falls as the run proceeds (user-observed), and with
+  nothing resident xpu-smi reports 0% util.
+
+**Revised ranking after the evidence check (§10): driver preemption/timeslicing is the leading
+hypothesis, not clock ramp.** This kernel compiles `CONFIG_DRM_I915_TIMESLICE_DURATION=1` (ms) with
+`PREEMPT_TIMEOUT=640` / `PREEMPT_TIMEOUT_COMPUTE=7500` ms, and `CONFIG_DRM_XE_JOB_TIMEOUT_MIN/MAX = 1 /
+10000` ms. A *spinning* kernel never reaches an arbitration point, so it is preempted by escalation
+rather than cooperatively - which is exactly the shape of "sometimes 2-3 us, sometimes >20 ms". The lab
+also ran two contexts (q and q2) against each other. Discriminators, cheapest first: (i) run with ONE
+queue (drop q2 entirely, including the interference probe); (ii) `taskset -c` + `chrt` the pinging
+thread to rule out host scheduling; (iii) the device-side poll counter (§2a), which separates
+"device observed late" from "host observed late"; (iv) count preemptions from
+`/sys/class/drm/card*/device/gt*/...` or `perf` if available.
 
 Three mechanism rules already established — do not re-derive them, build on them:
 1. polling SYSMEM with an acquire **load** goes deaf after a few pings (legal lowering to a cached
@@ -141,6 +152,15 @@ must be <= co-residency, DPAS WGs are register-fat (GRID=96 never completed), an
 
 Why the decode case might still be different, and how to know cheaply:
 
+* **Do not phrase the blocker as "no grid-sync primitive exists"** - Level Zero specifies one:
+  `zeCommandListAppendLaunchCooperativeKernel` plus `zeKernelSuggestMaxCooperativeGroupCount` are both
+  in the installed header (`/usr/include/level_zero/ze_api.h:9619`, `:9016`), and `isCooperative` is a
+  kernel-descriptor flag (`:8351`). The open question is whether Intel's compute runtime (NEO)
+  implements it for Xe2, which is a ~20-line probe through `sycl::aspect`/interop - and
+  `zeKernelSuggestMaxCooperativeGroupCount` would answer G0's residency bound **authoritatively from
+  the driver** instead of by measurement. Run that probe as G0a, before the bandwidth sweep.
+  What *is* confirmed absent: any device-side launch entry point in the L0 header (no CDP equivalent),
+  so a resident engine must contain the code - the megakernel identification stands.
 * The buried attempt ran the **int8/DPAS** tier, whose WGs are register-fat. Decode at rows=1 uses the
   **float** tier: `GemvK` WGs are thin (no DPAS fragments, ~10-20 live regs), and t38's *thin*-kernel
   co-residency ceiling was 160-280 WGs versus 16-32 for the fat ones.
@@ -309,3 +329,44 @@ the handler-free path, i.e. the commit itself is the cost.
    tables.
 4. Write the result into this file (G0 numbers, §2 table + gate verdict) **before** touching anything
    else, then either proceed to §3.1 or record the closure.
+
+---
+
+## 10. External evidence check (2026-10-29) - what held, what didn't
+
+Claims from §1-§4 put against vendor docs, the SYCL spec, the installed headers, and the local kernel
+config. Two were refuted, one design assumption is now a hard constraint, and the stall hypothesis
+changed.
+
+| claim in this plan | verdict | evidence |
+|---|---|---|
+| a resident kernel cannot launch other kernels (no CDP equivalent) | **supported** | no device-side launch entry point anywhere in `/usr/include/level_zero/ze_api.h`; no SYCL API for it |
+| `ext_oneapi_device_wait` lets a *device* thread block on a host store | **REFUTED** | it is `sycl::device::ext_oneapi_wait()` (`device.hpp:392`), a host-side wait-for-idle; `test-e2e/DeviceWait/basic.cpp` is a host-side multi-queue test. Corrected in NOTES lever 1b and the archive |
+| "restart condition (b): we need an actual grid-sync primitive" | **partly REFUTED** | L0 *specifies* cooperative launch (`zeCommandListAppendLaunchCooperativeKernel`, header:9619) and exposes `zeKernelSuggestMaxCooperativeGroupCount` (header:9016). NEO's Xe2 implementation is untested -> new gate **G0a** (20-line probe), which also answers the residency bound from the driver |
+| host<->device atomics on pinned USM are a sound doorbell | **REFUTED as a guarantee** | SYCL §4.15.5 grants host/device atomic and fence interoperability *only* when the device advertises `usm_atomic_host_allocations` or `usm_atomic_shared_allocations` (Khronos SYCL_Reference, "Interaction with host code"). **This B70 advertises neither** (probed: both `no`; `usm_system_allocations`/`usm_host`/`usm_shared` are YES). So the measured behaviour - a few pings at 2-3 us then permanent deafness on an acquire load, longer life under RMW - is what using an unspecified operation looks like. Consequence: the *engine trigger must not be designed on top of it*. Either find a contractual mechanism (L0 event/semaphore, `usm::alloc::system` + verified support, or a documented NEO guarantee obtained from Intel), or treat the whole approach as unsupported-hardware territory and close it |
+| ~20 ms stalls are GPU idle/clock-ramp | **WEAKENED, demoted to #2** | this kernel: `CONFIG_DRM_I915_TIMESLICE_DURATION=1` ms, `PREEMPT_TIMEOUT=640` ms, `PREEMPT_TIMEOUT_COMPUTE=7500` ms, `DRM_I915_REQUEST_TIMEOUT=20000` ms, `DRM_XE_JOB_TIMEOUT_MIN/MAX=1/10000` ms. A spinner that never hits an arbitration point gets preempted by escalation, and the lab ran two contexts against each other -> preemption is a better fit for a 2-3 us / >20 ms bimodal distribution than microsecond-scale power-state exits. Discriminators in §2 |
+| megakernels are inherently starved (i.e. the direction is dead because ours lost) | **REFUTED as a general statement** | MPK / Mirage Persistent Kernel (arXiv:2512.22219) compiles LLM inference into ONE persistent kernel with an *SM-level task graph*, "decentralized scheduling across SMs", cross-operator software pipelining, and reports up to **1.7x lower end-to-end latency** than kernel-per-operator serving. PERKS (arXiv:2204.02064) and Concordia (arXiv:2606.23521, host-side submission <100 ns on a coherent platform) are the same idea in other settings. Our own loss had the specific, named cause those systems avoid: **grid-wide phases + a grid capped by co-residency**, not persistence per se. Reinforces §3.0's per-expert-cluster interior |
+| GPU spec numbers used as denominators | **CONFIRMED (with one nuance)** | ARK, Intel Arc Pro B70: 32 GB **GDDR6**, 256-bit, **608 GB/s**, 32 Xe-cores / 256 XMX / 256 vector engines, 22.94 TFLOPS FP32, **TBP 230 W (LP 160-290)** - so "275 W" is a programmable limit, not the nominal envelope. Measured here: H2D 13.6-14.4 GB/s, D2H 13.8-14.3 GB/s (so the prefill analysis' ~12.8 GB/s link denominator was the right order, and "the link is not the ceiling" stands), D2D 597-860 GB/s. Nuance: our D2D exceeds ARK's 608 GB/s, so treat 608 as conservative and re-measure D2D before quoting a utilization percentage |
+
+### New hard requirements this adds to the design
+
+1. **Contractual trigger, or nothing.** No USM-host atomic interoperability guarantee on this device
+   (§10 row 5). Step 1 must therefore end with one of: (a) a mechanism with a documented guarantee,
+   (b) an explicit written/observed NEO guarantee, or (c) closure of lever 1b. A design that "works on
+   our box" is not enough here, because the failure mode we already saw is silent and intermittent.
+2. **The engine cannot be immortal.** With i915 request timeout 20 s / xe job timeout up to 10 s and a
+   2.5 s heartbeat, a kernel that never retires fights the driver's watchdog design. Plan for periodic
+   voluntary retirement + relaunch (a retire interval of T seconds costs one submit per T/N jobs), and
+   re-do the prize arithmetic with that amortisation included: if the engine must relaunch every ~5 s
+   and decode issues ~66 layer-jobs/s, that is one submit per ~330 jobs - negligible; if the driver
+   forces preemption every few hundred ms, it is not.
+3. **Single-queue measurement discipline in the lab.** The two-context setup is now a suspect for the
+   stalls, so S0 must be re-run one-queue-only before any conclusion is drawn from stall rates.
+
+Sources: Khronos SYCL_Reference "Interaction with host code" (= SYCL 2020 §4.15.5); Level Zero
+`ze_api.h` as installed; Intel oneAPI HPC-cluster installation guide, "Allow Long-running GPU Kernels"
+(disable hangcheck, `i915.request_timeout_ms=200000`, zero `preempt_timeout_ms`, zero
+`heartbeat_interval_ms` - i.e. Intel's own documented answer to long-running kernels is to reconfigure
+the driver, which is a deployment cost worth naming); Intel ARK product page for Arc Pro B70;
+arXiv:2512.22219 (MPK), arXiv:2204.02064 (PERKS), arXiv:2606.23521 (Concordia); local
+`/boot/config-$(uname -r)` DRM_{I915,XE} timeout values; local aspect probe and PCIe bandwidth probe.

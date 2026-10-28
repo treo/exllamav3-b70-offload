@@ -421,6 +421,20 @@ By job size the fit is **t(nc) = 57.6 + 6.3 x nc** (medians: nc=1 63.9, 2 67.0, 
     **Plan written: `PLAN_PERSISTENT_WORKER.md`** - step 1 is a ~45 min gated lab (locate the stall
     with a device-side poll counter, then arms S1-S6 including the keepalive and the command-level
     park options), with explicit stop criteria so this cannot quietly eat a week.
+    **Evidence check (§10 of that plan) changed three things:** (1) the doorbell cannot be *designed* on
+    USM-host atomics - SYCL grants host/device atomic interop only with
+    `usm_atomic_host_allocations`/`usm_atomic_shared_allocations`, and this B70 advertises **neither**,
+    so the "deaf after ~9 pings" behaviour is unspecified-operation behaviour, not a rule to build on;
+    (2) the leading stall explanation is now **driver preemption/timeslicing** (this kernel:
+    timeslice 1 ms, preempt 640 ms / compute 7500 ms, i915 request timeout 20 s, xe job timeout
+    1-10 s) rather than clock ramp, and a resident engine must retire periodically for the same reason;
+    (3) "no grid-sync primitive" was too strong - L0 specifies cooperative launch
+    (`zeCommandListAppendLaunchCooperativeKernel`) plus
+    `zeKernelSuggestMaxCooperativeGroupCount` (which would answer the residency bound from the driver),
+    so gate G0a is a 20-line support probe. Megakernel direction itself is corroborated externally
+    (MPK arXiv:2512.22219: one persistent kernel, SM-level task graph, up to 1.7x lower e2e latency) -
+    our own attempt lost to grid-wide phases + co-residency caps, which is the specific pitfall to
+    avoid, not proof the idea fails.
     From the LLVM sycl e2e tree (`~/projects/vendor/llvm/sycl/test-e2e`: `DeviceWait/basic.cpp`,
     `Graph/{Explicit,RecordReplay,Update,NativeCommand}`, `EnqueueNativeCommand`,
     `WorkGroupScratchMemory`) plus an aspect probe on this box: B70 + oneAPI 2026.2 reports
