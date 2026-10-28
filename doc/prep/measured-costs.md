@@ -253,9 +253,11 @@ arena path costs the link copy + unswizzle only.
 (`-mcs 192`) and variants. Prefill = the 2048-token point of the prefill sweep (4096-token chunk
 size), decode = 100 tokens at 1024 context. `notes/m_e2e_*.txt`. Tok/s.
 
-**Read this table with a ±6% band**: four runs of the same `-mcs 192` configuration (with and
-without profiler env) measured 93.2, 98.1, 98.9 and 104.2 tok/s at that decode point, and the
-profiler-enabled run measured 66.9. Differences below ~10% are not resolved by single-shot runs.
+**Read this table with a wide decode error bar**: five runs of nominally identical `-mcs 192`
+configurations (with and without profiler env, across three invocations) measured **93.2, 98.1,
+98.9, 104.2 and 108.2 tok/s** at that decode point, while prefill repeated to within ±2%. Prefill
+figures are reliable; decode differences below ~15% are not resolved by these single-shot runs. The
+profiler-enabled run (66.9) is a separate, slower regime.
 
 | configuration | prefill | decode |
 |---|---|---|
@@ -277,6 +279,8 @@ profiler-enabled run measured 66.9. Differences below ~10% are not resolved by s
 | `EXL3_MOE_STREAM_BATCH_EXPERTS=48 + WSLOT_MB=96` | 1695 | 100.2 |
 | `EXL3_MOE_STREAM_BATCH_RECON=0` | 1746 | 103.6 |
 | `EXL3_MOE_STREAM_DEBUG=1` (profiling overhead) | 1689 | 104.2 |
+| `EXL3_MOE_STREAM_FUSED_T=64` (most streamed experts → batched reconstruct tier) | 1752 | 108.2 |
+| `…FUSED_T=64` + `EXL3_MOE_STREAM_BATCH_RECON=0` (→ per-expert loop) | 1740 | 107.4 |
 
 Interpretation, in the order the levers matter:
 
@@ -293,10 +297,13 @@ Interpretation, in the order the levers matter:
    GPU-resident experts at all — costs 56% of decode, matching the model in §4: 40 layers ×
    (8 experts × 1.125 MiB ÷ ~45 GB/s) ≈ 8.8 ms of unavoidable CPU streaming per token on top of the
    ~8.5 ms of GPU work, i.e. ~55 tok/s against the measured 54.5.
-4. `STREAM_BATCH_EXPERTS`, `STREAM_BATCH_RECON` and `STREAM_FUSED_T` were inert at these shapes
-   (all experts land in the fused tier with 100-160 rows each, `EXL3_MOE_STREAM_DEBUG` batch lines
-   in `notes/m_e2e_streamdbg.txt`); they need hotter-skewed routing (or a larger model, e.g. the
-   512-expert Qwen3.8) to show an effect.
+4. **Which streamed tier runs is nearly irrelevant at these shapes.** Forcing most experts out of
+   the fused kernel (`STREAM_FUSED_T=64`, counts of 12-300 per streamed expert per
+   `notes/m_e2e_streamdbg.txt`) and then out of the batched tier too moved prefill by ≤5% — the DMA
+   dominates. `STREAM_FUSED_T` therefore matters mainly as a **VRAM** knob:
+   `concurrency × T × (2·hidden + 2·interm) × 2 B` of fused temp buffers per device. Same for
+   `STREAM_BATCH_EXPERTS`/`WSLOT_MB` (24→48 was neutral). They would separate on models with much
+   more skewed routing or far larger experts.
 
 ## 9. What a port should re-measure first
 

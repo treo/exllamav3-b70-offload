@@ -43,6 +43,8 @@ case "$1" in
     noswizzle)    run noswizzle    "EXL3_MOE_CPU_SWIZZLE=0" "-mcs 192" ;;
     nowide)       run nowide       "EXL3_MOE_CPU_WIDE=0" "-mcs 192" ;;
     fusedT64)     run fusedT64     "EXL3_MOE_STREAM_FUSED_T=64" "-mcs 192" ;;
+    fusedT64nb)   run fusedT64nb   "EXL3_MOE_STREAM_FUSED_T=64 EXL3_MOE_STREAM_BATCH_RECON=0" "-mcs 192" ;;
+    fusedT32dbg)  run fusedT32dbg  "EXL3_MOE_STREAM_FUSED_T=32 EXL3_MOE_STREAM_DEBUG=1" "-mcs 192" ;;
     nobatchrecon) run nobatchrecon "EXL3_MOE_STREAM_BATCH_RECON=0" "-mcs 192" ;;
     all)
         for c in split192 split192pa split255 layer20 streamdbg; do one "$c"; done ;;
