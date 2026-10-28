@@ -12,6 +12,11 @@ repository; every code claim carries a `file:line`.
 | [`measured-costs.md`](measured-costs.md) | Timings for each hop on the reference box, the CPU-GEMM cost curve, the kernel-level decode/prefill breakdown, the end-to-end knob sweep, and a list of what to measure first on new hardware. |
 | [`port-acceptance.md`](port-acceptance.md) | What "done" means for a port: five acceptance levels (format bit-exactness, kernel numerical class, whole-model agreement, protocol/liveness invariants, performance floors), each with the threshold, the measured reference value and the test or harness that checks it — plus the explicit non-goals. |
 
+> **Where this leads:** these notes are the input to the port designed in
+> [`doc/port/`](../port/README.md) — the B70 offload architecture, kernel plan and harness. Read the
+> headline findings here first; the port documents say which of them change shape when the offload
+> device is fast instead of slow.
+
 Reproduce with the scripts kept in `notes/` on this branch (`git log --oneline -- notes`):
 
 ```
