@@ -111,7 +111,18 @@ Entered at `block_sparse_mlp.py:1138` (`cpu_split_submit`) with
 (bsz, topk) fp16`. `submit_issue_fused` returns `None` when `bsz > cap_rows` or either tensor is
 non-contiguous, and the caller falls back to P1' (copy path).
 
-One Python call per half, each doing host + GPU work in one extension entry point:
+One Python call per half, each doing host + GPU work in one extension entry point. Timeline of one
+decode step, one layer (`│` = idle/in another activity):
+
+```
+parent stream : …router │ issue-kernel → data_ready ───────► [GPU experts (bc.run_bszN)] → [shared expert] │ wait done → collect-add → consumed │ …
+worker pool   :  (spinning on jobs_tail)  │ spin data_ready │ GEMV gate+up │ GEMV down │ done ───────┘
+                                        ▲ descriptor written by the host *before* the stream ops above
+```
+
+The waits are stream memory operations, so they occupy no SMs and cost ~1.8 µs of host enqueue each
+(`measured-costs.md` §3); the parent never blocks. If the worker finishes before the GPU reaches the
+collect, the wait retires immediately and the layer costs nothing but its two kernels.
 
 **Issue** — `MoeCpuHost.submit_issue_fused` (`moe_cpu_host.py:1411`) →
 `ext.exl3_moe_split_issue_fused` (`cpu/moe_handoff.cu:245`):
@@ -381,3 +392,10 @@ follows the *CPU's* ISA tier and is consumed by `moe_unswizzle_trellis` on the d
 changes how the weights are laid out in the arena, it must change the un-swizzle kernel (or the
 `_stream_layout` policy that decides restore-vs-direct) in the same commit: three places read
 `exl3_moe_cpu_swizzle_group` (child loader, staging/parent views, GPU restore) and they must agree.
+
+Finally: this is not a CUDA-only design in intent. The only backend-specific code in the host is
+`MOE_FLAG_BITS = 64 if torch.version.hip else 32` (`moe_cpu_host.py:54`), and `moe_handoff.cu` calls
+`hipStreamWaitValue64`/`hipStreamWriteValue64` directly instead of `dlopen`-ing the CUDA driver —
+because HIP's wait lacks the cyclic compare, ROCm simply widens the flags so they can never wrap.
+A third backend needs the same five capabilities (§9) and a flag width whose compare semantics match
+what the CPU-side waits assume (they compare low halves cyclically, which is exact for both).
