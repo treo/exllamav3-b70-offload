@@ -43,8 +43,9 @@ split (-mcs)              P1 fused decode handoff             P2 prefill (memcpy
 whole layer (-mcl)        P1' copy-path issue/collect         P2 / P3 (same functions)
 ```
 
-`bsz < 32` also covers speculative-verify batches (`TEMP_ROWS_GRAPH = 32` is the same number by
-construction). The child never knows which mode produced a job: both feed the same job ring.
+`bsz < 32` also covers speculative-verify batches (`stream_min_rows` happens to equal the graph
+batch cap `TEMP_ROWS_GRAPH = 32`; they are independent constants). The child never knows which mode
+produced a job: both feed the same job ring.
 
 ---
 
@@ -238,11 +239,12 @@ Per expert, by assigned count `c` (all thresholds in tokens/rows, not bytes):
 | tier | condition | what runs | data |
 |---|---|---|---|
 | fused | `c <= stream_fused_t` (256) and layer eligible (`hi == ho == h`, no biases, silu/gelu/relu2) | `ext.exl3_moe` over the batch's cool experts, one launch per row-tile tier (16/32/64 rows, `mtile`) | pointer tables (9 lists × batch) built **on the host** from `vslot.data_ptr() + bi*exp_b`, uploaded once; temp buffers `(C, stream_fused_t, H/I)` fp16 |
-| batched reconstruct | `stream_fused_t < c <= recon.max_rows` | `moe_batch_recon.run_group`: one pointer-table reconstruct + one strided-batched `hgemm` + one Hadamard per projection per group of ≤ `EXL3_MOE_RECON_BATCH` experts, rows padded to the group's largest expert | dequant scratch `w_scratch` (`k*n` fp16), padded slab |
+| batched reconstruct | `stream_fused_t < c <= recon.max_rows` | `moe_batch_recon.run_group`: one host→device meta copy (ids/starts/counts/3 pointer lists), one pointer-table reconstruct + one strided-batched `hgemm` + one Hadamard launch **per projection** per group of ≤ `EXL3_MOE_RECON_BATCH` experts, rows gathered into and scattered out of a slab padded to the group's largest expert | dequant scratch `w_scratch` (`k*n` fp16), padded slab `(B·cmax, …)` |
 | per-expert reconstruct | everything above, or when the batched tier is unavailable (biases, `EXL3_MOE_STREAM_BATCH_RECON=0`) | `_dq_linear` × 3: `had_r_128` → `reconstruct` → `hgemm` → `had_r_128` (+bias), `_act`, then `out.index_add_` | gathered `xg = y.index_select(0, idx)`, `w_scratch` fp16 (k,n) |
 
-Tier 1 keeps the weights packed-in-VRAM→restored, and reads them as native trellis tiles; tiers 2/3
-dequantize to fp16 weights (`k × n`) first, so their traffic scales with `k·n`, not with rows.
+Tier 1 reads the native-order trellis tiles directly (the bytes restored in step 4, or the staged
+ones when the layer's rate is unpacked); tiers 2/3 first dequantize to fp16 weights (`k × n`), so
+their traffic scales with `k·n`, not with rows.
 
 Eligibility of the whole streamed path additionally requires `spec["expert_bytes"] <= wslot_size`
 (one expert must fit a slot) and that the layer's `suh`/`svh` (and optional biases) were fetched to

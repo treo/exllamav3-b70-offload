@@ -46,17 +46,19 @@ Observed in the shipped checkpoints (`notes/scan_widths.py`, `notes/scan_mixed_r
 Qwen3.8-Flash-Next @2.68 bpw stores routed experts at **2.5 bpw** (width 40) in layers 4-43 and at
 **3 bpw** (width 48) in layers 0-3 and 44-47, its MTP head's experts at 2.5 bpw, its attention and
 shared experts at 6 bpw, and `lm_head` at 6 bpw; Qwen3.5-35B-A3B @3.17 stores routed experts at
-3 bpw, its MTP experts at 4 bpw, shared experts and attention at 7 bpw, `lm_head` at 6 bpw. So the
-rate varies **per layer** (0.73 vs 0.88 GiB of expert trellis per layer, 36.33 GiB for the 48 MoE
-layers of Qwen3.8 @2.68), but every expert *inside* one layer shares a single rate in all local
-checkpoints — which is what the staging byte layout assumes. The CPU worker nevertheless keeps
-`bits`/`hb` per matrix (`MoeCpuMatrix`, `cpu/moe_mul1.h:24-41`), while `register_layer`'s
-`proj_bytes` and `stage_phase` derive the per-expert block from **expert 0's** dimensions
-(`moe_cpu_host.py:1158-1164`, `moe_mul1.cpp:3570`): a checkpoint that ever did mix rates inside a
-layer would stage wrong offsets, so a port should either enforce uniformity at load or key the
-layout per expert. (An earlier revision of this note claimed layer 0 of Qwen3.8 @2.68 was mixed;
-that was an artifact of the scan pattern conflating `model.language_model.layers.0` with
-`mtp.layers.0`. Re-checked per scope: it is uniform.)
+3 bpw, its MTP experts at 4 bpw, shared experts and attention at 7 bpw, `lm_head` at 6 bpw. Across
+the whole local Qwen3.8-Flash-Next family the routed experts are uniform *within* every layer
+(2.05/4.05/5.05/6.05 bpw quants use one rate everywhere; 2.68 mixes 2.5 and 3 by layer; 4.18 mixes
+4 and 5). Rates therefore vary **per layer** (0.73 vs 0.88 GiB of expert trellis per layer, 36.33
+GiB for the 48 MoE layers of Qwen3.8 @2.68), but every expert *inside* one layer shares a single
+rate in all local checkpoints — which is what the staging byte layout assumes. The CPU worker
+nevertheless keeps `bits`/`hb` per matrix (`MoeCpuMatrix`, `cpu/moe_mul1.h:24-41`), while
+`register_layer`'s `proj_bytes` and `stage_phase` derive the per-expert block from **expert 0's**
+dimensions (`moe_cpu_host.py:1158-1164`, `moe_mul1.cpp:3570`): a checkpoint that ever did mix rates
+inside a layer would stage wrong offsets, so a port should assert uniformity at load rather than
+rely on the observation. (An earlier revision of this note claimed layer 0 of Qwen3.8 @2.68 was
+mixed; that was a scan artifact — the pattern conflated `model.language_model.layers.0` with
+`mtp.layers.0`.)
 
 ## 2. The trellis container
 

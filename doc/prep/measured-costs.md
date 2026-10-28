@@ -93,16 +93,18 @@ ramp), not of the protocol. Nothing here is per-byte; the whole handshake is a f
 compute → collect kernel) with the stream otherwise idle, so the number is the *worst-case exposed*
 cost; in a real forward the GPU's own expert work hides part of it (§7).
 
-Qwen3.5-35B, `-mcs`-style split (all 256 experts in the worker), 15 worker threads:
+Qwen3.5-35B, `-mcs`-style split (all 256 experts in the worker), 15 worker threads
+(`notes/m_handoff_q35_loop.txt`; a second run of the same table differed by 1-3% except the 32-row
+row, which differed by 7%):
 
 | rows | host enqueue (issue+collect) | serial layer, med | 48-job pipeline | CPU experts/job |
 |---|---|---|---|---|
-| 1 | 14.3 µs | 162.9 µs | 185.3 µs/layer | 8 |
-| 2 | 20.0 µs | 281.6 µs | 271.3 µs/layer | 15 |
-| 4 | 20.7 µs | 496.1 µs | 470.8 µs/layer | 29 |
-| 8 | 23.7 µs | 957.1 µs | 960.7 µs/layer | 53 |
-| 16 | 34.8 µs | 1967.9 µs | 1992.4 µs/layer | 97 |
-| 32 | 34.1 µs | 4211.1 µs | 4257.8 µs/layer | 150 |
+| 1 | 13.8 µs | 161.9 µs | 157.3 µs/layer | 8 |
+| 2 | 19.6 µs | 273.2 µs | 270.7 µs/layer | 15 |
+| 4 | 20.3 µs | 495.8 µs | 486.2 µs/layer | 29 |
+| 8 | 24.4 µs | 951.3 µs | 973.4 µs/layer | 57 |
+| 16 | 34.9 µs | 1991.9 µs | 2015.0 µs/layer | 100 |
+| 32 | 35.0 µs | 4503.6 µs | 4360.6 µs/layer | 166 |
 
 Qwen3.8-Flash-Next (K=2.5 experts, 1.465 MiB each, topk 10, 15 threads):
 
@@ -119,8 +121,23 @@ sizes the worker is saturated by one job and gets no benefit from queue depth. A
 costs 20 µs, which is the floor any port must beat or match.
 
 With `EXL3_MOE_MEMOPS=0` the same Qwen3.5 rows measure 171.9 / 285.9 / 507.4 / 977.9 / 1982 /
-4240 µs — within noise of the memops numbers, because the 190 µs of compute dwarfs the ~10 µs
-difference in handshake. The knob only matters for layers where the CPU job is small.
+4240 µs (`notes/m_handoff_nomemops.txt`) — within noise of the memops numbers, because the ~190 µs
+of compute dwarfs the ~4 µs difference in handshake cost (§3). The knob only matters for layers
+where the CPU job is small, i.e. mostly cold tails.
+
+**Cross-check of the copy path (P1', whole-layer mode).** Its per-job cost isn't measured as a
+single number, but composes from §2: at 1 row it is the `int32` cast + up to two pad kernels
+(~3 µs each, GPU), three D2H `copy_` at the latency floor (3.5-4.7 µs each), the `done` wait, the
+H2D readback (4.7 µs at 8 KiB) and four flag memops ≈ **26 µs of device work**, against 20 µs for
+the fused path's two kernels — which is exactly what the fused path was written to remove
+(`block_sparse_mlp_cpu.py:573-574`). At a full 64-row chunk it is 21.6 + 41.3 + ~4 × 4 ≈ **90 µs**, on
+jobs whose worker compute is ~2 ms (§4) or more.
+
+That composition predicts the end-to-end numbers: in `-mcl 40` mode nothing but the shared expert
+overlaps the worker, so a token should cost `40 × (compute + copy overhead)` on top of the all-GPU
+time — `40 × (220 + 26) µs ≈ 9.8 ms` + `8.5 ms` ≈ **18.3 ms/token = 55 tok/s**, measured 54.5
+(§8). Likewise `-mcl 20` (half the layers offloaded) predicts `8.5 + 4.9 = 13.4 ms ≈ 75 tok/s`,
+measured 78.4.
 
 ## 5. Worker-side compute (the shape of the CPU cost curve)
 
