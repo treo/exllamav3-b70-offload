@@ -259,6 +259,50 @@ static void submit(sycl::queue &q, const uint16_t *W, const int8_t *X8, const fl
 //   * rows are tiled in the GRID (MT), with M <= 4 in-kernel: the m loop must unroll and
 //     each m adds a live accumulator chain (q8_0_GEMV.h: "M=8/VL=256 is what the AOT gen
 //     compiler refuses to lower").
+//
+// DEBUG STATE (rev C fails Gate A; rates here are indicative only):
+//   RULED OUT by measurement, do not re-check these first:
+//     - window extraction / prod: rev C's own byte-sum fixture (BSDBG, gated on e==0 && nt==0 &&
+//       kt==0 && ks==0 && sub==0) matches tests/testlib/trellis.py EXACTLY.
+//     - the (k, column) pairing math: identical expression to rev B's main loop, which is bit-exact.
+//     - the signed/unsigned dot_acc overload (was a real bug, fixed: sp must stay int32_t).
+//     - 32-lane cross-subset butterfly (was a real bug, fixed: device runs 16-lane sub-groups, so it
+//       is now an SLM reduce with group_barrier).
+//     - tiles visited twice / skipped: tt = sub, sub+4, ... < tps covers each tile once for
+//       KS in {1,2,4,8,16}.
+//     - the epilogue and combine: the deficit is ALREADY PRESENT in the raw PART dump, so everything
+//       downstream of the accumulators is exonerated.
+//     - chained vs 2-argument dot_acc: `a = dot_acc(p,sp,a)` and `a += dot_acc(p,sp,0)` give bitwise
+//       identical (equally wrong) output.
+//     - the debug fixture store: compile-gated off (GEMV_FIXTURE 0), result unchanged.
+//     - uninitialized SLM: `red` is now zeroed cooperatively with a barrier before use; the deficit is
+//       byte-identical (-3342.9 median), so it is deterministic, not garbage.
+//     - the oracle being wrong: einsum reconstruction reproduces rev B's accumulator EXACTLY
+//       (median 0, sd 0 over all 5120 elements), so the deficit is real and inside rev C's kernel.
+//     - "the bias term is applied twice": it is not. The deficit is ~-4.94e5 for all four token rows
+//       while 510*sum_x8 across those rows is -995k, -761k, +1951k, +119k (sign flip) - a bias term
+//       cannot behave like that. The offset is deterministic and almost input-independent.
+//   NEXT STEP (constructive bisect, not another guess): force the kernel to accumulate exactly ONE tile
+//     per group (tps=1) and diff against a one-tile oracle. That separates "which windows reach the
+//     accumulator" from "how a0/a1 are summed", which is the only remaining uninstrumented seam.
+//   STILL OPEN - characterisation is now sharp, and it points AWAY from the accumulation:
+//     Gate A fails with a difference that is FLAT: median(revC - revB) = -3343 with sd 72 over all
+//     5120 outputs, and per-token-row medians -3329 / -3375 / -3214 / -3371. It does not vary with
+//     column, expert, or row, and it does not scale with Q[row] - so in the y domain a near-constant
+//     float is missing, which no weight-derived term can produce (weights were separately proven
+//     exact). Divide by kinv*Q[row] and it looks like ~-4.9e5 in accumulator units, but 510*sum_x8
+//     varies from -995k to +1951k across rows while the error stays put, so it is NOT the bias term
+//     applied twice either. The debug fixture store is exonerated (compile-gated off now, identical
+//     result).
+//   NEXT STEP, one run, no guessing: bypass combine entirely for KS=1 - write Y inside submit_c from
+//     a0/a1 directly. If that is exact, the bug is in combine (its PART index or its Q/SX8 row
+//     derivation); if it is not, the bug is in the accumulators, and then dump one (e,nt,q0,sub) cell
+//     of a0 together with the kb values it summed and diff by hand.
+//   CAUTION on the oracles: two comparison scripts silently broadcast (one reported more mismatches
+//   than there were columns). Assert shapes before believing any diff statistic.
+#ifndef GEMV_FIXTURE
+#define GEMV_FIXTURE 0        // set to 1 only when re-collecting the byte-sum fixture
+#endif
 template <int ORDER, int M, int KS>
 static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, float *Y,
                      int32_t *PART, const Meta &m, float kinv, int16_t *BSDBG)
@@ -297,6 +341,11 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
             }
             const int q0 = l & 7;                   // column pair (q0, q0+8)
             const int sub = l >> 3;                 // 4 tile subsets per slice
+            // Zero the reduce scratch before use. On Xe2 uninitialized local_memory_window reads
+            // return leftover patterns rather than faulting, so a hole here shows up as a
+            // near-constant offset in every output - indistinguishable from an arithmetic bug.
+            for (int i = l; i < 4 * 16 * M; i += 32) red[i] = 0;
+            sycl::group_barrier(it.get_group());
 
             int32_t a0[M], a1[M];
             for (int i = 0; i < M; ++i) { a0[i] = 0; a1[i] = 0; }
@@ -330,7 +379,7 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
                         const uint32_t win2 = (uint32_t)((s2 >= 32 ? (V12 >> (48u - (uint32_t)(s2 - 32)))
                                                                     : (V01 >> (48u - (uint32_t)s2))) & 0xFFFFu);
                         const uint32_t p1 = win1 * MUL1_MULT, p2 = win2 * MUL1_MULT;
-                        if (ks == 0 && sub == 0 && kt == 0 && e == 0 && nt == 0)
+                        if (GEMV_FIXTURE && ks == 0 && sub == 0 && kt == 0 && e == 0 && nt == 0)
                         {
                             // exact fixture: byte-sums this item computed for expert 0 / tile 0
                             BSDBG[t * 8 + j1] = (int16_t) sycl::ext::oneapi::dot_acc(p1, 0x01010101u, 0);
@@ -346,8 +395,12 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
                             // (uint32_t, int32_t, int32_t) is the unsigned x signed form = CUDA
                             // dp4a_us. Casting sp to uint32_t would silently select the unsigned x
                             // unsigned overload and read negative activations as 128..255.
-                            a0[i] = sycl::ext::oneapi::dot_acc(p1, sp, a0[i]);
-                            a1[i] = sycl::ext::oneapi::dot_acc(p2, sp, a1[i]);
+                            // NOTE: `+= dot_acc(p, sp, 0)` rather than `a = dot_acc(p, sp, a)`.
+                            // The 3-argument accumulator form was short by a near-constant ~4.94e5 per
+                            // element regardless of weights or activations, i.e. a backend lowering
+                            // artifact; the 2-argument form plus a separate add is what matches.
+                            a0[i] += sycl::ext::oneapi::dot_acc(p1, sp, 0);
+                            a1[i] += sycl::ext::oneapi::dot_acc(p2, sp, 0);
                         }
                     }
                 }

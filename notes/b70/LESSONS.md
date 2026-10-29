@@ -446,7 +446,39 @@ And the finding that outranks all three: **measure at the operating shape.** Eve
 above E=512 hid the fact that b=1 decode touches ~10 experts and runs 3.5× slower there (17 vs 61 GB/s)
 for reasons unrelated to arithmetic. See `b70-kernels.md` §2b item 9.
 
-## 26. When a model and a measurement disagree by 30×, check the model's units first
+## 26. Validate the oracle against the *known-good* implementation first
+
+Chasing rev C's numerics cost seven experiments; two of them would have been unnecessary if I had ordered
+the work differently.
+
+The oracle — an einsum reconstruction of the accumulator from `tests/testlib/trellis.py` — was only
+compared against rev B at the very end. That one check (median 0, sd 0 against rev B) instantly proved
+the oracle sound and the deficit real, and moved the search inside rev C's kernel. Had it been experiment
+number one instead of number six, four of the intervening probes (fixture store, dot_acc chaining form,
+SLM zero-init, signed/unsigned reinterpretation) would have been skipped or reframed.
+
+The second ordering mistake was naming the bug too early. The per-column difference looked near-constant
+(−491,786 vs a predicted −510·Σx8 = −491,130, 1.4 % apart), so I wrote "the bias term is folded in twice"
+in three places. Then the per-row numbers came in: the deficit was ≈ −4.94e5 for all four rows while
+510·Σx8 across those rows was −995k, −761k, **+1,951k**, +119k — including a sign flip. A doubled bias
+cannot do that. The label was wrong for most of the hunt, and it shaped the probes I chose.
+
+What actually held up:
+
+* The shape-asserted three-way diff (PART vs oracle vs rev B) is the instrument that produced real
+  information: rev C's raw accumulators are short by a deterministic, essentially input-independent
+  ≈ 494k per element, so the epilogue and `combine` are exonerated and the byte-sum fixture is not lying.
+* Exonerations are worth recording even when they don't advance the diagnosis — they stop the next person
+  re-running them.
+* Two of the oracle scripts silently broadcast (one reported more mismatches than there were columns).
+  `assert a.shape == b.shape` before any diff statistic; a numpy broadcast produces a number, not an error.
+
+State left behind: rev C is marked PROVISIONAL in source, artifact and docs; its rates are not quoted as
+results; rev B remains bit-exact and is what every number in the design rests on. Next step is a
+constructive bisect — make the kernel process exactly one tile per group and diff against a one-tile
+oracle, which partitions "which windows reach the accumulator" from "how they are summed".
+
+## 27. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed
