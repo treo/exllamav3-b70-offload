@@ -9,5 +9,6 @@ probe_stores2
 probe_unreg
 probe_coherency
 probe_rates
+probe_gemv
 libb70shim.so
 __pycache__/

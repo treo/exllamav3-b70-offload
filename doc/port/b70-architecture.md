@@ -504,13 +504,18 @@ measured rate curve at the matched footprint:
 | 8 | 104.0 | 234 | 465 | **0.5×** | 351.2 | 239 | 1539 |
 | 32 | 313.3 | 234 | 1404 | 0.2× | 975.6 | 254 | 4020 |
 
-* Decode at **b=1**, rate-matched: Qwen3.8 takes **51 µs/layer** (27 µs if the kernel clusters) inside a
-  ~250 µs parent window — hidden ~5×, and the whole model's routed-expert reads are 2.46 ms/token of
-  B70 time. Qwen3.5 is proportionally cheaper. **GLM is the hard case: 405 µs/layer, 17.0 ms/token**,
-  because its 9 MiB experts put a single token's 50.9 MiB footprint on the *worst* point of the measured
-  curve (132 GB/s) with little locality to recover (1.6× at best). Whether that hides depends entirely on
-  GLM's own parent work (45 layers, H=4096, 64 heads), which E10 must measure before anyone promises
-  "free at decode" for it. The claim is conditional per model, not universal.
+* Decode at **b=1**, rate-matched: on the *byte stream* Qwen3.8 needs 14.3 MiB/layer and the card reads
+  that at 292 GB/s, which is the 51 µs/layer and ~5× margin quoted below — but a **real GEMV measured
+  61.4 GB/s** on the same bytes (`probe_gemv`, bit-exact, `[M]`), i.e. **~250 µs/layer, and the margin is
+  gone**. The gap is instructions per weight, not bandwidth: see b70-kernels.md §2a for the two revisions
+  measured (17 ops → 27.9 GB/s, 8 ops → 61.4 GB/s) and the CUDA/CPU structures that reach ~2 + R ops.
+  Until E4 is met by a kernel, the honest decode figure is `expert_bytes / 60 GB/s`, and the offload is
+  **not** hidden at b=1 for Qwen3.8 either. Qwen3.5 is proportionally cheaper; **GLM** at 50.9 MiB/layer
+  is 870 µs/layer at that rate, ~17 ms/token, so it needs both the kernel fix and more than one card.
+  Restated per-layer figures at the *modelled* byte-stream rate (what the design will achieve if §2a's
+  prescription is implemented, NOT what has been measured): Qwen3.8 **51 µs**, GLM **405 µs**.
+* The concurrency table below inherits the same caveat: its `rate` column is the byte-stream rate, so its
+  tok/s figures are ceilings conditional on E4.
 * **Batch is the variable that the per-token view hides, and it cuts against offloading.** Distinct
   experts per layer grow almost linearly with rows (72.7 of 512 at b=8 for Qwen3.8) until routing's
   effective support saturates, so B70 work per layer grows ~9× from b=1 to b=8 while the parent's window
@@ -1002,12 +1007,16 @@ answer goes the wrong way:
    design. The residual risk is that this is driver-version-specific, so the test belongs in the
    per-commit set rather than in the archive.
 2. ~~Does `dot_4x8packed_us_int` / `sycl::ext::oneapi::dot_acc` compile to one Xe2 instruction?~~
-   **Answered behaviourally** (`probe_rates`, R6 vs R7, reproduced over three independent runs):
-   the hardware dot and a manual byte-sum differ by 0.2–0.4 % (mean 1.002×, 1.004×) at realistic
-   decode density, and that density costs 4.4 % (Qwen3.8) to 0.1 % (GLM) of bandwidth against the
-   same reads with no arithmetic. Decode is bandwidth-bound, so the ISA question no longer gates
-   the design; it stays relevant to the XMX prefill routes and to J/token. (Direct ISA inspection is
-   unavailable on this driver: `IGC_ShaderDumpEnable` emitted nothing, `SYCL_SAVE_TEMPS` left no files.)
+   **REOPENED (2026-10-29).** It was closed on `probe_rates` R6-vs-R7, which is void: that probe computes
+   no weights, so it could not measure the cost of arithmetic it did not contain — on the same bytes it
+   walked at ~1 op per weight and reported 292 GB/s. `probe_gemv` (real trellis bytes, bit-exact output)
+   measures 27.9 GB/s at ~17 lane-ops/weight and 61.4 GB/s at ~8, tracking an instruction-count model to
+   within 10 % — so instruction count *is* the decode bottleneck, and whether the dot is one instruction
+   or several is a first-order question again. What is settled: `sycl::ext::oneapi::dot_acc` exists in
+   this toolchain (`sycl/ext/oneapi/dot_product.hpp`, u32×u32 and mixed-sign vec<u8,4> forms) and using
+   it for the byte sum was worth a measured 2.2×. Direct ISA inspection remains unavailable
+   (`IGC_ShaderDumpEnable` emitted nothing, `SYCL_SAVE_TEMPS` left no files), so the remaining question
+   is answered by variants of `probe_gemv`, not by a disassembler.
 3. ~~How much of the 608 GB/s does the decode GEMV actually reach?~~ **Measured, with a surprise**:
    scattered 132–292 GB/s (Qwen3.8) and 132–260 (GLM), clustered 216–558, native order — and the
    absolute rate depends ~2× on the *working-set size*, non-monotonically, which is why no design
@@ -1052,7 +1061,10 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | three disjoint homes, two cut points, no replication | **weakened**: holds where capacity is scarce, not where it is surplus | the old 1.5× rate premise was spec-to-spec; footprint-matched the homes are 3.2× (Qwen3.8) to 7× (GLM) apart. Disjointness now rests on the CPU residue costing `bytes/47.4`, which still holds for GLM. `plan_parent_budget.py` also shows Qwen3.8 running `h` = 100 % with ~12 GiB spare **[M]** | E20: replicating the hottest experts and steering per pick, if surplus survives real context lengths (E14) |
 | native tile layout on the B70, no repack | **decided on engineering grounds, not closed by measurement** | banded/native 0.96–1.05× over 2 geometries × 6 footprints: no consistent sign, and the probe's configuration variance exceeds the effect **[M]** | E4c: a *consistent* win in the real GEMV at decode footprints, large enough to pay for a load-time repack and for losing byte-interchangeability with the 3090 kernels |
 | locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | clustered/native 1.08–1.99×, never below 1.08 **[M]** | E4 measuring the real GEMV below 200 GB/s |
-| streamed/staged prefill dead for `S_b`, live for `S_c` | closed | ~200-row crossover from measured bytes/rates | a model with far more skewed routing (E7′ measures) |
+| decode is bandwidth-bound, instruction count second-order | **RETRACTED** — a real GEMV is instruction-bound | `probe_gemv`: 17 ops/weight → 27.9 GB/s, 8 ops → 61.4 GB/s, both within 10 % of the issue-rate model, against 292 GB/s for the bare byte stream **[M]** | — (this is the new baseline); the §2a prescription targets 150–250 GB/s |
+| dot-availability does not gate decode | **RETRACTED**, reopened behind E4 | the closure rested on a proxy that computed no weights; `dot_acc` in the byte sum alone measured 2.2× **[M]** | E4 with the register-resident `prod` + one `dot_acc` per (weight, row) |
+| streamed/staged prefill dead for `S_b`, live for `S_c` | closed on the byte/rate crossover, but see the row below — that crossover's rate side is now in question | ~200-row crossover from measured bytes/rates | E7′ on a model with more skewed routing, or the corrected per-row cost below |
+| XMX/DPAS crossover at ~272 rows per expert | **uncertain** — derived as (367 TOPS/2)/674 GB/s, i.e. assuming the matrix unit is the only fast path; a dp4a-style loop spends ~1 instruction per (weight, row), so the *instruction* crossover is far lower and may bind before XMX ever helps | `probe_gemv` per-row scaling: 61 → 13.8 → 4.6 GB/s at R = 1/8/32, i.e. ~4 instructions per row per weight today **[M]**; with the §2a rewrite it should be ~1 | re-measure the per-row marginal cost after the rewrite, then redo `plan_concurrency.py` and `plan_kernel_split.py`'s XMX eligibility numbers |
 | admission economics: β ≈ 655 µs, μ_cpu ≈ 199 µs, break-even ≈ 4 uses | closed as arithmetic | measured rates | only new rate measurements |
 | migration policy = cost-based, break-even on **churn**, not picks | adopted as arithmetic; **churn itself unmeasured and unmeasurable offline** | `\|res\|`, `fill`, and the two thresholds, which coincide at ~0.3 %/token (link saturation 0.31 %, economic 0.36 %) from measured quantities | E11: under ~0.3 %/token migrate with a link-budgeted per-step cap; over it, `S_b` is static apart from priming and the CPU serves the residue |
 | `h`/`σ` values quoted for the reference models | upper bounds, not promises | decayed cumulative profiles (dust counts of 1e-27) | E14 (fresh trace) — expect `h_live < h_profile` |

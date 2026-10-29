@@ -1,0 +1,58 @@
+# probe_gemv - REAL mul1 trellis decode GEMV on the Arc Pro B70
+# data: Qwen3.8-Flash-Next-exl3-2.68bpw layer 0 gate_proj, K = 3.0, packed bytes straight from the
+#   checkpoint (dump_gemv_case.py); 600 KiB of weights per expert (gate only - a full layer reads
+#   gate+up+down = 1.758 MiB at the same rate).
+# correctness: y is BIT-EXACT against the independent NumPy reference built from
+#   tests/testlib/trellis.py (unpack + tile_perm + the moe_mul1.h byte-sum identity), and the two
+#   grid orders produce bit-identical output (gate E23's numerical half).
+# order 0 = clustered (work-groups (e,nt), nt fastest); order 1 = scattered ((nt,e), e fastest).
+# two revisions: rev A = per-window address math + manual 3-shift/3-add byte sum;
+#   rev B (below) = grouped dword-pair extraction + sycl::ext::oneapi::dot_acc for the byte sum,
+#   copied from exl3_gemv_int8_kernel.cuh's ext4w/ext8w structure.
+
+experts     MiB  rows |   clus us clus GB/s   scat us scat GB/s clus/scat
+     10     5.9     1 |     359.4      17.1     331.4      18.5     0.924
+     10     5.9     8 |    1463.3       4.2     724.1       8.5     0.494
+     10     5.9    32 |    2138.2       2.9    2133.8       2.9     1.000
+     10     5.9   128 |   41620.5       0.1   41614.2       0.1     1.000
+     32    18.8     1 |     384.2      51.2     489.8      40.1     1.277
+     32    18.8     8 |    2593.7       7.6    1760.7      11.2     0.679
+     32    18.8    32 |    5326.5       3.7    5327.4       3.7     1.000
+     32    18.8   128 |  116679.3       0.2  116706.0       0.2     1.000
+     96    56.2     1 |    1020.6      57.8    1027.1      57.4     1.007
+     96    56.2     8 |    4577.2      12.9    4562.1      12.9     1.000
+     96    56.2    32 |   13822.9       4.3   13816.6       4.3     1.000
+     96    56.2   128 |  341003.4       0.2  341072.1       0.2     1.000
+    256   150.0     1 |    2594.2      60.6    2600.2      60.5     1.002
+    256   150.0     8 |   11593.8      13.6   11596.7      13.6     1.000
+    256   150.0    32 |   35094.0       4.5   35075.9       4.5     1.000
+    256   150.0   128 |  897006.2       0.2  897248.9       0.2     1.000
+    512   300.0     1 |    5127.5      61.4    5215.2      60.3     1.018
+    512   300.0     8 |   22810.9      13.8   22892.8      13.7     1.007
+    512   300.0    32 |   69084.8       4.6   69506.5       4.5     1.022
+    512   300.0   128 | 1783335.2       0.2 1784317.2       0.2     1.000
+
+Instruction-count model, which is what actually explains these numbers
+  The card issues ~256 EU x 2.8 GHz x 2 slots = 1.43e12 SIMD instructions/s; one 32-bit instruction
+  covers 32 lanes, and at K = 3.0 each weight is 0.375 B of stream, so a kernel spending N lane-ops per
+  weight tops out at 1.43e12 / (N x 2.67) bytes/s:
+     N = 17 (rev A: address math + 64-bit shift + manual byte sum) -> 31.6 GB/s predicted, 27.9 measured
+     N =  8 (rev B: grouped extraction + dot_acc byte sum)         -> 67.2 GB/s predicted, 61.4 measured
+  Both within 10% of the model, and both FAR below the 250-292 GB/s that doc/port's decode budget
+  assumed. Decode with a straightforward trellis GEMV is INSTRUCTION-bound, not bandwidth-bound:
+  probe_rates walked the same bytes with ~1 op per weight and reached 292 GB/s, which is why it could
+  never have detected this.
+
+Rows scale badly, and CUDA says why. rev B still materialises byte-sums into SLM and then does
+load+load+mul+add per (weight, row): at R = 8 the rate is 13.8 GB/s and at R = 128 it collapses to
+0.2 GB/s (register spill from NB accumulators). exl3_gemv_int8_kernel.cuh never materialises byte-sums:
+it keeps `prod = window * 0x83DCD12D` in a register and evaluates each row as ONE
+dp4a_us(prod, splat(a_int8), acc) against activations pre-splatted to 0x01010101 * x8 in shared memory.
+Per weight that is ~2 + R instructions instead of ~8 + 4R, and the same trick on Xe2 is
+sycl::ext::oneapi::dot_acc(uint32, uint32, int32), which exists in this toolchain
+(sycl/ext/oneapi/dot_product.hpp, plus mixed-sign vec<uint8_t,4>/vec<int8_t,4> overloads).
+Next revision of this probe: drop the bs[] table, keep prod in registers, one dot_acc per (weight, row).
+
+Ordering is NOT the lever at this instruction count - clustered/scattered ratios sit at 0.98-1.02 for
+R = 1..32 - which is the honest reading of §3a and E4b: the locality win is real for the byte stream
+(probe_rates 1.08-1.99x) but invisible until the arithmetic stops dominating.

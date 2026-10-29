@@ -290,7 +290,38 @@ Three siblings of the same mistake, all found only after writing the first versi
 The general rule these probes should have enforced on themselves: before multiplying a measured rate by a
 quantity, verify that the measurement was taken *at that quantity*.
 
-## 20. A rate above the card's copy peak is a bug report, and a 100 % hit rate can be dust
+## 20. A proxy that omits the operation under study cannot bound its cost
+
+For most of this design's life, "decode is bandwidth-bound, arithmetic costs 1–4 % of bandwidth, the
+int8 dot's instruction count does not matter" was a *measured* conclusion. It rested on `probe_rates`,
+which walked the real trellis bytes at ~1 lane-op per weight and varied an artificial arithmetic density
+on top. Then `probe_gemv` ran the actual operation — checkpoint trellis bytes, the `moe_mul1.h` identity,
+output bit-exact against `tests/testlib/trellis.py` — and returned **27.9 GB/s**, then 61.4 GB/s after
+adopting the byte-sum dot, against 292 GB/s for the bare stream. An instruction-count model (256 EU ×
+2.8 GHz × 2 slots) predicts 31.6 and 67.2 GB/s from the two kernels' op counts, so the card was never the
+question; the proxy was.
+
+What went wrong is general and worth naming precisely: the proxy varied *a* cost, not *the* cost. Ten
+extract-mul-dot triples per word is a plausible density, but the real inner loop's expense lives in
+where the window comes from (ring address math, 64-bit shifts, wraparound) and how the accumulate happens
+(byte-sum then multiply then add, per row). By generating windows from a synthetic pattern and summing
+bytes by hand, the proxy measured an implementation nobody would ship, in a direction that flattered the
+conclusion. The behavioural closure of the `dot_acc` question was the same error wearing a gate's clothes.
+
+Three rules:
+
+* **If the claim is about cost X, the measurement must contain X.** "Arithmetic costs 1–4 %" requires a
+  kernel that does the arithmetic the real kernel does — same data, same inner loop, verified output.
+* **Read the shipped implementations first.** CUDA (`exl3_gemv_int8_kernel.cuh`: two loads per 4–8
+  windows, `fshift` per window, `dp4a_us(prod, splat(a), acc)` per weight-row) and the CPU VNNI path both
+  contained the answer before I wrote 300 lines of plausible kernel. The e2e/SYCL test suites are the same
+  kind of free evidence for the target ISA.
+* **Check that the measurement and a first-principles budget agree.** Mine agreed only *after* the real
+  kernel existed — and the model's agreement at both 17 and 8 ops/weight is what tells me 61 GB/s is an
+  instruction problem rather than a fluke or a bandwidth wall. A microbenchmark with no such cross-check
+  is a story, not a measurement.
+
+## 21. A rate above the card's copy peak is a bug report, and a 100 % hit rate can be dust
 
 Two catches from scaling the analysis to the higher-quant Qwen3.8 recipes, both of which would have
 passed silently into the design:
@@ -318,7 +349,7 @@ assertion that caught nothing was `fixed > 0` after calibrating to the measured 
 be internally consistent and still be reading a summed quantity as a per-layer one. When a term dwarfs
 the others by roughly a factor equal to a layer or head count, check which axis it was summed over.
 
-## 21. "The device is busy" is two different claims; conflating them gave the 3090 an 8× too small expert slice
+## 22. "The device is busy" is two different claims; conflating them gave the 3090 an 8× too small expert slice
 
 Asked how the 3090's non-expert work affects placement, the intuitive answer is "little VRAM and little
 bandwidth left, so few experts, and they had better be cheap to reach". Neither half survived the byte
@@ -340,7 +371,7 @@ must be resident and whether it is read per token. Big lookup tables (n-gram, em
 MoE router caches) break the intuition that resident bytes ≈ streamed bytes, and either equality assumed
 as the other produces confident, wrong capacity plans.
 
-## 22. If an analysis tool reports "no difference" everywhere, debug the tool before believing the finding
+## 23. If an analysis tool reports "no difference" everywhere, debug the tool before believing the finding
 
 The first version of `plan_parent_budget.py` printed `tie` for all 54 placement comparisons. The
 plausible reading was "placement order does not matter", which is the kind of conclusion that gets
@@ -355,7 +386,7 @@ the first run — and any sweep where a varied parameter has zero effect is trea
 script, not as a finding about the system. After the fix the same code shows 13 % gaps in one direction
 and 20 % in the other, which is a far more interesting and far more believable answer.
 
-## 23. When a model and a measurement disagree by 30×, check the model's units first
+## 24. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed

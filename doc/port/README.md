@@ -38,7 +38,8 @@ material for the card is symlinked at [`doc/b70/`](../b70/) (cheat sheets, the L
 | activation payload per decode layer | 5.1 KiB down, 10 KiB up | same, and it hides entirely |
 | GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — ~5× the offload cost for Qwen3.8 at b=1, **not** for GLM, and gone by b=8: distinct experts per layer grow ~linearly with rows (10 → 39 → 73), so B70 work scales ~9× while the window barely moves |
 | what the trellis tile walk actually sustains | — (the CPU is DRAM-bound at 45 GB/s) | **132–292 GB/s scattered, 216–558 clustered** (the spread is working-set size, not code): tile repacking buys **0.96–1.05×** with no consistent sign, work-item ordering buys **1.08–1.99×** and never less |
-| is the decode arithmetic affordable? | 7-op VNNI fallback costs ~20 % on x86 | yes: real unpack density costs **0.1–4.4 %** of bandwidth at decode-like footprints (14 % at 64 MiB), and the hardware int8 dot and a manual byte-sum are indistinguishable (0.2–0.4 %) |
+| is the decode arithmetic affordable? | 7-op VNNI fallback costs ~20 % on x86 | **not yet.** `probe_gemv` runs the real trellis GEMV (bit-exact vs `tests/testlib/trellis.py`): **61.4 GB/s** at R=1, 27.9 before the byte-sum dot fix — 4–5× below the 292 GB/s the byte stream sustains, and the rows cost ~4 instructions each. Both points match an instruction-count model to 10 %, and `b70-kernels.md` §2a names the CUDA/CPU structures that close it |
+| what actually binds decode | DRAM bandwidth on the CPU tier (45 GB/s) | **instructions per weight** on the B70 — the opposite of what an earlier draft of this plan concluded from a proxy that walked the bytes without computing them |
 
 Oversized models are covered too, and they are a different problem: at 108.8 GiB of routed-expert
 trellis (GLM-5.3-Flash@3.05, present on this box) only 29 % of the experts fit the B70, so the B70
