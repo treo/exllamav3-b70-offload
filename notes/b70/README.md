@@ -13,7 +13,9 @@ bash build.sh                                     # setvars.sh is sourced inside
 source ../env.sh && python -u probe_cross.py      # needs torch + exllamav3_ext (CUDA)
 ```
 
-Each probe's raw output is kept next to it (`out_*.txt`) and is what the tables below quote.
+Each probe's raw output is kept next to it (`out_*.txt`) and is what the tables below quote. They
+were re-run after the fact to confirm reproducibility: the flag-poll job cost came back at 5.0–6.3 µs
+across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their recorded pass counts.
 
 | file | what it answers |
 |---|---|
@@ -21,8 +23,8 @@ Each probe's raw output is kept next to it (`out_*.txt`) and is what the tables 
 | `probe_notify.cpp` | the same job shapes completed by **polling a flag the device wrote** instead of `.wait()` — the number the protocol actually pays |
 | `probe_doorbell.cpp` | the minimal correct parked-kernel poll loop (three mechanisms, one work-item) |
 | `probe_resident.cpp` | resident engine sizing: groups × lanes × poll backoff × payload, with SIMD-uniform polling |
-| `b70_shim.cpp` + `probe_cross.py` | cross-vendor sharing: one page-locked region used by the 3090 *and* the B70, in both directions, including stream memops (8/9; the exception is item 8 below) |
-| `probe_crossproc.py` | the same, with the B70 engine in a **child process** on a `multiprocessing.shared_memory` segment the parent registered with CUDA — 11/11, so the engine may be a separate process |
+| `b70_shim.cpp` + `probe_cross.py` | cross-vendor sharing: one page-locked region used by the 3090 *and* the B70, in both directions, including stream memops (8/9 — the one failure is by design: `cudaHostRegister` refuses xe-pinned memory, `LESSONS` 8) |
+| `probe_crossproc.py` | the same, with the B70 engine in a **child process** on a `multiprocessing.shared_memory` segment the parent registered with CUDA — 10/10, so the engine may be a separate process |
 | `probe_stores.cpp`, `probe_stores2.cpp`, `probe_unreg.cpp` | which store pattern actually reaches host memory (answer: plain stores do, 100/100; `sycl::atomic_ref` on a registered pointer does not, and costs the device) |
 | `probe_coherency.cpp` | the disproved theory: it is not CPU-vs-GPU cache staleness (kept because the reasoning that led to it is the useful part) |
 

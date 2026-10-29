@@ -13,7 +13,7 @@ for themselves, and one part becomes the whole game: the **handshake**.
 
 | document | what it answers |
 |---|---|
-| [`b70-architecture.md`](b70-architecture.md) | participant model, where weights/activations live and move, the five data paths rewritten for a fast offload device, the placement cost model, execution-model tiers with measured costs, code-impact map, phased plan with decision gates, risks |
+| [`b70-architecture.md`](b70-architecture.md) | participant model, the three disjoint expert homes and where their bytes move, the five data paths rewritten for a fast offload device, the placement/migration cost model, oversized models (§4a: `S_b` as a cache, `h_min`, the disk tier), execution-model tiers with measured costs, code-impact map, phased plan with decision gates, risks |
 | [`b70-kernels.md`](b70-kernels.md) | the expert kernels themselves: mul1 trellis decode on Xe2, the decode GEMV, the XMX (DPAS) routes for prefill, the Hadamard/activation phases, determinism, layout rules, test vectors |
 | [`b70-harness.md`](b70-harness.md) | the harness that proves correctness, speed and *utilisation* (board power) continuously, with the gates each phase must clear |
 
@@ -28,7 +28,7 @@ material for the card is symlinked at [`doc/b70/`](../b70/) (cheat sheets, the L
 |---|---|---|
 | one cold expert read at decode | 403 µs/layer (Qwen3.8, 15 threads) | **~35 µs/layer** (projected from 608 GB/s and the ALU budget) |
 | handshake floor, job with nothing to do | 20 µs/layer | **5.0–6.3 µs** (submit + flag) / **3.2 µs** (resident doorbell) |
-| expert bytes must cross the link for prefill | yes — 28.6 % of device time is that DMA | **no**: they already live on the offload device |
+| expert bytes must cross the link for prefill | yes — 28.6 % of device time is that DMA | **no** for experts homed on the B70; yes for the residue, priced per use (§4a) |
 | pinned ↔ device bandwidth | 13.3 GB/s (Gen4 ×8) | **14.4 GB/s** |
 | activation payload per decode layer | 5.1 KiB down, 10 KiB up | same, and it hides entirely |
 | GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — and now 4–7× the offload cost |

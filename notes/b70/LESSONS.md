@@ -138,8 +138,9 @@ style probing is the only trustworthy source, for either card.)
 
 ## 10. `sycl::ext::oneapi::experimental::clock<clock_scope::device>` is not available
 
-Submitting a kernel that uses it fails at launch with `Required aspect ext_oneapi_clock_device is not
-supported on the device`. Bounded loops in tests must use spin budgets, not a GPU clock. Same
+Submitting a kernel that uses it fails at launch with
+`Required aspect ext_oneapi_clock_device is not supported on the device`. Bounded loops in tests must
+use spin budgets, not a GPU clock. Same
 for `aspect::ext_intel_matrix` (the Intel-specific `joint_matrix` extras in
 `doc/b70/sycl/doc/extensions/experimental/sycl_ext_matrix/`): the *documented* extension is newer
 than the installed 2026.2 runtime headers, so check `__has_include` and fall back to plain
@@ -168,3 +169,16 @@ two early probe runs at the first large copy. Use `queue::memset`/`memcpy`.
   (payload → flag). An out-of-order queue relies on USM-dependency inference, which does not see
   anything through a raw host pointer.
 * `nd_range<1>` takes `(range<1>, range<1>)`, not two braced lists of different rank.
+
+## 14. Repo hygiene, learned the hard way twice in one day
+
+* **Never delete with a glob.** `rm -f probe_*[!.c]*` — intended to remove probe *binaries* — matched
+  and destroyed all ten `.cpp`/`.py` sources. They came back only because every step had been
+  committed minutes earlier. List the files, or `git clean -nd` first and read the output, or delete
+  by exact name.
+* **Verify an edit by reading the file, not the tool's echo.** Several multi-line replacements here
+  looked right in review and were wrong on disk: a table row that gained a column and lost its
+  neighbours, a sentence spliced mid-clause, a claim of "11/11" for a probe that prints "10/10".
+  For prose and tables especially, re-read the region after editing it.
+* **Commit before and after a bulk edit**, so a mistake is one `git checkout --` away rather than a
+  rewrite from memory.

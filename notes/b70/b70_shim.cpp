@@ -89,9 +89,10 @@ extern "C" int b70_write_flag(void *ptr, unsigned long n_words, unsigned seq)
         g_q->parallel_for(n_words, [=](sycl::id<1> i) { p[i[0]] = 0xC0FFEE00u + uint32_t(i[0]); });
         g_q->single_task([=]
         {
-            // plain volatile store after a system fence. A sycl::atomic_ref with system scope on
-            // a *foreign* (register_host_memory) pointer took a device fault and poisoned the
-            // queue - it is the flag-publishing bug this shim exists to pin down.
+            // plain volatile store after a system fence. A sycl::atomic_ref on a *foreign*
+            // (register_host_memory) pointer must not be used at all: at system scope it failed
+            // silently and poisoned the queue, and at device scope it took the whole card down
+            // (UR_RESULT_ERROR_DEVICE_LOST) - probe_stores.cpp case 7 is the repro.
             sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);
             *(volatile uint32_t *)((char *) ptr + n_words * 4) = seq;
             sycl::atomic_fence(sycl::memory_order::acq_rel, sycl::memory_scope::system);

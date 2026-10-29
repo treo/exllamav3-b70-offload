@@ -84,7 +84,7 @@ each as a test rather than a note:
 
 | invariant | test |
 |---|---|
-| cross-process pinned sharing: the engine child can `register_host_memory` the parent's registered segment (page-multiple sizes, `LESSONS` 5) | **proven**, `notes/b70/probe_crossproc.py` 11/11 (`out_crossproc.txt`) — promoted to `tests/b70/test_region_attach.py` so a driver update cannot silently break it |
+| cross-process pinned sharing: the engine child can `register_host_memory` the parent's registered segment (page-multiple sizes, `LESSONS` 5) | **proven**, `notes/b70/probe_crossproc.py` 10/10 (`out_crossproc.txt`) — promoted to `tests/b70/test_region_attach.py` so a driver update cannot silently break it |
 | every kernel that writes the shared region writes *all* of it, and publishes last | `tests/b70/test_store_discipline.py`, from `probe_stores2.cpp` / `probe_unreg.cpp`: N×20 reps per pattern, **comparing every word**, plus the negative case that a `sycl::atomic_ref` on the region loses the device (`probe_stores.cpp` case 7) so no code path can regress into it |
 | publishing `done` from a B70 kernel is ordered after the payload stores | `test_flag_order.py`: 10 000 rounds of `write payload → fence → flag`, host/3090 verify the payload matches the seq every time (this is the `LESSONS` 4 bug class: `atomic_ref` on a foreign pointer poisons the queue *silently*, so also assert the payload, never only the flag) |
 | the engine never calls `.wait()`/blocks on the job path | an instrumented build counts blocking calls and asserts zero during a generation; a regression here costs 24 µs/layer silently |
@@ -103,6 +103,9 @@ is the oracle.
 
 ### E — performance floors
 
+Every gate below is a *floor or ceiling on a measured quantity*; "explained by a mechanism from
+E1–E5" is an acceptable outcome, "within noise" is not (see the hygiene rules at the top).
+
 | gate | reference / floor | note |
 |---|---|---|
 | E1 empty (all-`-1`) job | B70 handshake ≤ **8 µs**/layer; the CPU path is 20 µs, submit+flag is 5.0–6.3 µs **[M]**, resident doorbell 3.2 µs **[M]** | if this regresses past ~10 µs the layer count multiplies the loss |
@@ -113,13 +116,12 @@ is the oracle.
 | E6 end to end | Qwen3.5 `-mb 255` decode within **5 %** of the all-GPU reference; prefill ≥ 2× the `-mcs 192` incumbent; Qwen3.8 `-mba` ≥ 2× the `-mcs 410` incumbent (377 tok/s @1024) | placement-controlled, both models, cold and warm |
 | E7′ | rows-to-B70 ≥ **4×** "stream everything to the 3090" at 2048 rows, on a model whose experts are `S_b`-resident | successor of the CPU path's E7 (`stream_t`) gate: it re-checks, per model, that the streaming decision is still the right one — the crossover is `expert_bytes/(hi+2·ho)` ≈ 184–200 rows/expert here |
 | E8 host cost | the engine must add ≤ 20 µs/token of *parent* host time; engine-thread CPU time charged separately | the forward thread is already 3.6 ms/token |
-
-| E9 capacity curve | `tok/s` vs `S_b` capacity (sweep `-mb`/quota from 0 to full) must be **monotone and smooth**: no adjacent pair differing by more than 15 %, and ≥ 90 % of the resident-case rate at 50 % capacity. The property that says the cache degrades gracefully instead of cliff-edging |
-| E10 hit-rate floor | measured `h` on the calibration corpus ≥ the planner's computed `h_min = 1 − link_rate·T_layer/(topk·expert_bytes)` (§4a); reported with `T_layer`, `link_rate` and the profile state. If it fails, the configuration is declared oversized, not "slow" |
-| E11 thrash convergence | alternate two disjoint corpora (chat vs code) and record tok/s and `h` per window: must return within 2 % of the single-corpus steady state within `EXL3_MOE_B70_WINDOW` tokens, and the admission count per step must stay under the budget |
-| E13 spanning fraction `σ` | fraction of rows whose picks live in more than one home, and the resulting payload/handshake multiplier. Reported per model, per corpus, per placement mode (`freq` vs `colocate`), from `plan_placement.py` offline **and** from the live run; offline prediction and live measurement must agree within 10 %, and the accepted placement is whichever wins on the *combined* cost, not on `σ` alone |
+| E9 capacity curve | `tok/s` vs `S_b` capacity (sweep `-mb`/quota from 0 to full) must be **monotone and smooth**: no adjacent pair differing by more than 15 %, and ≥ 90 % of the resident-case rate at 50 % capacity. The property that says the cache degrades gracefully instead of cliff-edging | the graceful-degradation property; a cliff means placement or admission is thrashing, not that the kernels are slow |
+| E10 hit-rate floor | measured `h` on the calibration corpus ≥ the planner's computed `h_min = 1 − link_rate·T_layer/(topk·expert_bytes)` (§4a); reported with `T_layer`, `link_rate` and the profile state. If it fails, the configuration is declared oversized, not "slow" | `T_layer` (the divisor) is assumed 400 µs for GLM until measured — establish it first, `h_min` is linear in it |
+| E11 thrash convergence | alternate two disjoint corpora (chat vs code) and record tok/s and `h` per window: must return within 2 % of the single-corpus steady state within `EXL3_MOE_B70_WINDOW` tokens, and the admission count per step must stay under the budget | the online half of the policy: the static profile cannot foresee a topic switch |
+| E12 admission/eviction cost | one `S_b` admission (expert upload) measured cold: ≤ 1.15 × `expert_bytes / link_rate`; and a decode step *while* N admissions are in flight ≤ 1.1 × the no-admission step (proves the low-priority queue and the budget actually work) | measured with the queue priority from §4a; without it, activations and admission fight over one queue and both lose |
+| E13 spanning fraction `σ` | fraction of rows whose picks live in more than one home, and the resulting payload/handshake multiplier, **per layer** as well as overall. Reported per model, per corpus, per placement mode (`freq` vs `colocate`), from `plan_placement.py` offline **and** from the live run; the two must agree within 10 %, and the accepted placement is whichever wins on the *combined* cost, not on `σ` alone | per-layer breakdown matters more than the total: a layer whose cut point sits mid-cluster splits nearly all its rows |
 | E14 predicted vs realised homes | the planner's offline prediction of `h` (device-resident pick share), `σ` and ms/token, computed from the expert-stats profile plus the four measured rates, against what the run actually did | prediction within 10 % on `h` and 20 % on ms/token, or the cost model is wrong and no gate above can be trusted |
-| E12 admission/eviction cost | one `S_b` admission (expert upload) measured cold: ≤ 1.15 × `expert_bytes / link_rate`; and a decode step *while* N admissions are in flight ≤ 1.1 × the no-admission step (proves the low-priority queue and the budget actually work) |
 
 ### U — utilisation and power (the "is the card actually working" channel)
 
@@ -160,7 +162,7 @@ Scripts (all in `notes/b70/`, extending the existing harnesses rather than repla
 | `probe_transport.cpp`, `probe_notify.cpp` | E1–E3, and the link/bandwidth constants the policy derives from |
 | `probe_resident.cpp`, `probe_doorbell.cpp` | T2 sizing, `D` poll-storm and drain tests |
 | `b70_shim.cpp` + `probe_cross.py` | D cross-vendor region tests (8/9; the exception is the one-way `cudaHostRegister` refusal) — run before anything else touches the protocol |
-| `probe_crossproc.py` | D cross-process region tests (11/11): engine child attaches, kernel writes reach parent *and* a 3090 DMA, a 3090 memop reaches a kernel in the child, wait retires on the child's flag |
+| `probe_crossproc.py` | D cross-process region tests (10/10): engine child attaches, kernel writes reach parent *and* a 3090 DMA, a 3090 memop reaches a kernel in the child, wait retires on the child's flag |
 | `probe_stores.cpp`, `probe_stores2.cpp`, `probe_unreg.cpp`, `probe_coherency.cpp` | the store-visibility family behind the two rules in architecture §10a |
 | `b70_bench_kernel.py` | B′ + E4: GEMV/GEMM rate vs rows × experts × threads × rate × layout, cold selections |
 | `b70_bench_engine.py` | E1–E3, E8: real jobs through the ring with the engine child live (the `notes/bench_handoff.py` analogue) |
@@ -178,7 +180,7 @@ Scripts (all in `notes/b70/`, extending the existing harnesses rather than repla
 | every commit | A (incl. A8/A9), B′1–B′7 for the rates the change touches, D protocol tests, E1–E4 on one model | < 5 min (no model load beyond one layer; `probe_*` re-run only if the toolchain or topology changed) |
 | every push | full A/B′/C/D, E1–E8 single config, U phases for decode and one prefill chunk | < 25 min |
 | nightly / pre-merge | `b70_run_e2e.sh` across configs × both models × cold and warm placement, `-mba` spill stress, reload/autosplit, T2 residency, `b70_compare.py` against the rolling baseline | hours |
-| on any "it got slower" | re-run the U sampler and `b70_prof.py` *before* changing code: on the CPU path every unexplained slowdown was handshake- or policy-related, never kernel-related |
+| on any "it got slower" | re-run the U sampler and `b70_prof.py` *before* changing code: on the CPU path every unexplained slowdown was handshake- or policy-related, never kernel-related | minutes, and always before a code change |
 
 ## What the harness deliberately does not test
 

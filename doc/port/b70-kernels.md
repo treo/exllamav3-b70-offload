@@ -44,7 +44,7 @@ is a Phase-1 gate, not an assumption: `sycl::ext::oneapi::dot_acc` exists in the
 and `sycl::ext::intel::esimd` has its own form; the ISA dump (`IGC_ShaderDumpEnable=1`) decides
 which is used, with the manual byte-sum as the correctness-preserving fallback.
 
-Two coding rules from the probes, because both fail silently: index with `i[0]` and cast
+Three rules from the probes, because all three fail silently: index with `i[0]` and cast
 explicitly (`p[i] = seed + i` on a `sycl::id<1>` compiles, runs, reports success and stores nothing —
 `notes/b70/LESSONS.md` 4a), and no `sycl::atomic_ref` on the shared region at any scope (it loses the
 device, `LESSONS` 4). Publish results as: stores → `sycl::atomic_fence(acq_rel, system)` → flag store.
