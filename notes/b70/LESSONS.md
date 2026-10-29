@@ -414,6 +414,19 @@ The general lesson: before treating a platform question as open, check whether a
 same hardware generation is sitting in the tree. A comment that says "the original reached ~180 GB/s and
 here is why" is worth more than a fresh microbenchmark of my own guess.
 
+The second pass over the same tree was more productive than the first, for a methodological reason: the
+first harvest was organised **by file** (what do their MoE kernels do), and produced a list of techniques
+I then had to find problems for. The second was organised **by our own measured weakness** — the rows
+collapse, the `tn`=32 worst case, the three-launch layer, the hand-fit launch policy — and grepping for
+whoever else had hit *that* turned up M-tiled DPAS with the weight dequant amortised across 16 tokens, an
+explicit 8192-work-item fill target with a granularity-halving picker, and a measured ~48 µs host cost per
+enqueue. Two extras worth keeping from that pass: record the things you look at and **reject** (their
+table-driven 3-bit decode, three streams plus a lookup table, loses to our single-ring arithmetic
+byte-sum), because an unrecorded rejection gets re-evaluated next month; and check whether their numbers
+are expressed in the same *unit* as yours — their split-K thresholds key on work-items, ours on
+work-groups of 32 lanes, which is why their "N ≤ 512 → ks=4" looked to contradict our measurement of ks=1
+winning at 400 groups when in fact we have 12,800 lanes.
+
 ## 25. Silent, deterministic wrongness on Xe2: sub-group width and `dot_acc` signedness
 
 Getting rev C of `probe_gemv` to bit-exactness took three rounds, and each wrong answer looked like a

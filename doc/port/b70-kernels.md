@@ -269,6 +269,44 @@ What they say that changes our design:
    clocks. Decode at b=1 has a few-percent duty cycle, so **plan decode on the single-launch number**
    (conservative: it also carries the completion tax) and prefill/batched on the sustained number.
 
+## 2c. Second harvest from `doc/b70/llm-scaler` — mapped to the weaknesses we just measured
+
+Every item below is **[source]** (their claim or their code), not measured here; the right-hand column
+is the gate that would make it ours. Paths are relative to
+`doc/b70/llm-scaler/sglang/custom-esimd-kernels/csrc/`. The ordering is by expected payoff against §2b
+item 9's numbers (205 G-w/s at R=1 falling to ~137 at R=4; 76.5 G-w/s at `tn`=32; 239 µs/layer = parity
+with the parent), not by elegance.
+
+| # | Idea, as they implement it | Which measured weakness it attacks | Gate |
+|---|---|---|---|
+| 1 | **M-tiled XMX DPAS instead of one dot per (weight, row)**: `MC=8` weight rows × `NTOK=16` tokens per tile, dequant the weight block **once for all M tokens** (`q8_0_GEMV.h:231-241`, `:281`), and `NTOK=16` "covers the whole MTP verify batch (M≤16) in one tile" | the rows collapse: our cost is ~3+M instructions per weight, so R=4 already costs ~1.5× and R=8 ~3× per weight; theirs is ~unpack + M/16 of a DPAS | **E24** |
+| 2 | **Templated M-tile size from one body**: `MS_=4` → 64-token tile for prefill, `MS_=1` → 16-row tile because "the 64-row DPAS wastes ~60/64 rows" at M=4 — "much less matmul + smaller acc + the same b_tile gather" (`moe_q4k_ggemv.h:38-41`) | if we add a DPAS path, one tile size will not serve R=1…64; instantiate the family, don't branch inside | folds into E24 |
+| 3 | **Fuse gate+up into one launch with the tensors kept separate**: "gate/up weights passed SEPARATELY (zero extra memory — reuses the decode reps; no `[E,2*IM,…]` concat copy)", output-column range picking which (`moe_q4k_ggemv.h:24-27`) | gate and up are 80.7 µs each at Qwen3.8 b=1 and read *identical activations*; fusing removes one activation pass and one launch | **E25** |
+| 4 | **Fuse routed-down + finalize**: give one work-item the whole top_k reduction so it accumulates in registers, which deletes both the extra launch *and* the `[M·top_k, hidden]` scratch round-trip (`moe_down_fin_fused.h:1-20`) | our down is 77.8 µs and is followed by a weighted sum over experts plus the shared expert | folds into E25 |
+| 5 | **Fold the per-expert activation gather into the load**: pass `tok_ids` and read row `tok_ids[t0+m]` directly, "folding the per-expert input gather INTO the load (no `index_select` round-trip; saves the IndexKernel)" (`moe_q4k_ggemv.h:34`) | per-layer, per-expert-batch activation staging; also removes a kernel from the critical path | folds into E25 |
+| 6 | **Host cost is first-order at decode**: they measure **~48 µs of host per enqueue against ~10–30 µs of GPU per kernel**, and conclude "trading work-item count for one fewer launch is the right side of the deal even though the grid shrinks by top_k" (`moe_down_fin_fused.h:15-17`) | validates our handoff design from the other side: our pinned-flag completion is 5–6.3 µs and the doorbell 3.2 µs, so **B70 GEMVs must never be routed through torch dispatch at decode** | harness rule, E26 |
+| **7** | **Fill-the-machine as an explicit target, not folklore**: `MOE_DF_WI_TARGET = 8192` work-items, with the per-item granularity halved until the grid reaches it (`moe_down_fin_fused.h:65, 88-89`), and a shape-keyed split-K selector with a divisibility guard (`select_ks_q8_0`, `q8_0_GEMV.h:28-36`: ks=8 if N≤128 & K≥2048, 4 if N≤512, then shrink ks until `K/ks % GROUP == 0`) | our launch policy is a hand-fit rule from three data points; note their `N` counts *work-items*, which is why their thresholds look aggressive next to our "400 groups of 32 lanes needed no split-K" | **E27** |
+| 8 | **Occupancy cure for narrow shapes is per-lane contiguous k-partitions + SLM reduce**: `blk0 = lid*bpart` then reduce through SLM (`q4_0_GEMV.h:101-106`), chosen *instead of* a ROWS=4 layout precisely because "grid=N gives only 32 WGs" for their N=32 tensors (`q8_0_GEMV.h:15-17`) | the worst case we measured: `tn`=32 (Qwen3.5/3.6 gate_proj) at 76.5 G-w/s vs 203 at `tn`=256 | folds into E27 |
+| 9 | **Clamp, don't mask, tail token lanes**: "Token lanes past M are clamped onto the last valid row so the gather stays in bounds; their accumulator columns are simply never stored" (`q8_0_GEMV.h:271-275`) | our OOB device *read* faulted the context (`UR_RESULT_ERROR_DEVICE_LOST`); this is branch-free and fault-free | adopt now |
+| 10 | **Feed DPAS with `lsc_gather`, don't reassemble in registers**: one gather yields the VNNI B operand directly because SoA ordering already matches, and "assembling it with strided register moves instead cost more than the DPAS itself saved" (`q8_0_GEMV.h:294-300`) | if E24 adopts DPAS, the operand-prep route decides whether it pays | folds into E24 |
+| 11 | **On-device bucketing recipe**: counts → exclusive scan → scatter into `sorted_token_ids` grouped by expert with `expert_idx[e]` offsets, and the whole thing fused into one kernel that "replaces CPU build_sorted_token_ids + old Scatter kernel" (`moe_ops.h:235-260, 430`); chunks carry `{eid, t0, nt}` (`moe_q4k_ggemv.h:26`) | E23's precondition — the `union(rows)·expert_bytes` byte model only holds if rows are bucketed by expert — and their grouped kernels are exactly the ones that do it | strengthens E23 |
+| 12 | **Envelope for fused decode paths**: `SGL_XPU_GGUF_FUSE_MAX_M` defaults to **64** (sglang/README.md:226), and "each verify step runs at `num_draft_tokens × concurrency` rows, which is the batch the M-tiled ESIMD GEMVs are tuned for — measure at the intended concurrency" (`:166-171`) | tells us where the GEMV-shaped path stops and a GEMM path must start; and that quoting a decode rate at the wrong M is a known failure mode | feeds E21 |
+
+**Considered and rejected for us.** `iq3_s_GEMV.h:1-12` decodes 3-bit weights from *three* parallel
+arrays (`qs`, `qh`, `signs`) plus a 512-entry magnitude table — three streams and a table lookup per
+group, against our one ring stream and an arithmetic byte-sum. Our trellis unpack is the cheaper shape;
+the only thing worth stealing from that file is `merge()` for branchless sign/select in ESIMD.
+
+**Exactness is the real blocker on item 1, and it is a decision, not a discovery.** The whole gate-A
+contract is that decode matches the int32 accumulator bit for bit. XMX DPAS with fp16 inputs and fp32
+accumulation keeps products exact (11×11 bits fits fp32) and stays integer-exact only while
+`|acc| < 2^24` ≈ 16.8 M; measured magnitudes at k=2560 are ~10^6 so it holds comfortably, but the
+adversarial bound `k·510·127` = 2.7×10^8 at k=4096 does not. Two ways to keep the gate: split the
+10-bit byte-sum into two 8-bit terms and use integer DPAS (2× the instructions, still ≪ one dot per
+row once M ≥ 8), or re-baseline gate A to a tolerance for rows ≥ 4 and *state that the B70 and the
+3090/CPU paths then stop agreeing bit-for-bit*, which loses the cross-check the harness relies on.
+Decide this before writing the kernel, not after.
+
 ## 3. Decode kernel (`rows ≤ 8`, i.e. the whole of token generation)
 
 Unit of work: `(expert, projection, 128-output-column band, k-slice, chunk of ≤4 tokens)`. At decode
