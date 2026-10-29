@@ -305,9 +305,12 @@ group, against our one ring stream and an arithmetic byte-sum. Our trellis unpac
 the only thing worth stealing from that file is `merge()` for branchless sign/select in ESIMD.
 
 **Step 1's other result is a design constraint, not a failure: materializing A is a dead end.** With A
-pre-expanded in DRAM (4 B/weight = 10.7× the trellis bytes) the DPAS path spends ~145 µs on A streaming
-alone at E=10, which is why it loses to rev C below rows ≈ 6 there and wins only ×1.6 / ×3.1 at rows
-8 / 16 — *despite* having removed the row term entirely. A shipping kernel must therefore assemble A
+pre-expanded in DRAM (4 B/weight = 10.7× the trellis bytes) the DPAS path's marginal cost is
+**2.17 µs/MiB = 484 GB/s** measured across E = 1…10 (72 % of the copy peak), with a ~12 µs
+byte-independent floor — which is why it loses to rev C below rows ≈ 6 at E=10 and wins only ×1.6 / ×3.1
+at rows 8 / 16, *despite* having removed the row term entirely. Swapping 4 B/weight for the trellis's
+0.375 removes ~135 of rev D's ~147 µs at E=10/rows=4, so the step-2 ceiling is tens of microseconds
+against rev C's 112.5 µs. A shipping kernel must therefore assemble A
 from trellis bytes in registers/SLM, and step 2's first reported number should be **assembly cost in
 slots per weight**, not a rate: the prize (≈20–30 µs against rev C's 112.5 µs at E=10/rows=4) exists
 only if that cost is under ~2 slots/weight — exactly the line llm-scaler wrote about strided register
