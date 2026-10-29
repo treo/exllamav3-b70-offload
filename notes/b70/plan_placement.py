@@ -142,7 +142,7 @@ def analyse(model_dir, layers, a):
     return dict(model=os.path.basename(model_dir.rstrip("/")), layers=n, e=rows[0][1], topk=topk,
                 eb=eb, total=c["total"], h=h, sigma=sig, cpu_ms=cpu_ms, fill_s=fill_s, n_res=n_res,
                 hmin=hmin, cpu_use=cpu_use, dev_use=dev_use, admit=admit,
-                resident=int(b70_bytes // eb) + int(gpu_bytes // eb),
+                resident=min(rows[0][1], int(b70_bytes // eb) + int(gpu_bytes // eb)),
                 worst=max(per_layer.values()) / 1000.0, worst_layer=max(per_layer, key=per_layer.get))
 
 

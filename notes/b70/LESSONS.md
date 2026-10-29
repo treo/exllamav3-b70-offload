@@ -290,7 +290,44 @@ Three siblings of the same mistake, all found only after writing the first versi
 The general rule these probes should have enforced on themselves: before multiplying a measured rate by a
 quantity, verify that the measurement was taken *at that quantity*.
 
-## 20. When a model and a measurement disagree by 30×, check the model's units first
+## 20. "The device is busy" is two different claims; conflating them gave the 3090 an 8× too small expert slice
+
+Asked how the 3090's non-expert work affects placement, the intuitive answer is "little VRAM and little
+bandwidth left, so few experts, and they had better be cheap to reach". Neither half survived the byte
+bills:
+
+* **Capacity** — the scary number was Qwen3.8's **49.91 GiB of per-layer n-gram embeddings**, which
+  would leave no room at all. They are never resident: `modules/row_table.py` row-gathers them from
+  host/disk (`ngram_gather_cpu`). Table bytes are capacity on disk, not on the card, and a handful of
+  rows is the only traffic. What must actually be resident is 4.05 GiB of streamed weights plus 24
+  KiB/token of KV (12 of 48 layers are full attention, at 2 KV heads) plus a 108 MiB-per-sequence linear
+  state. Free for experts: **~16.6 GiB**, not the 2 GiB the plan had been using — worth `h` 97.6 → 100 %
+  on Qwen3.8 and 70.8 → 81.1 % on GLM, a bigger effect than every ordering rule combined.
+* **Traffic** — the same bill says the parent streams 86.4 MiB/layer = 97 µs of a 250 µs window, so at
+  b=1 the 3090 is ~39 % bandwidth-duty: latency-bound, with bandwidth to spare. "Busy" and "full" are
+  unrelated here.
+
+The trap generalises: when reasoning about a memory hierarchy, ask **separately** whether a byte range
+must be resident and whether it is read per token. Big lookup tables (n-gram, embeddings, codebooks,
+MoE router caches) break the intuition that resident bytes ≈ streamed bytes, and either equality assumed
+as the other produces confident, wrong capacity plans.
+
+## 21. If an analysis tool reports "no difference" everywhere, debug the tool before believing the finding
+
+The first version of `plan_parent_budget.py` printed `tie` for all 54 placement comparisons. The
+plausible reading was "placement order does not matter", which is the kind of conclusion that gets
+written into a design and never revisited. The actual cause was a `*1000` slip in the MiB@GB/s→µs
+helper, which shrank every worker term ~1000× so that `max(parent, b70, cpu)` was always the parent.
+The tell was structural, not numerical: **the choice of `S_g` slots changed nothing**, and a model whose
+input cannot affect its output is a broken model, not a null result.
+
+Two habits came out of it: the tool now runs a `selftest()` asserting five known conversions
+(106 MiB @ 292 GB/s = 380 µs, etc.) before printing anything — ten lines that would have caught this on
+the first run — and any sweep where a varied parameter has zero effect is treated as a bug report on the
+script, not as a finding about the system. After the fix the same code shows 13 % gaps in one direction
+and 20 % in the other, which is a far more interesting and far more believable answer.
+
+## 22. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed

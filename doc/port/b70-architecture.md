@@ -48,17 +48,91 @@ oracle** for the new kernels.
 3090 and the B70:
 
 ```
-   S_g   home = 3090 VRAM      ~936 GB/s      quota: whatever the KV/weight trade leaves
+   S_g   home = 3090 VRAM      936 GB/s peak   quota: COMPUTED, see 2.1a (16.6 GiB on Qwen3.8/GLM at
+                                               4k ctx, not the 2 GiB an earlier draft assumed)
    S_b   home = B70 VRAM       ~608 GB/s peak <- the new tier, filled to capacity
    S_c   home = host DRAM      ~45 GB/s CPU   the arena; also the source for a 655 us upload to S_b
    S_d   home = NVMe           ~5.0 GB/s [M]  read through a bounded pinned ring when needed
 ```
 
-Disjointness is the point, not an oversimplification: the two devices' expert-read rates are within 1.5×
-of each other, so a replica of an expert on both cards buys nothing except capacity that neither
-tier has — every GiB duplicated is a GiB that cannot hold a *different* expert, and on an oversized
-model that GiB is the difference between the CPU computing a pick in 199 µs and a device computing it
-in 22 µs. Placement is therefore a **partition problem over three (or four) homes**, sized by each
+#### 2.1a Pricing the parent's other work: two bills, not one
+
+The 3090 is also running attention, the linear-attention states, the shared expert, the router and the
+sampler, so `S_g`'s quota cannot be assumed. `plan_parent_budget.py` splits that into the two things
+"the 3090 is busy" actually means, because they pull in opposite directions (**[M]**, byte bills from
+the shard headers; `out_parent_budget.txt`):
+
+**CAPACITY bill — what must be resident.** Both reference models are hybrid linear-attention with
+compressed KV (Qwen3.8: 36 of 48 layers linear, 12 full at 2 KV heads → 24 KiB/token, 108 MiB state per
+*sequence*; GLM: 34 of 45 linear, 11 MLA-sparse with `kv_lora_rank` 512 → 22 KiB/token, 136 MiB state),
+and the tables that look terrifying are not resident at all: Qwen3.8 carries **49.91 GiB of per-layer
+n-gram embeddings** plus embed/lm_head, which `modules/row_table.py` row-gathers from host/disk
+(`ngram_gather_cpu`) — capacity on disk, a few rows per token in traffic. What must actually sit in the
+24 GiB is 4.05 GiB (Qwen3.8) / 5.67 GiB (GLM) of streamed non-expert weights, plus KV/state, plus
+reserve → **~16.6 GiB free for experts at 4k ctx, b=1**, i.e. 265 of 512 slots per layer on Qwen3.8 and
+42 of 288 on GLM. The 2 GiB this plan previously assumed was a guess, and it was 8× too stingy:
+
+| `S_g` | Qwen3.8 `h` | CPU ms/token | GLM `h` | CPU ms/token |
+|---|---|---|---|---|
+| 2 GiB (old assumption) | 97.6 % | 0.42 | 70.8 % | 19.6 |
+| 8 GiB | 99.6 % | 0.07 | 75.5 % | 16.4 |
+| **16.6 GiB (computed)** | **100.0 %** | **0.00** | **81.1 %** | **12.6** |
+
+That single correction moves GLM's hit rate by 10 points and its CPU residue by 35 % — more than any
+hot/cold ordering choice does — and it makes Qwen3.8 fully homed with ~12 GiB of *surplus* capacity,
+which reopens replication as an option (below).
+
+**TRAFFIC bill — what competes for bandwidth.** A decode token on Qwen3.8 streams 86.4 MiB/layer of
+non-expert weights = **96.8 µs of the ~250 µs parent window**, i.e. the parent runs at ~39 % of its own
+peak bandwidth at b=1. So the 3090 is *latency-bound, not bandwidth-bound*, at small batch: expert reads
+there are cheap in bytes/second terms and the 3090 remains the faster expert home even while busy
+(~576 GB/s nominally spare versus the B70's measured 292). Nobody has measured that spare, because the
+estimate assumes perfect overlap — E18 does.
+
+**So what does the parent's other work do to placement?** It changes the objective, not the ordering.
+Costs on `S_g` are *serial* with the parent's own stream; `S_b` and `S_c` run concurrently. The right
+objective is therefore the per-layer maximum, not the sum the earlier draft minimised:
+
+```
+wall/layer = max( T_parent + picked_bytes(S_g)/936 ,  picked_bytes(S_b)/rate_b ,  picked_bytes(S_c)/47.4 )
+```
+
+and this is where the "distribute the hot experts across both accelerators, still disjoint" idea lands.
+`plan_parent_budget.py` evaluates it as an LPT greedy (walk the hot list once, give each expert to the
+home whose resulting term is smallest) against the frequency-ordered cut (`P_order`, the plan's rule):
+
+| model | rows | `S_g` slots | `P_order` µs/layer | `P_lpt` µs/layer | winner |
+|---|---|---|---|---|---|
+| Qwen3.8 | 1 | 30 | 253 | 253 | tie (parent-bound) |
+| Qwen3.8 | 8 | 30 | 314 | **278** | fair split, +13 % |
+| Qwen3.8 | 8 | 120 | 304 | **299** | fair split, +2 % |
+| GLM | 1 | 30 | **571** | 623 | ordered, +9 % |
+| GLM | 4 | 120 | **695** | 865 | ordered, +20 % |
+
+Which is a genuinely mixed answer, and the reason is visible in the objective: **fair-splitting wins
+when the B70 is the binding worker** (Qwen3.8 at b≥4, where the 3090's spare rate beats it) and **loses
+when the CPU is binding** (every GLM row above, where `S_c` still carries 19–30 % of picks): spreading
+hot experts over both VRAM homes necessarily leaves *colder* experts to the CPU, and the CPU term is
+`bytes/47.4` — the most expensive byte on the box. So the rule is not "hottest on the 3090" and not
+"parity"; it is *minimise the maximum term*, which under a CPU residue means pack the fast homes with
+the hottest first, and once the residue is gone (Qwen3.8 with the computed slice: `h` = 100 %) means
+balance the two VRAM homes by load, which is what `P_lpt` does.
+
+The measured rate ratio also kills the original argument against replication. §2.1 said the homes'
+read rates were "within 1.5×" — that was spec-to-spec (936/608); footprint-matched they are 3.2×
+apart on Qwen3.8 and 7× on GLM. Disjointness still holds for GLM (no spare capacity to duplicate
+with), but Qwen3.8's ~12 GiB surplus makes a *third* option real: replicate the hottest few experts on
+both cards and steer each pick to the idle home, which decouples placement from load-balancing entirely
+at the cost of capacity. It is not adopted here — E14 measures whether the surplus survives real
+context lengths, and E20 would be the gate for the steering logic.
+
+
+Disjointness is the default, not an oversimplification: with a CPU residue to serve, every GiB
+duplicated is a GiB that cannot hold a *different* expert, and on an oversized model that GiB is the
+difference between the CPU computing a pick in 199 µs and a device computing it in 31 µs. (The earlier
+justification — that the two devices read at within 1.5× — was spec-to-spec and does not survive
+measurement; see 2.1a.) Placement is therefore a **partition problem over three (or four) homes**,
+sized by each
 home's byte budget, and — for `S_g` — by the existing autosplit weight-versus-KV trade
 (`exllamav3/model/model_ls.py`, per-module `autosplit_prepare`/`autosplit_extra_measure`) now
 evaluated with the B70 as the alternative home for experts rather than the disk.
@@ -324,11 +398,17 @@ FOR ONE LAYER, ONE STEP, homes running in parallel:
   layer_cost      = max( parent_gpu_work_layer,
                          max_D [ notify + link_bytes(D)/link_rate + compute(D) ] )
 
-PLACEMENT (offline, per layer, two cut points on the frequency-sorted permutation):
-  minimise  sum_D [ E[compute(D)] / rate_D + E[rows_touched(D)] * payload / link_rate ]
-  subject to bytes(S_g) <= VRAM_3090 - KV - dense   and   bytes(S_b) <= VRAM_b70, bytes(S_c) <= DRAM_cap
-  frequency order within a layer is optimal for the compute term (equal bytes per expert, uniform
-  rate per home); sigma (the spanning penalty) is the only reason to deviate from it (..._COLICATE).
+PLACEMENT (offline, per layer, cut points on the frequency-sorted permutation; objective per 2.1a):
+  minimise   max( parent_gpu_work_layer + compute(S_g)/gpu_rate,          <- SERIAL with the parent
+                  compute(S_b)/b70_rate,                                  <- concurrent
+                  compute(S_c)/cpu_rate )                                 <- concurrent
+  + sum_D rows_touched(D) * payload / link_rate                            (the spanning term, sigma)
+  subject to bytes(S_g) <= VRAM_3090 - KV - state - streamed-non-expert - reserve
+             bytes(S_b) <= VRAM_b70, bytes(S_c) <= DRAM_cap
+  frequency order within a layer is optimal for the compute term while any CPU residue exists (equal
+  bytes per expert, uniform rate per home); once the residue is gone the objective becomes a pure
+  load-balance between two VRAM homes and P_lpt beats P_order (2.1a). sigma (the spanning penalty) is
+  the only other reason to deviate from frequency order (..._COLICATE).
 
 MIGRATION / MISS DECISION - an expert with no device home, c uses predicted in the window:
   leave it on the CPU      : c * bytes / cpu_rate                     (moves nothing, ever)
@@ -431,8 +511,11 @@ them):
 | Qwen3.8-FN @6.05 | 48 × 512 | 3.52 MiB | 84.38 GiB | 37.8 % | 205 of 512 |
 | GLM-5.3-Flash @3.05 | 43 × 288 | 9.00 MiB | **108.84 GiB** | 29.3 % | 91 of 288 |
 
-¹ from `plan_placement.py --b70-gib 31.9 --gpu-gib 2`, i.e. the B70 slice plus a 2 GiB slice on the
-3090, divided evenly in bytes across the model's MoE layers.
+¹ from `plan_placement.py --b70-gib 31.9 --gpu-gib 2`. **The 2 GiB slice is now known to be too small**
+— `plan_parent_budget.py` prices the parent's real capacity bill at ~16.6 GiB of free VRAM on these
+hybrid-KV checkpoints, which lifts Qwen3.8@2.68 to `h` = 100 % and GLM to 81.1 % (see 2.1a). The table
+keeps the 2 GiB column because that is the configuration every figure in this section was derived
+with; re-derive before sizing hardware.
 
 Byte residency alone says almost nothing useful — what matters is how much *pick mass* the resident
 experts carry, and that is the `h` column of the planner block below. The pair that proves it: Qwen3.8
@@ -754,7 +837,8 @@ CLI aliases in `config.py`). Family A/B/C = shape / policy / implementation, per
 | `-mba` / `EXL3_MOE_B70_AUTO` | B | 0 | size `S_b` to fill B70 VRAM with the experts that do not fit the 3090 |
 | `-mbl N` / `EXL3_MOE_B70_LAYERS` | B | 0 | restrict the B70 split to the first N eligible layers |
 | `EXL3_MOE_B70_SLOTS`, `…_SLOT_ROWS` | A | 4, 256 | ring depth and rows per job (prefill chunking; decode is unaffected because one job is one step) |
-| `-mbg N` / `EXL3_MOE_GPU_SLICE` | A | as today | experts kept on the 3090; with disjoint homes this *is* the row-routing knob (§3 P4), since a row's destination set follows from membership |
+| `-mbg N` / `EXL3_MOE_GPU_SLICE` | A | `auto` | experts kept on the 3090; with disjoint homes this *is* the row-router's first cut. `auto` = 24 GiB − streamed non-expert − KV(ctx)×rows − state×rows − reserve, computed at load by the planner (2.1a) rather than assumed: 16.6 GiB on both reference models at 4k ctx |
+| `EXL3_MOE_B70_BALANCE` | B | `order` | cut-point rule: `order` = frequency-sorted fills (optimal while a CPU residue exists), `lpt` = minimise the per-layer maximum (wins once the residue is gone, +13 % measured for Qwen3.8 at b=8). Chosen per model by the planner from its own `h` |
 | `EXL3_MOE_B70_SLICE_BYTES` / `…_GPU_SLICE_MB` | A | fill | byte budgets per home, the quantities the cut points are actually derived from (per layer: §4a rule 2) |
 | `EXL3_MOE_B70_MISS_POLICY` | B | `cost` | `cost` = admit iff predicted uses in the window beat the §4 break-even; `never` = static homes only; `always` = admit on first miss (measures the trap in §4a's table) |
 | `EXL3_MOE_B70_COLICATE` | B | `freq` | placement order within a layer: pure frequency (optimal for the compute term) or a co-location pass that trades rate for a lower spanning fraction `σ` (E13 decides whether it pays) |
@@ -887,7 +971,7 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | payload: DMA in, fenced kernel stores out | closed | 258–283 µs vs ~2 µs for the same bytes **[M]** | nothing |
 | no `sycl::atomic_ref` on the shared region, at any scope | closed | `UR_RESULT_ERROR_DEVICE_LOST` repro (`probe_stores.cpp` case 7) | nothing |
 | explicit `i[0]` indexing + every-word assertions in kernel tests | closed | silent zero-store bug, `LESSONS` 4a | nothing |
-| three disjoint homes, two cut points, no replication | closed by argument + measurement | 1.5× rate ratio; `plan_placement.py` shows replication would cost residency it cannot pay | a model whose routing is so peaked that duplicate hot experts beat the capacity loss (E14 would show it) |
+| three disjoint homes, two cut points, no replication | **weakened**: holds where capacity is scarce, not where it is surplus | the old 1.5× rate premise was spec-to-spec; footprint-matched the homes are 3.2× (Qwen3.8) to 7× (GLM) apart. Disjointness now rests on the CPU residue costing `bytes/47.4`, which still holds for GLM. `plan_parent_budget.py` also shows Qwen3.8 running `h` = 100 % with ~12 GiB spare **[M]** | E20: replicating the hottest experts and steering per pick, if surplus survives real context lengths (E14) |
 | native tile layout on the B70, no repack | **decided on engineering grounds, not closed by measurement** | banded/native 0.96–1.05× over 2 geometries × 6 footprints: no consistent sign, and the probe's configuration variance exceeds the effect **[M]** | E4c: a *consistent* win in the real GEMV at decode footprints, large enough to pay for a load-time repack and for losing byte-interchangeability with the 3090 kernels |
 | locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | clustered/native 1.08–1.99×, never below 1.08 **[M]** | E4 measuring the real GEMV below 200 GB/s |
 | streamed/staged prefill dead for `S_b`, live for `S_c` | closed | ~200-row crossover from measured bytes/rates | a model with far more skewed routing (E7′ measures) |
@@ -903,6 +987,9 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | …and the verdict **revised** by the parallel-max view | per-worker busy time is real but does not set throughput | `max(T_parent, T_b70/N, T_cpu)` → 51 → 79 → 79 tok/s, so the 3rd card buys nothing unless `T_parent` < 135 µs | E10 (GLM's `T_parent`); E4 below 64 MiB/launch, because the 2-card case presents 32 MiB and that part of the curve is unmeasured |
 | decode rates must be footprint-matched before use | adopted as a rule | `plan_operating_point.py`: 14.3 MiB/layer (Qwen3.8 b=1) → 292 GB/s → 51 µs; 50.9 MiB (GLM b=1) → 132 GB/s → 405 µs **[M]** | any estimate multiplying a GB/s figure by layer bytes without naming the footprint it measured that rate at (`LESSONS` 19) |
 | "the offload hides at decode" | true for Qwen3.8 at b ≤ 4, **not** general | margin 4.9× → 1.3× → 0.5× over b = 1 → 4 → 8, from real selection counts | E9's batch axis; if the measured crossover is below b=4, the decode path is a small-batch optimization and the docs must say so |
+| `S_g` quota = whatever the KV trade leaves (2 GiB assumed) | **replaced by a computed budget** | byte bills from shard headers + config: 4.05/5.67 GiB streamed non-expert, 22–24 KiB KV/token, 108–136 MiB state/sequence, and the 49.91 GiB n-gram tables are host row-gathers, not VRAM → ~16.6 GiB free at 4k ctx **[M]** | E14 at the deployment's ctx/rows; E18 if the traffic half of the bill is wrong |
+| placement objective = minimise summed compute | **replaced: minimise the per-layer maximum**, with `S_g` serial and `S_b`/`S_c` concurrent | 2.1a; `P_order` vs `P_lpt` differ by 0 % (Qwen3.8 b=1) to +20 % (GLM, ordered better) depending on regime **[P, from measured rates]** | E19 |
+| hottest-first within a layer | retained **while a CPU residue exists**, not as a universal rule | spreading hot experts over both VRAM homes leaves colder ones to `bytes/47.4`, the most expensive byte on the box (GLM: `order` wins 9–20 %) | E19 once `h` reaches 100 % and the residue term vanishes |
 | every knob default except the rate-derived ones | provisional | — | phases 1–4 gates |
 
 Nothing else in this document is a decision: the remaining prose is rationale, and rationale does not
