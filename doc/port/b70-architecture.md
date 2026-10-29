@@ -627,10 +627,14 @@ measured rate curve at the matched footprint:
   dispatch is **dp4a at b=1 · rev G+X at rows 2–8 · rev H+X from rows ≈ 16**, and b=16 layer time falls to
   173.1 µs from 205.5. The ISA census behind it (once `NEO_CACHE_PERSISTENT=0` let the dumps happen):
   rev G+X 906 static instructions, 48 `store.slm.d32`, 108 syncs, 11 spill references; rev H+X 591, **0 SLM
-  stores, 20 syncs, 0 spills**. Rev H's largest remaining class is `mov` (141) — moving products into the
-  DPAS operand image — so the next lever after this is B-image construction, not the unpack arithmetic, and
-  at ~0.32 instructions/weight the DRAM floor is close enough that bytes and locality matter more than
-  further instruction cuts.
+  stores, 20 syncs, 0 spills**. Rev H's largest opcode class is `mov` (141), i.e. moving products into the DPAS
+  operand image, and the XMX arithmetic itself is only 0.8–1.8 µs of a ~39 µs kernel. The tempting inference —
+  at ~0.32 instructions/weight we must be near the DRAM floor, so bytes and locality are the next lever — is
+  **refuted by measurement** (item 13s): rev H is flat across a 2.5× trellis-K byte range (39.1/39.1/39.3 µs at
+  K = 2/3/5 on identical weight counts) and unmoved by prefetch depth 2→4. So the bound is per-tile data
+  movement inside the thread — the lane-duplicated tile load (1536 B of LSU traffic for 96 B of data) and the
+  `mov`-heavy operand-image build — and that, not byte count or XMX throughput, is where the remaining
+  ~4× headroom over the DRAM floor lives.
 * **The planning artifacts were re-derived on the measured cost model, and the old one was 2.4× optimistic.**
   `plan_operating_point.py`, `plan_concurrency.py` and `plan_kernel_split.py` computed B70 time as
   `expert_bytes / rate(matched footprint)` off the memcpy-shaped rate curve. That model is replaced by
