@@ -522,6 +522,35 @@ measured rate curve at the matched footprint:
   layer's expert bytes divide linearly across cards: GLM's 405 µs/layer becomes ~202 with two cards and
   ~135 with three. The §4a card sweep (19.6 → 6.9 → 0.9 ms/token of *CPU* residue) was about hit rate
   alone; this is an independent reason to add cards for exactly the models that need them.
+* **Prefill is memory-bound at every chunk size the parent can feed, which reshapes §4.** The XMX
+  crossover is a ratio of two measured peaks — (367 TOPS / 2) ÷ 674 GB/s = **272 MAC per byte**, so a
+  GEMM only becomes compute-bound once ~272 rows hit the *same* expert. Feeding each expert's real pick
+  frequency into chunk sizes (**[M]** `plan_concurrency.py`, `out_concurrency.txt`): at R = 2048 the
+  hottest Qwen3.8 expert receives 41–522 rows depending on recipe/profile, and **0–13 of 512 experts
+  cross 272**; only at R = 8192 do 60–115 experts qualify. So the DPAS/XMX routes are an opportunistic
+  per-expert path for a handful of very hot experts, not the structure of the prefill kernel — and the
+  planner can predict the eligible set at load from the profile and the chunk size, which is the right
+  way to bucket.
+* **Concurrency moves the binding worker onto the B70, and only the B70.** Aggregate throughput with all
+  three terms on the rows axis (Qwen3.8, 4k ctx; `out_concurrency.txt`):
+
+| rows | parent µs/layer | B70 µs/layer | binds | tok/s @2.68 | tok/s @6.05 |
+|---|---|---|---|---|---|
+| 1 | 250 | 56 / 141 | **parent** | 83 | 83 |
+| 4 | 272 | 216 / 534 | parent | 307 | 156 |
+| 8 | 301 | 543 / 1139 | **B70** | 307 | 146 |
+| 32 | 476 | 1533 / 2708 | B70 | 435 | 246 |
+| 128 | 1175 | 2737 / 4363 | B70 | 974 | 611 |
+| 256 | 2107 | 3067 / 4919 | B70 | 1739 | 1084 |
+
+  The parent's rows-slope is gentle — fixed overhead ~130–146 µs plus 86–101 MiB of batch-independent
+  weights plus only ~6.5 MiB per sequence-layer of state and KV — so it is overtaken by b≈4–8 and never
+  retakes the lead. Consequences: (a) the b=1 "hidden with 5× margin" claim is the *one* point where the
+  offload is free; (b) past it, aggregate throughput is `rows / (layers × union(rows)·h·eb / rate)` and is
+  a property of the card's byte rate, so N cards multiply it almost linearly while a faster kernel does
+  not (the bytes are already deduplicated — an expert is read once per layer per step however many rows
+  picked it); (c) at b=8 the 6.05 recipe *loses* throughput versus b=4 (146 vs 156 tok/s) because the CPU
+  residue term is climbing alongside the B70's — concurrency does not rescue a model with a residue.
 * Prefill is link-bound at ~2048 rows unless `sz_out` drops to fp16 or the row split keeps more work
   on the 3090; the model gives the crossover for both, and the harness measures which the box lands on.
 
@@ -1028,6 +1057,9 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | placement objective = minimise summed compute | **replaced: minimise the per-layer maximum**, with `S_g` serial and `S_b`/`S_c` concurrent | 2.1a; `P_order` vs `P_lpt` differ by 0 % (Qwen3.8 b=1) to +20 % (GLM, ordered better) depending on regime **[P, from measured rates]** | E19 |
 | hottest-first within a layer | retained **while a CPU residue exists**, not as a universal rule; the boundary is **recipe-dependent** | spreading hot experts over both VRAM homes leaves colder ones to `bytes/47.4`, the most expensive byte on the box (GLM: `order` wins 9–20 %). Across five Qwen3.8 recipes: `lpt` wins +3…+9 % at 2.05/2.68/4.05/5.05 bpw, `order` wins **+43 % at 6.05 bpw**, the only one with a real residue **[M]** | E19 |
 | §2.1a's premises are recipe-general on Qwen3.8 | checked, not assumed | matched rate band 207–295 GB/s at K = 2.5–6.0; parent duty 31–45 % at every quant; residency falls 512 → 104 slots/layer only through `expert_bytes` **[M]** | a recipe that scaled the streamed non-expert tensors with bits — then the parent's duty would climb with quantisation and the "spare bandwidth on the 3090" premise would break |
+| decode figures are b=1 figures | stated, and extended to a rows axis | `plan_concurrency.py`: parent binds at b ≤ 4, B70 binds from b≈4–8 to 256; aggregate 83 → 1739 tok/s (2.68 bpw) **[P, measured rates]** | E21 — flattening earlier or lower than predicted means per-step byte cost is worse than the footprint-matched rate implies |
+| prefill is fed to XMX as a chunk-wide GEMM | **rejected**: prefill is memory-bound at realistic chunks | 272 MAC/byte crossover vs 41–522 rows on the hottest expert at R = 2048 → 0–13 of 512 experts qualify **[M]** | E22 measuring the real compute-bound threshold; if it is far below 272 the DPAS path is leaving throughput on the table |
+| concurrency rescues a residue-bearing model | no | 6.05 bpw goes 156 → 146 tok/s from b=4 → 8: the CPU residue climbs with the B70 term **[P]** | E21, or a placement change that removes the residue at those batch sizes |
 | every knob default except the rate-derived ones | provisional | — | phases 1–4 gates |
 
 Nothing else in this document is a decision: the remaining prose is rationale, and rationale does not

@@ -311,6 +311,13 @@ The general shape of both: a metric that saturates at a bound (peak bandwidth, p
 informative near that bound, and the fix is to print the underlying count alongside it, not to trust the
 normalised value.
 
+Same class, found the same week in `plan_concurrency.py`: the state helper returns KV **per token summed
+over all attention layers**, and using it as a per-layer figure inflated the parent's KV term 48-fold,
+which made the parent look like it needed 29 ms/layer at 256 rows and dominated every conclusion. The
+assertion that caught nothing was `fixed > 0` after calibrating to the measured T_layer — the model can
+be internally consistent and still be reading a summed quantity as a per-layer one. When a term dwarfs
+the others by roughly a factor equal to a layer or head count, check which axis it was summed over.
+
 ## 21. "The device is busy" is two different claims; conflating them gave the 3090 an 8× too small expert slice
 
 Asked how the 3090's non-expert work affects placement, the intuitive answer is "little VRAM and little

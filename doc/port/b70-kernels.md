@@ -33,7 +33,7 @@ same inputs).
 |---|---|---|
 | VRAM read, measured on this exact access pattern | **132–292 GB/s scattered, 216–558 GB/s clustered** (608 GB/s spec; `probe_rates`, **[M]**; the range is working-set size, 64 MiB–2 GiB — `out_rates_footprint.txt`) | 351–919 G-weights/s scattered at K = 2.5–3.0; the spread is *ordering* and *footprint*, not layout — §3a |
 | lanes × clock | 4096 × 2.8 GHz = 1.15·10¹³ lane-ops/s | the real unpack density (+47 lane-inst per 32-lane word) costs 0.1–4.4 % of bandwidth at decode-like footprints, 14 % at a 64 MiB one — decode sits on the bandwidth side of that line, with less margin than the first measurement suggested |
-| XMX | 183 TFLOP/s fp16, 367 TOPS int8 **[M]** (`b70-bench`) | prefill is XMX-bound only above ~64 rows/expert |
+| XMX | 183 TFLOP/s fp16, 367 TOPS int8 **[M]** (`b70-bench`) | against the measured 674 GB/s copy peak that is **272 MAC per byte**, so a GEMM becomes compute-bound only at **~272 rows hitting the same expert** — see §4a: at a 2048-token chunk the hottest Qwen3.8 expert sees 41–522 rows and 0–13 of 512 experts qualify, so prefill is memory-bound in practice and XMX is an opportunistic per-expert path, not the default |
 | SLM / L1 | 128 KiB per Xe core (driver-reported **[M]**), 18 MiB L2 | a Qwen3.8 decode job reads ~12 MiB, comparable to L2 — see §3a item 4 |
 | subgroup | 16 and 32; DPAS wants 16 | lane = output column = exactly the trellis permutation (§2.3) |
 

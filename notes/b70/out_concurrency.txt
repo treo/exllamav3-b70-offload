@@ -1,0 +1,81 @@
+scale selftest ok (MiB/GB/s -> us)
+XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte -> a GEMM becomes compute-bound at ~272 rows hitting the SAME expert
+
+Qwen3.8 2.05 bpw: eb 1.215 MiB, h 100.0 %, parent bill 69 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 165 us
+   rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
+      1    10.0      250       44        0  parent    12.00      83    1.0x       1.0
+      2    19.4      257       85        0  parent    12.35     162    1.9x       1.0
+      4    36.4      272      159        0  parent    13.05     307    3.7x       1.1
+      8    65.1      301      307        0     B70    14.74     543    6.5x       1.2
+     16   107.1      359      680        0     B70    32.65     490    5.9x       1.5
+     32   158.5      476      939        0     B70    45.06     710    8.5x       2.0
+     64   207.6      709     1155        0     B70    55.46    1154   13.8x       3.1
+    128   243.0     1175     1331        0     B70    63.88    2004   24.0x       5.3
+    256   262.4     2107     1426        0  parent   101.13    2531   30.4x       9.8
+
+Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
+   rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
+      1    10.0      250       56        0  parent    12.00      83    1.0x       1.0
+      2    19.8      257      111        0  parent    12.35     162    1.9x       1.0
+      4    38.4      272      216        0  parent    13.05     307    3.7x       1.0
+      8    72.9      301      543        0     B70    26.04     307    3.7x       1.1
+     16   131.8      359      990        0     B70    47.50     337    4.0x       1.2
+     32   221.1      476     1533        0     B70    73.58     435    5.2x       1.4
+     64   329.2      709     2169        0     B70   104.12     615    7.4x       1.9
+    128   428.2     1175     2737        0     B70   131.36     974   11.7x       3.0
+    256   488.7     2107     3067        0     B70   147.23    1739   20.9x       5.2
+
+Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
+   rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
+      1    10.0      250       81       28  parent    12.00      83    1.0x       1.0
+      2    19.8      257      161       55  parent    12.35     162    1.9x       1.0
+      4    38.4      272      333      107     B70    16.00     250    3.0x       1.0
+      8    72.9      301      725      203     B70    34.79     230    2.8x       1.1
+     16   132.0      359     1315      367     B70    63.13     253    3.0x       1.2
+     32   221.5      476     1872      616     B70    89.88     356    4.3x       1.4
+     64   331.3      709     2935      922     B70   140.90     454    5.5x       1.9
+    128   430.1     1175     4006     1197     B70   192.31     666    8.0x       3.0
+    256   490.0     2107     4549     1364     B70   218.35    1172   14.1x       5.2
+
+Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill 94 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 138 us
+   rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
+      1    10.0      250      109        0  parent    12.00      83    1.0x       1.0
+      2    19.2      257      209        0  parent    12.35     162    1.9x       1.0
+      4    35.3      272      464        0     B70    22.29     179    2.2x       1.1
+      8    60.9      301      899        0     B70    43.17     185    2.2x       1.3
+     16    94.8      359     1386        0     B70    66.53     241    2.9x       1.7
+     32   129.9      476     1803        0     B70    86.55     370    4.4x       2.5
+     64   158.7      709     2116        0     B70   101.54     630    7.6x       4.0
+    128   177.6     1175     2326        0     B70   111.66    1146   13.8x       7.2
+    256   190.3     2107     2486        0     B70   119.31    2146   25.7x      13.5
+
+Qwen3.8 6.05 bpw: eb 3.608 MiB, h 90.4 %, parent bill 101 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 129 us
+   rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
+      1    10.0      250      141       77  parent    12.00      83    1.0x       1.0
+      2    19.7      257      276      151     B70    13.27     151    1.8x       1.0
+      4    38.0      272      534      292     B70    25.63     156    1.9x       1.1
+      8    71.2      301     1139      546     B70    54.69     146    1.8x       1.1
+     16   126.2      359     1861      968     B70    89.33     179    2.1x       1.3
+     32   203.9      476     2708     1565     B70   130.00     246    3.0x       1.6
+     64   288.2      709     3589     2212     B70   172.25     372    4.5x       2.2
+    128   358.1     1175     4363     2749     B70   209.42     611    7.3x       3.6
+    256   405.2     2107     4919     3110     B70   236.13    1084   13.0x       6.3
+
+Prefill: a chunk of R tokens touches (almost) all E experts per layer, so the B70's byte
+cost per LAYER is capped at E*expert_bytes regardless of R, while its MAC cost grows with R*topk. With
+the 272 rows-per-expert crossover above, a 2048-token chunk at topk 10 over 512 experts averages 40
+rows/expert - still 7x memory-bound; 8192-token chunks average 160, still under. So on this model class
+the XMX routes do not become the limit for any chunk size the 3090 could feed in one pass, and the
+binding quantity for prefill is the same one as for decode: bytes per layer per step, plus the link.
+Prefill and the XMX routes: rows/expert averaged over the union is the wrong statistic,
+because routing is peaked - the hot experts are exactly the ones a chunk concentrates. The table below
+takes each expert's real pick frequency and asks how many rows of a chunk of R tokens land on it, then
+counts how many experts cross the 272 rows/expert crossover where FP/int8 matrix throughput starts to
+bind. Two-speed prefill (XMX for the experts above the line, streaming GEMV for those below) is what the
+numbers support; a single chunk-wide GEMM is not.
+
+  2.05 bpw (topk 10, E 512):   R=512: max    131 rows/expert,   0 of 512 above 272  |   R=2048: max    522 rows/expert,   3 of 512 above 272  |   R=8192: max   2088 rows/expert, 112 of 512 above 272  |
+  2.68 bpw (topk 10, E 512):   R=512: max     41 rows/expert,   0 of 512 above 272  |   R=2048: max    164 rows/expert,   0 of 512 above 272  |   R=8192: max    655 rows/expert,  60 of 512 above 272  |
+  4.05 bpw (topk 10, E 512):   R=512: max     45 rows/expert,   0 of 512 above 272  |   R=2048: max    180 rows/expert,   0 of 512 above 272  |   R=8192: max    722 rows/expert,  59 of 512 above 272  |
+  5.05 bpw (topk 10, E 512):   R=512: max    111 rows/expert,   0 of 512 above 272  |   R=2048: max    445 rows/expert,  13 of 512 above 272  |   R=8192: max   1779 rows/expert, 115 of 512 above 272  |
+  6.05 bpw (topk 10, E 512):   R=512: max     59 rows/expert,   0 of 512 above 272  |   R=2048: max    235 rows/expert,   0 of 512 above 272  |   R=8192: max    942 rows/expert, 102 of 512 above 272  |
