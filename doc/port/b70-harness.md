@@ -91,6 +91,8 @@ each as a test rather than a note:
 | device loss surfaces as an exception, not a hang | kill the engine mid-generation / inject `ZE_RESULT_ERROR_DEVICE_LOST`; the parent must raise within one `begin_pass` and leave no stream parked (mirrors the existing `EXL3_MOE_MEMOPS=0` timeout tests) |
 | a resident engine (T2) releases the card | unload/reload and a second process must get the whole device back; measure the drain time (`probe_resident.cpp` prints it: 21–371 µs) |
 | no PCIe poll storm | assert round-trip latency of the T2 loop stays ≤ 2× the single-poller baseline while N groups are parked (`probe_resident.cpp` as a regression test) |
+| **homes are disjoint** | no expert may be resident on both devices at once: `tests/b70/test_placement_disjoint.py` asserts `S_g ∩ S_b = ∅` from the placement tables *and* that each device's local id mapping is injective; a replication bug would silently double capacity use and make every capacity number in the report meaningless |
+| a spanning row combines in a fixed order | the 3090 → B70 → CPU add order is deterministic and B′4-style bit-repeatability survives it; a row spanning all three homes is an explicit fixture, not an accident of routing |
 | B70 VRAM accounting | upload + scratch accounted in the memory planner; `-mba` never over-commits; unload frees everything (no leak across reload) |
 | queue/region lifetime | `unregister_host_memory` on unload; a second load in the same process re-registers cleanly |
 
@@ -115,6 +117,8 @@ is the oracle.
 | E9 capacity curve | `tok/s` vs `S_b` capacity (sweep `-mb`/quota from 0 to full) must be **monotone and smooth**: no adjacent pair differing by more than 15 %, and ≥ 90 % of the resident-case rate at 50 % capacity. The property that says the cache degrades gracefully instead of cliff-edging |
 | E10 hit-rate floor | measured `h` on the calibration corpus ≥ the planner's computed `h_min = 1 − link_rate·T_layer/(topk·expert_bytes)` (§4a); reported with `T_layer`, `link_rate` and the profile state. If it fails, the configuration is declared oversized, not "slow" |
 | E11 thrash convergence | alternate two disjoint corpora (chat vs code) and record tok/s and `h` per window: must return within 2 % of the single-corpus steady state within `EXL3_MOE_B70_WINDOW` tokens, and the admission count per step must stay under the budget |
+| E13 spanning fraction `σ` | fraction of rows whose picks live in more than one home, and the resulting payload/handshake multiplier. Reported per model, per corpus, per placement mode (`freq` vs `colocate`), from `plan_placement.py` offline **and** from the live run; offline prediction and live measurement must agree within 10 %, and the accepted placement is whichever wins on the *combined* cost, not on `σ` alone |
+| E14 predicted vs realised homes | the planner's offline prediction of `h` (device-resident pick share), `σ` and ms/token, computed from the expert-stats profile plus the four measured rates, against what the run actually did | prediction within 10 % on `h` and 20 % on ms/token, or the cost model is wrong and no gate above can be trusted |
 | E12 admission/eviction cost | one `S_b` admission (expert upload) measured cold: ≤ 1.15 × `expert_bytes / link_rate`; and a decode step *while* N admissions are in flight ≤ 1.1 × the no-admission step (proves the low-priority queue and the budget actually work) |
 
 ### U — utilisation and power (the "is the card actually working" channel)
@@ -161,6 +165,7 @@ Scripts (all in `notes/b70/`, extending the existing harnesses rather than repla
 | `b70_bench_kernel.py` | B′ + E4: GEMV/GEMM rate vs rows × experts × threads × rate × layout, cold selections |
 | `b70_bench_engine.py` | E1–E3, E8: real jobs through the ring with the engine child live (the `notes/bench_handoff.py` analogue) |
 | `b70_prof.py` | per-layer decode/prefill attribution + power phases (the `notes/prof_e2e.py` analogue; CUDA events on the parent, engine-side `EXL3_MOE_B70_PROF` gap/queue/compute per 64 jobs, hwmon sampler) |
+| `plan_placement.py` | E13/E14 and the input to `-mba`: reads the checkpoint headers plus a routing trace (`sel` per layer, dumped by `notes/acceptance_model.py`) and enumerates candidate cut points, reporting per-home byte share, pick share, `σ`, and predicted ms/token for each — the placement decision is then made offline, before any kernel exists |
 | `b70_bench_capacity.py` | E9–E12: capacity sweep, hit-rate/`h_min` accounting, corpus-switch thrash test, admission cost with and without concurrent jobs (drives `-mba` and the admission knobs) |
 | `b70_power.py` | the U channel alone: sampler + phase integration + `J/token`, `J/GiB`, clock/temperature, used by every other script |
 | `b70_run_e2e.sh` | E6/E7′: `eval/perf.py` over named configs (`b70_split`, `b70_all`, `b70_auto`, `b70_plus_cpu`, `cpu_split`, `ref`) with the profile pinned per row |

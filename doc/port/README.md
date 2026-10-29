@@ -40,6 +40,14 @@ against a 199 µs CPU compute makes "admit on the third use" roughly size-indepe
 prefetchable link bandwidth sets a hard floor (`h_min`, 92 % there) below which no policy converges.
 See [`b70-architecture.md` §4a](b70-architecture.md).
 
+Both cards hold experts and both do the arithmetic, with **disjoint** expert sets: the two read rates
+are within 1.5× of each other, so a replica on the second card buys only capacity that neither has.
+That makes row routing a consequence of membership (a row is computed in pieces, one job per home it
+touches, partials added in a fixed order) and it makes the CPU an *equal* compute tier chosen by cost:
+copying an expert across the link costs 655 µs before its first useful read, so below ~3-4 uses in a
+window the CPU is simply cheaper, and above that the device is. §2.1, §3 P4 and §4 of the
+architecture are that model.
+
 Consequence: at decode the offload should become **free** (hidden behind the parent GPU's own work)
 rather than the 20–56 % tax it is today, and at prefill the question flips from *"is it cheaper to
 ship the weights or the rows?"* to *"how do we split rows between two fast devices without

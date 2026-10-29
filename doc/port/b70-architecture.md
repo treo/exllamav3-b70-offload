@@ -42,24 +42,53 @@ oracle** for the new kernels.
 
 ## 2. Where the bytes live
 
-### 2.1 Three weight tiers
+### 2.1 Four disjoint homes, three computers
+
+**An expert has exactly one home, and its home does its arithmetic.** No replication between the
+3090 and the B70:
 
 ```
-   S_g  resident on the 3090        the hot slice, as today (limited by VRAM left after KV cache)
-   S_b  resident on the B70 in VRAM 31.9 GiB, ~608 GB/s          <- the new tier
-   S_c  host DRAM (the arena)       ~45 GB/s CPU read, and the source for a 655 us upload to S_b
-   S_d  checkpoint on NVMe          ~5.0 GB/s direct read [M]; admission into S_c/S_b costs ~2.5 ms
+   S_g   home = 3090 VRAM      ~936 GB/s      quota: whatever the KV/weight trade leaves
+   S_b   home = B70 VRAM       ~608 GB/s peak <- the new tier, filled to capacity
+   S_c   home = host DRAM      ~45 GB/s CPU   the arena; also the source for a 655 us upload to S_b
+   S_d   home = NVMe           ~5.0 GB/s [M]  read through a bounded pinned ring when needed
 ```
 
-`S_d` is only reached by models whose expert set exceeds host DRAM as well as both cards —
+Disjointness is the point, not an simplification: the two devices' expert-read rates are within 1.5×
+of each other, so a replica of an expert on both cards buys nothing except capacity that neither
+tier has — every GiB duplicated is a GiB that cannot hold a *different* expert, and on an oversized
+model that GiB is the difference between the CPU computing a pick in 199 µs and a device computing it
+in 22 µs. Placement is therefore a **partition problem over three (or four) homes**, sized by each
+home's byte budget, and — for `S_g` — by the existing autosplit weight-versus-KV trade
+(`exllamav3/model/model_ls.py`, per-module `autosplit_prepare`/`autosplit_extra_measure`) now
+evaluated with the B70 as the alternative home for experts rather than the disk.
+
+Two things follow, and both are costs, not freebies:
+
+* **A row whose picks live in more than one home is computed in pieces** — one job per home holding
+  ≥1 of its picks, each writing its own partial, combined by the parent in a fixed order (3090
+  in place, then the B70 slot, then the CPU slot: the `cpu_split_combine` add already does this, and
+  no atomics are involved, so determinism is preserved). The penalty is a duplicated activation
+  payload and an extra handshake on that row, not a correctness hazard. `σ`, the *spanning fraction*,
+  becomes a first-class placement metric (§4a, gate E13) and the placement may be re-ordered to
+  reduce it.
+* **The CPU is a compute tier, not a spill yard.** It wins whenever the bytes would have to move
+  further than the arithmetic: copying an expert into a device costs `bytes/link` (655 µs for GLM's
+  9 MiB) *before* the first useful byte is read, while computing it where it already lies costs
+  `bytes/45 GB/s` per use and never moves anything. The rule that falls out of that (§4a) is a
+  ~3-4 use break-even, and it is roughly model-independent.
+
+`S_d` is reached by models whose expert set exceeds host DRAM as well as both cards —
 [`§4a`](#4a-models-that-exceed-the-tiers-hit-rate-engineering) is about that regime, and about the
-one before it (`S_b` full but `S_c` comfortable), which is where a model like
-GLM-5.3-Flash@3.05 bpw (108.8 GiB of routed-expert trellis, present on this box) actually lives.
+one before it (both VRAM tiers full, `S_c` comfortable), which is where
+GLM-5.3-Flash@3.05 bpw (108.84 GiB of routed-expert trellis, present on this box) actually lives.
 
-Placement is by descending selection frequency (the existing expert-stats profile), filling S_g,
-then S_b, then S_c, under per-tier byte budgets. `S_b` is what makes the port interesting: on this
-box **Qwen3.5-35B's entire routed-expert set (11.25 GiB) fits in `S_b` with room to spare**, and
-Qwen3.8-Flash-Next's (36.33 GiB) does not, leaving ~4 GiB in `S_c`.
+Because the homes are contiguous ranges of one permutation, the mechanism is the existing one with a
+second cut point: the profile sorts experts hot-to-cold (`cpu_post_load` permutes the router weights
+to match), `[0, F_g)` is the 3090's `num_local_experts` slice, `[F_g, F_g+F_b)` is the B70's, and
+`[F_g+F_b, E)` stays with the CPU — which is exactly `moe_split_map_kernel`'s translate
+(`routing.cu:1114-1122`, `p >= first_cpu ? p - first_cpu : -1`) generalised from a threshold to a
+range, per home. Three homes, two cut points, no new addressing machinery.
 
 Loading: the engine child receives the same `("layer", spec)` pipe messages as the CPU child, reads
 the expert tensors from the checkpoint, and uploads each layer's expert block over the link
@@ -208,49 +237,82 @@ a 45 GB/s CPU GEMV by ~12×, which is why `stream_t` remains the biggest knob on
 end to end). Keep `stream_t`'s calibration (`probe_bandwidth`, `moe_cpu_host.py:900`) for `S_c`
 only, re-probed against the B70-era link if the CPU worker is disabled.
 
-### P4 — new: splitting rows between two fast devices
+### P4 — rows, spanning, and who computes what
 
-When `S_g` is non-empty, both devices can produce part of the routed sum for a chunk. The split must
-need **no host sync** and must not compute an expert twice:
+With disjoint homes, membership decides everything, and the routing rule is *derived*, not chosen:
 
 ```
-row goes to the B70  <=>  any pick of the row is outside S_g     (device-side test, 1 word/row)
-row stays on the 3090 <=>  all picks in S_g
+device D gets a job for row r        <=>  picks(r) ∩ home(D) ≠ ∅        (device-side test, 1 word/row)
+sel sent to D                        =   local index inside home(D), else -1   (as today)
+final_out                            =   Σ over homes with a job, in a fixed order (3090, B70, CPU)
 ```
 
-This is the existing masking mechanism (out-of-range picks masked inside `exl3_moe*` and
-`moe_split_issue_kernel` writing `dev_count`), so it is cheap and already tested. It is also
-self-balancing in the right direction: as `S_g` grows, fewer rows cross. A load-balance term
-`EXL3_MOE_B70_ROW_FRACTION` (0…1, forced share) covers the case where routing is uniform enough that
-the rule sends too little or too much, chosen from measured per-device throughput
-(the E4/E5 probes of `b70-harness.md`).
+No host sync is needed for any of it: the issue kernel already evaluates the per-row predicate while
+it stages the payload (it writes `dev_count` today), the `-1` sentinel translation and the
+out-of-range masking inside `exl3_moe*` are the existing `-mcs` mechanism (`routing.cu:1114-1122`,
+`1180-1199`), and the combine already adds a worker partial to the routed sum
+(`cpu_split_combine`, `block_sparse_mlp_cpu.py:633`). What is new is only that a row may appear in two
+or three jobs, and that each job's `sel` masks differently.
 
-Explicitly *not* doing: splitting a single row's picks across devices (doubles the payload and needs
-an atomic combine), or per-expert partitioning of one chunk (needs the count readback the design
-just removed).
+Cost model of a spanning row (`σ` = fraction of rows that span, at decode, Qwen3.8 shapes,
+`x` int8 2.5 KiB + `out` fp32 10 KiB):
+
+| | row entirely in one home | row spanning two | row spanning three |
+|---|---|---|---|
+| activation payload per layer | 12.5 KiB | 25 KiB | 37.5 KiB |
+| handshakes | 1 (5–8 µs **[M]**) | 2 | 3 |
+| partial adds on the 3090 | 1 | 2 | 3 |
+
+So `σ → 1` costs roughly `2×` the payload and `2×` the handshake per row: ≈1.8 µs + ≈12 µs per
+spanning row per layer, which at 1 row/token and 48 layers is ≈0.7 ms/token — comfortably hidden
+behind the parent's ~10 ms/token of work, but worth *minimising*, because the same doubling applies
+per row at prefill where the rows are 2048 and the link is the bottleneck. Two levers, both offline:
+the frequency-sorted permutation (hot experts co-occur with hot, so the 3090's slice absorbs a
+disproportionate share of whole rows) and, if E13 shows `σ` uncomfortably high, an explicit
+co-location pass that trades a little rate for a lot of spanning (same section, `…_COLICATE`).
+
+Load balance falls out of the same numbers instead of a runtime knob: expected work per device is
+`Σ_{e ∈ home} n_e`, so the two cut points are chosen so that ratio matches the measured throughput
+ratio of the two cards (E4/E5). `EXL3_MOE_B70_ROW_FRACTION` from the first revision of this document
+is **dropped** — with disjoint homes, forcing a share of *rows* to a device that does not hold their
+experts is meaningless; you move the *home*, offline, where the cost is one 655 µs copy instead of a
+per-chunk re-shuffle.
 
 ---
 
 ## 4. Cost model
 
-Everything the policy knobs tune, in one place. `b*` = bytes, `r*` = rates, all measured per §7 of
-`b70-harness.md`.
+Everything the policy knobs tune, in one place. All rates are measured by the probes listed in
+[`b70-harness.md`](b70-harness.md) (link, `b70_bench_kernel`, `b70_bench_engine`) and re-probed at
+startup — never inherited.
 
 ```
-decode layer cost = max( parent_gpu_work_layer,
-                         notify + dma_in(rows·(hi + ε)) + b70_compute(rows, picks_b)
-                                    + dma_out/store(rows·ho·sz_out) + notify )
-prefill layer cost = jobs_per_layer · notify
-                   + max( link_bytes / link_rate , b70_flops / xmx_rate + weights_read / vram_rate )
-placement = minimise Σ_layers [ link_bytes(layer) / link_rate + compute(layer) / rate(device) ]
-            over the partition (S_g, S_b, S_c), subject to
-              bytes(S_g) ≤ VRAM_3090 − KV − weights_elsewhere   and   bytes(S_b) ≤ VRAM_b70
-            solved greedily in descending selection frequency (hot -> S_g -> S_b -> S_c), which is
-            optimal whenever cost is monotone in frequency -- true here, because a row's payload
-            crosses the link at most once regardless of how many of its picks live on the B70.
-            Once bytes(experts) > VRAM_b70 this stops being a static partition: the objective is
-            then expected cost under an admission/eviction policy over the run, which is §4a.
-crossover(stream e) = expert_bytes_e / (sz_x·hi + sz_out·ho)     [rows per expert per chunk, see P3]
+FOR ONE LAYER, ONE STEP, homes running in parallel:
+  rows_touched(D) = rows with >= 1 pick inside home(D)          sum_D rows_touched(D) = rows*(1 + sigma)
+  link_bytes(D)   = rows_touched(D) * (sz_x*hi + sz_out*ho)     (3090 home: 0, it is the parent)
+  compute(D)      = sum_{e in picks of the step, home(e)=D} bytes_e / rate_D
+  layer_cost      = max( parent_gpu_work_layer,
+                         max_D [ notify + link_bytes(D)/link_rate + compute(D) ] )
+
+PLACEMENT (offline, per layer, two cut points on the frequency-sorted permutation):
+  minimise  sum_D [ E[compute(D)] / rate_D + E[rows_touched(D)] * payload / link_rate ]
+  subject to bytes(S_g) <= VRAM_3090 - KV - dense   and   bytes(S_b) <= VRAM_b70, bytes(S_c) <= DRAM_cap
+  frequency order within a layer is optimal for the compute term (equal bytes per expert, uniform
+  rate per home); sigma (the spanning penalty) is the only reason to deviate from it (..._COLICATE).
+
+MIGRATION / MISS DECISION - an expert with no device home, c uses predicted in the window:
+  leave it on the CPU      : c * bytes / cpu_rate                     (moves nothing, ever)
+  admit it to S_b (once)   : bytes / link_rate + c * bytes / b70_rate
+  stream it to the 3090    : bytes / link_rate + c * bytes / gpu_rate  (paid PER CHUNK: the streamed
+                                                                        slot is transient, so P3's
+                                                                        threshold is ~200 rows, not ~4)
+  => admit to the B70 iff  c > (bytes/link) / (bytes/cpu - bytes/b70) = 3.7 uses here; the ratio is
+     scale-invariant, so 3-4 is the default for any model, bitrate or expert shape.
+
+HOME vs JOB: the copy-vs-compute comparison decides HOMES, amortised over a window. It never decides
+a single job: a resident expert is always computed at home, and an extra pick on a row that is
+already crossing to that home costs the marginal weight-read only. Re-deciding per job is what makes
+the CPU path's promote hook cost 2-3 ms/token.
 ```
 
 Constants on this box: `link_rate` 14.4 GB/s **[M]**, `notify` 3.2 µs resident / 5–8 µs per
@@ -298,9 +360,15 @@ must exceed for prefetch to keep up, climbs from 69 % to a hard **92.4 %** on GL
 cache cannot converge on prefetch alone and misses must be *served* (CPU worker) rather than hidden,
 which is where the second B70 or a smaller quantisation is the honest answer.
 
-In that regime `S_b` is no longer a placement, it is a **cache**, and the port's central problem
-stops being handshake latency (which is hidden anyway) and becomes hit rate. Three numbers frame it,
-all derived from measured rates for GLM-5.3-Flash (9.00 MiB expert, K=3, topk 8, 43 MoE layers;
+`h` below means **device-resident pick share**: the fraction of a step's `topk` picks whose expert
+has a device home. Because placement is frequency-ordered, `h` is much larger than the byte-residency
+fraction — routing skew means the last 71 % of experts by size carry far less than 71 % of the picks —
+and `h` is *predictable offline* from the saved expert-stats profile, before a single forward pass
+(gate E14 checks that prediction against measurement). When `bytes(experts) > VRAM_3090 + VRAM_b70`
+the residue is not an accident but a designed share of the work handed to the CPU, and the port's
+central problem stops being handshake latency (which is hidden anyway) and becomes that share.
+Three numbers frame it, all derived from measured rates for GLM-5.3-Flash (9.00 MiB expert, K=3,
+topk 8, 43 MoE layers;
 `link` and `disk` are **[M]** — 14.4 GB/s and 5.0–5.2 GB/s `dd iflag=direct` — the CPU rate is the
 K=3 figure from `doc/prep/measured-costs.md` §5, and 420 GB/s is the *target* B70 read rate E4, so
 `brk-even` moves with it but only weakly):
@@ -318,13 +386,21 @@ so *admit on the third use* is roughly optimal, independent of model size, bitra
 And because the miss path is only paid once per expert while the hit path is paid per use, the whole
 decode cost curve is steep in the hit rate `h` (misses/token = `topk·(1−h)`, ×43 layers):
 
-| `h` | misses/token | unserviced-by-cache cost, CPU | link traffic if instead admitted |
+| `h` | CPU-served picks/token | CPU cost of them | link cost if they were admitted instead, per token |
 |---|---|---|---|
 | 0.70 | 2.40 | 20.6 ms/token | 68 ms/token |
 | 0.80 | 1.60 | 13.7 ms/token | 45 ms/token |
 | 0.90 | 0.80 | 6.9 ms/token | 23 ms/token |
 | 0.95 | 0.40 | 3.4 ms/token | 11 ms/token |
 | 0.99 | 0.08 | 0.7 ms/token | 2 ms/token |
+
+Read the last column as the trap the user's instinct is right about: below `h ≈ 0.97`, *admitting*
+every miss costs more link time than the CPU spends computing it, so the CPU is the cheaper tier and
+migration must be selective (admit on the ~4th predicted use, and prefer evicting toward `S_c` over
+`S_d`). Above it, admission is a small investment that removes a large recurring cost. The two
+columns are not alternatives to choose per token — they are the constraint set for the offline
+placement, and `EXL3_MOE_B70_MISS_POLICY=cost` makes the per-window decision with exactly this
+arithmetic rather than with a fixed threshold.
 
 Two structural consequences for the design:
 
@@ -356,7 +432,7 @@ let the per-layer count follow. Uniform-per-layer placement also keeps the P4 ro
 
 Supporting decisions for this regime:
 
-* **Prime the cache at load** from the existing expert-stats profile: 31.9 GiB is 2.3 s of link time
+* **Prime the tier at load** from the existing expert-stats profile: 31.9 GiB is 2.3 s of link time
   (or ~7 s disk-bound, overlapping the parent's own load, which for a 117 GB checkpoint is minutes).
   Without priming, the first generation of a session runs at the `h` of whatever the checkpoint order
   happened to put in `S_b` — the same cold/warm confound `doc/prep/measured-costs.md` §8.3 measured,
@@ -369,6 +445,12 @@ Supporting decisions for this regime:
   (`EXL3_MOE_B70_PROMOTE_BUDGET`, experts/step) exactly as the CPU promote-on-miss hook is, because
   the measured lesson there (`doc/prep/measured-costs.md` §8.2: a 2–3 ms/token host hook cancelling a
   25 % hit-rate win) is that an ungoverned policy loses money.
+* **Offline first, online second.** The two cut points, the predicted `h`, the predicted `σ` and a
+  predicted ms/token are all computable from the profile plus the four measured rates, so the planner
+  should print them at load — and refuse configurations whose predicted `h` is unreachable
+  (`…_MISS_POLICY=cost` logs each admit/decline with the numbers it used, so a wrong prediction is
+  attributable). Online admission then only has to handle what the static profile could not foresee
+  (a topic switch), which is exactly the case the E11 thrash gate measures.
 * **Admission is much cheaper than the CPU path's equivalent**, and that changes what policy is
   affordable: a B70 admission is a 655 µs DMA on a private queue with no checkpoint re-read and no
   `torch.cuda.synchronize()` of the parent, versus the measured ~6 ms stop-the-world sweep and the
@@ -501,7 +583,10 @@ CLI aliases in `config.py`). Family A/B/C = shape / policy / implementation, per
 | `-mba` / `EXL3_MOE_B70_AUTO` | B | 0 | size `S_b` to fill B70 VRAM with the experts that do not fit the 3090 |
 | `-mbl N` / `EXL3_MOE_B70_LAYERS` | B | 0 | restrict the B70 split to the first N eligible layers |
 | `EXL3_MOE_B70_SLOTS`, `…_SLOT_ROWS` | A | 4, 256 | ring depth and rows per job (prefill chunking; decode is unaffected because one job is one step) |
-| `EXL3_MOE_B70_ROW_FRACTION` | B | auto | forced share of rows a prefill chunk sends to the B70 (§3 P4) |
+| `-mbg N` / `EXL3_MOE_GPU_SLICE` | A | as today | experts kept on the 3090; with disjoint homes this *is* the row-routing knob (§3 P4), since a row's destination set follows from membership |
+| `EXL3_MOE_B70_SLICE_BYTES` / `…_GPU_SLICE_MB` | A | fill | byte budgets per home, the quantities the cut points are actually derived from (per layer: §4a rule 2) |
+| `EXL3_MOE_B70_MISS_POLICY` | B | `cost` | `cost` = admit iff predicted uses in the window beat the §4 break-even; `never` = static homes only; `always` = admit on first miss (measures the trap in §4a's table) |
+| `EXL3_MOE_B70_COLICATE` | B | `freq` | placement order within a layer: pure frequency (optimal for the compute term) or a co-location pass that trades rate for a lower spanning fraction `σ` (E13 decides whether it pays) |
 | `EXL3_MOE_B70_QUANT_INPUT` | C | 1 | int8 payload from the 3090 vs fp16 (0 also disables the wide-plane path: use for numerics bisection only) |
 | `EXL3_MOE_B70_OUT_F16` | C | 0 | return fp16 partials (halves the uplink) |
 | `EXL3_MOE_B70_ENGINE` | C | `graph` | `phase` (T0) / `graph` (T1) / `resident` (T2) |
@@ -536,7 +621,8 @@ by a measurement but not waived. (Gate definitions: `b70-harness.md`.)
 | 1 | T0 engine, naive `Recipe A` decode kernel, fp16 payload, `-mb` on a small split, CPU worker untouched | **A** bit-exact, **B′** rel RMS ≤ 2.5e-2 vs the fp64 oracle *and* vs the CPU tier, **C1-C3** model agreement, **D** all invariants, **E1/E2/E3** handshake floors |
 | 2 | T1 graph engine, int8 payload + wide rows, `Recipe B` GEMV, layout decision measured | **E4** cold-expert read rate ≥ 300 GB/s, **E1** empty job ≤ 10 µs, **B3** determinism, zero spills in every shipped kernel |
 | 3 | prefill: rows-to-B70, big slots, row split, streaming off for `S_b` | **E5** prefill link efficiency ≥ 80 % of measured rate; **E7′** (successor of E7) B70 prefill ≥ 4× the CPU-tail path on the same model |
-| 4 | three-tier placement, spill path, `-mba`, reload/autosplit, docs + env-var table | **C** at `-mb 255`/`-mba` on both reference models, decode within 5 % of the all-GPU reference on Qwen3.5 |
+| 0b | *offline, no B70 code needed*: `plan_placement.py` over routing traces from existing `-mcs` runs → per-home pick share, `σ`, predicted ms/token for every candidate cut point (E13/E14 inputs). Do this before writing kernels: it is the only part of the placement design that can be falsified on today's tree |
+| 4 | three-home partition (two cut points), migration policy, reload/autosplit, docs + env-var table | **C** at `-mb 255`/`-mba` on both reference models, decode within 5 % of the all-GPU reference on Qwen3.5 |
 | 4b | oversized models (§4a): per-layer byte quotas, online admission + eviction, low-priority transfer queue, `S_d` disk path, CPU coexistence, planner prints `h_min` | **E9** capacity–throughput curve is smooth (no cliff > 15 % between adjacent capacity points), **E10** measured `h` ≥ `h_min` on the calibration corpus or the planner refuses the configuration, **E11** thrash test converges within 2 % tok/s after a topic switch, **U** admission energy ≤ 10 % of the run's J/token |
 | 5 | optional: T2 resident engine, CPU+B70 coexistence, second B70, power policy | each justified by a ≥ 20 µs/token measured saving |
 
