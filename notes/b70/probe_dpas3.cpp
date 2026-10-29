@@ -80,7 +80,8 @@ enum : unsigned
 {
     F_AGLOB = 1u, F_BGLOB = 2u, F_PACKB = 4u, F_SGBAR = 8u, F_PREF = 16u, F_U32 = 32u,
     F_DUPP = 64u,          // 'd': write PART twice (shadow) - prices partial-sum traffic, same numerics
-    F_COUNT = 128u
+    F_STRUCT = 128u,       // 'x': experts in the grid, KS=1, so PART holds 2 partials per output not 2*KS
+    F_COUNT = 256u
 };
 
 struct Meta
@@ -218,7 +219,8 @@ template <unsigned F>
 static void submit(const Launch &L)
 {
     constexpr bool AGLOB = F & F_AGLOB, BGLOB = F & F_BGLOB, PACKB = F & F_PACKB;
-    constexpr bool SGBAR = F & F_SGBAR, PREF = F & F_PREF, U32 = F & F_U32, DUPP = F & F_DUPP;
+    constexpr bool SGBAR = F & F_SGBAR, PREF = F & F_PREF, U32 = F & F_U32, DUPP = F & F_DUPP,
+                   STRUCT = F & F_STRUCT;
     constexpr int NBUF_A = SGBAR ? 2 : 1;
     constexpr int BLD = PACKB ? 4 * NTOK : NTOK;   // B stride in int8 elements
 
@@ -234,7 +236,7 @@ static void submit(const Launch &L)
     const int K = (int)m.K;
     const int tps = tk / KS;                  // trellis tiles per k-slice
     const int per_sg = tps / 2;               // tiles per sub-group (main() enforces even halves)
-    const size_t groups = (size_t)tn * KS;
+    const size_t groups = (size_t)tn * (STRUCT ? m.E : KS);
     const uint32_t nw = (uint32_t)(8 * K);    // dwords per trellis tile
     const int RB = 256 * K;                   // ring bits per tile
     size_t slmB, slmA;
@@ -260,7 +262,11 @@ static void submit(const Launch &L)
             const int lane = l % SGSZ;                      // 0..15 inside the sub-group
             const int grp = (int)it.get_group(0);
             const int nt = grp % tn;
-            const int ks = grp / tn;
+            // 'x' reuses the second grid dimension for the expert instead of the k-slice; KS is forced
+            // to 1 host-side, so ks stays 0 and the two sub-groups still split the k-range in half, which
+            // is exactly the two partials combine already sums.
+            const int ks = STRUCT ? 0 : grp / tn;
+            const int eg = STRUCT ? grp / tn : 0;
             const int kt0 = ks * tps + sub * per_sg;
             const int ntile = per_sg;
 
@@ -408,7 +414,7 @@ static void submit(const Launch &L)
             {
                 // rev E structure: per-tile index math, loads consumed immediately
                 int tc = 0;                                     // running tile count -> A buffer
-                for (int e = 0; e < E; ++e)
+                for (int e = eg; e < (STRUCT ? eg + 1 : E); ++e)
                 {
                     CMat c0, c1;
                     mx::joint_matrix_fill(sg, c0, int32_t(0));
@@ -545,6 +551,7 @@ static unsigned parse_flags()
         case 'f': f |= F_PREF; break;
         case 'u': f |= F_U32; break;
         case 'd': f |= F_DUPP; break;
+        case 'x': f |= F_STRUCT; break;
         case ',': case ' ': case '+': break;
         default: fprintf(stderr, "DPAS_F: unknown switch '%c' (use any of p s f u, or none)\n", *s); exit(2);
         }
@@ -561,6 +568,7 @@ static std::string flag_str(unsigned f)
     if (f & F_PREF) s += 'f';
     if (f & F_U32) s += 'u';
     if (f & F_DUPP) s += 'd';   // without this the label and the output filename silently lie about 'd'
+    if (f & F_STRUCT) s += 'x';
     return s.empty() ? "none" : s;
 }
 
@@ -600,12 +608,23 @@ int main(int argc, char **argv)
     const std::string dir = argv[1];
     const int reps = argc > 2 ? atoi(argv[2]) : 5;
     const int rows_arg = argc > 3 ? atoi(argv[3]) : 0;
-    const int KS = argc > 4 ? atoi(argv[4]) : 8;
+    const int KS_req = argc > 4 ? atoi(argv[4]) : 8;
     Meta m = load_meta(dir);
     if (rows_arg > 0) m.R = rows_arg;
     if (m.R < 1 || m.R > NTOK) { fprintf(stderr, "rows %d outside 1..%d\n", m.R, NTOK); return 2; }
-    if (KS < 1 || m.tk % KS || (m.tk / KS) % 2) { fprintf(stderr, "tk must split into even halves (KS %d, tk %d)\n", KS, m.tk); return 2; }
     const unsigned flags = parse_flags();
+    if (flags & F_STRUCT)
+    {
+        // 'x' makes the expert dimension the extra grid dimension, so the k-split collapses to 1. Two
+        // requirements fall out: B must come from global (staging per_sg = tk/2 tiles of B would ask
+        // ~80 KiB per sub-group, over this device's 128 KiB SLM budget), and 'f' is out because its
+        // flattened loop owns the expert counter.
+        if (!(flags & F_BGLOB))
+        { fprintf(stderr, "'x' needs DPAS_B_GLOBAL=1 (per-expert B staging exceeds SLM)\n"); return 2; }
+        if (flags & F_PREF) { fprintf(stderr, "'x' and 'f' are mutually exclusive\n"); return 2; }
+    }
+    const int KS = (flags & F_STRUCT) ? 1 : KS_req;
+    if (KS < 1 || m.tk % KS || (m.tk / KS) % 2) { fprintf(stderr, "tk must split into even halves (KS %d, tk %d)\n", KS, m.tk); return 2; }
     const int K = (int)m.K;
     if ((flags & F_U32) && (K < 1 || K > 4))
     {
@@ -647,7 +666,8 @@ int main(int argc, char **argv)
     slm_layout(flags, m, KS, slmB, slmA);
     const double trellis_mib = wbuf.size() / 1048576.0;
     printf("case %s: E %d R %d k %d n %d K %d  trellis %.2f MiB  KS %d  work-groups %d  sub-groups %d\n",
-           dir.c_str(), m.E, m.R, m.k, m.n, K, trellis_mib, KS, m.tn * KS, m.tn * KS * 2);
+           dir.c_str(), m.E, m.R, m.k, m.n, K, trellis_mib, KS,
+           m.tn * ((flags & F_STRUCT) ? m.E : KS), m.tn * ((flags & F_STRUCT) ? m.E : KS) * 2);
     printf("rev F switches: %s   A from %s, B from %s   SLM per work-group %.1f KiB\n",
            flag_str(flags).c_str(), (flags & F_AGLOB) ? "global scratch" : "SLM",
            (flags & F_BGLOB) ? "global tensor" : "SLM", 2.0 * (slmB + slmA) / 1024.0);
@@ -674,7 +694,8 @@ int main(int argc, char **argv)
     // A-tile scratch for DPAS_A_GLOBAL: two 1 KiB tiles per sub-group, rewritten every tile (L2-hot).
     uint8_t *ASC = nullptr;
     if (flags & F_AGLOB)
-        ASC = (uint8_t *)sycl::malloc_device((size_t)m.tn * KS * 2 * 2 * A_TILE, q);
+        ASC = (uint8_t *)sycl::malloc_device(
+                  (size_t)m.tn * ((flags & F_STRUCT) ? m.E : KS) * 2 * 2 * A_TILE, q);
 
     Launch L;
     L.q = &q; L.W = W; L.B = B; L.X16 = X16; L.PART = PART; L.ASC = ASC; L.m = m; L.KS = KS;

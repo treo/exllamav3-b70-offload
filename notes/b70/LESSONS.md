@@ -824,6 +824,30 @@ attempt look empty. Note also what the dump still did *not* settle here: the cap
 instruction lines with one `send`, so it is not the tile loop, and I declined to read a message census off
 it rather than invent one.
 
+## 39. A doubling ablation prices a resource only if the system is linear in that resource
+
+I priced partial-sum traffic by making the kernel write its partials twice into a shadow buffer: same
+instructions, same combine, same `y`, so the delta should be "the cost of one copy of the partials." It was
+0.7–27.7 µs depending on KS, I halved it for a single copy, added a symmetric read-back, and wrote down
+"item 5 is worth 5–11 % on gate_proj, 15–25 % on down_proj." The structural fix then delivered ×1.19–×1.32
+and ×1.04–×1.30 — up to three times my estimate.
+
+The ablation was clean as a controlled experiment and still misled, because it isolated the *write* while
+the write was not the whole cost of the thing. Removing partials also removes: the combine kernel's read of
+them, a second enqueue, the per-slice accumulator bookkeeping that scales with the same KS multiplier, and
+the L2 footprint those bytes occupy — which is what made the measured gain grow with batch size, since
+smaller partials leave L2 for everything else. Marginal cost of X is not the same quantity as cost of the
+subsystem that produces X, and a doubling test can only ever see the first.
+
+So the rule: before turning an ablation delta into a projected win, list every consumer of the resource and
+say which ones the ablation touched. Where a coupled consumer exists — here, combine — either ablate the
+subsystem (delete both sides) or state the projection as a floor, which is what I should have written
+instead of a range that read like a forecast. Practical consequence for how I sequence work: cheap ablations
+are for ranking candidates and ruling things out (they killed `f` convincingly), not for deciding whether a
+fix is worth building. Item 5 was near the bottom of my list on the ablation's numbers and turned out to be
+the largest single win of the rev F line.
+
+
 
 
 

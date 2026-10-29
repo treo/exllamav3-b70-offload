@@ -570,6 +570,17 @@ measured rate curve at the matched footprint:
   The crossover for the dp4a→DPAS switch moves from rows ≈ 5 to **rows ≈ 3–4** (rev C+KCONST still wins ×2.5
   at rows=1, ties at rows=4, loses ×2.4 and ×4.2 at rows=8 and 16). Two caveats: `u` needs K ≤ 4, and all of
   this is measured with a 20 s warm-up plus interleaving, without which the same command varies 2.3×.
+* **The DPAS path's partial-sum traffic is now removed structurally, and the schedule switched earlier as a
+  result (`'x'`, §2c item 13m).** Putting the experts in the grid (grid = `tn·E`, `KS=1`, the two sub-groups
+  still halve k) drops PART from `2·KS·E·n·16` to `2·E·n·16` int32 — 0.78 MiB on gate_proj, 3.12 on
+  down_proj, `128/k` bytes per weight independent of KS and E — and gains ×1.19–×1.32 (gate) and ×1.04–×1.30
+  (down) as rows run 1→16, bit-exact at rows 1/4/16 on both projections. Consequences for the plan: the
+  dp4a→DPAS crossover moves from rows ≈ 3–4 to **between rows 1 and 4**, so dispatch on rows ≥ 4 → DPAS with
+  room, and treat rows = 2–3 as measured-needs-its-own-point; the DPAS rescue factors become ×3.1 (rows 8)
+  and ×5.8 (rows 16) on gate; **b=4 layer time is 230.7 µs** (2 × 73.8 + 83.1) against 331.3 µs on
+  rev C+KCONST. At rows=1 rev C+KCONST still wins ×1.85 (39.7 vs 73.7 µs), which is now attributable to the
+  DPAS path computing 16 token columns for one valid row — the next lever, not partials. Caveat: `'x'` is
+  measured at E=10; `tn·E` must stay ≳ 256 groups, so low-E models need grid = `tn·E·KS`.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is

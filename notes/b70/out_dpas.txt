@@ -514,6 +514,59 @@ constant), and splitting those two meanings correctly is a delicate change acros
 off-by-4 would still run fast and produce wrong numbers. Given how this session went, that is worth doing
 with a clean bit-exactness check in front of it, not squeezed in behind a price measurement.
 
+================================================================================
+ITEM 5 SOLVED STRUCTURALLY: 'x' - experts in the grid, KS=1, no split-K partials
+================================================================================
+The structural variant from the review, implemented as F_STRUCT ('x'): the second grid dimension becomes
+the expert instead of the k-slice (grid = tn*E, KS forced to 1), the two sub-groups still split the k-range
+in half, and combine already summed exactly two partials per output, so nothing about the epilogue or the
+reference changed. PART therefore holds 2*E*n*16 int32 instead of 2*KS*E*n*16 - 0.78 MiB on gate_proj and
+3.12 MiB on down_proj instead of 6.25 and 12.50, and 128/k bytes per weight (0.05 B/w at k=2560) is
+independent of both KS and E. Requirements: B from global (staging tk/2 tiles of B per sub-group would ask
+~80 KiB, over the 128 KiB SLM budget) and not with 'f' (its flattened loop owns the expert counter).
+
+Bit-exact against each case's own y_ref at rows = 1, 4 and 16 on both projections. Also verified that the
+edit is neutral on the pre-existing path: rebuilding HEAD and interleaving gives x1.00 at rows 1 and 8
+against the current psu build, and psu reproduces last session's 87.7 / 94.4 us exactly - which is the
+strongest evidence yet for the warm-up discipline, since the same configuration measured 107.0 / 191.4 us
+in a less-warm window minutes earlier.
+
+One warm window, interleaved, min of 4, A+B global, us:
+
+  gate k=2560 n=640 tn=40       psu (KS=8)   psux (KS=1)   gain   rev C+KCONST   who wins
+    rows=1                         87.7          73.7      x1.19       39.7      rev C x1.85
+    rows=4                         90.5          73.8      x1.23      103.3      psux x1.40
+    rows=8                         94.3          74.7      x1.26      231.0      psux x3.09
+    rows=16                       101.9          77.0      x1.32      449.9      psux x5.84
+
+  down k=640 n=2560 tn=160      psu (KS=4)   psux (KS=1)   gain   rev C+KCONST   who wins
+    rows=1                         81.8          78.9      x1.04       46.6      rev C x1.69
+    rows=4                         94.3          83.1      x1.13      124.7      psux x1.50
+    rows=8                        106.0          87.4      x1.21      224.6      psux x2.57
+    rows=16                       127.9          98.4      x1.30      415.4      psux x4.22
+
+What the shape of the curves says:
+* The gain grows with rows on both projections (+19% -> +32% gate, +4% -> +30% down), which is the
+  signature of removing a traffic term that scales with nothing else in the kernel: PART was written and
+  read once per k-slice, and rows were free to grow into the freed L2 room.
+* psux is nearly flat in rows (73.7 -> 77.0 on gate, a 4% rise across a 16x batch) - the DPAS path finally
+  behaving as the "rows-collapse" claim said it should, once the traffic term that was hiding it is gone.
+* The schedule decision moved: the DPAS path now WINS at rows=4 (x1.40 / x1.50) where it used to tie or
+  lose, so the crossover sits between rows 1 and 4 - plan for a switch at rows ~= 2-3, and re-derive the
+  batch-dependent placement/concurrency figures with x3.1 / x5.8 rescue factors at rows 8 / 16 instead of
+  the x2.2 / x3.9 that §2c item 13k recorded.
+* Layer time at b=4, best measured configuration: 2 x 73.8 (gate/up, psux) + 83.1 (down) = 230.7 us,
+  against 331.3 us with rev C+KCONST.
+
+Limitations, stated rather than smoothed over:
+* Measured at E=10 only. With experts in the grid, groups = tn*E, so small-E models (E=2-4, or tiny tn)
+  land under ~256 groups and would want the grid to carry BOTH an expert and a k dimension - i.e. 'x'
+  generalized to grid = tn*E*KS with KS>1, which is the same code path plus one more index division, not a
+  redesign. Until measured, do not apply 'x' to the low-E geometries.
+* 'x' does nothing about the 16-token-column waste, which is now the only visible reason it still loses
+  x1.85 at rows=1. That is variant 'a' (specialize N to the row count), and the gap it needs to close has
+  shrunk from x2.5 to x1.85.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -533,4 +586,8 @@ with a clean bit-exactness check in front of it, not squeezed in behind a price 
     DPAS_F=psu DPAS_CHECK=/tmp/revE_ref.bin ./probe_dpas3 CASE 3 4 8    # bit-identity vs rev E
     IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa ./probe_dpas3 CASE 1 1 8   # native .isaasm
     # item 5 price: compare psu vs psud (duplicate PART stores) per KS, warm + interleaved
+    # structural variant: KS is forced to 1, so pass any ks (it is ignored)
+    DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
+    # regression guard for the non-structural path (compare against the HEAD build in one window)
+    git show HEAD:notes/b70/probe_dpas3.cpp > /tmp/revF_head.cpp && icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revF_head /tmp/revF_head.cpp
     for ks in 2 4 8 16; do for f in psu psud; do DPAS_F=$f DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 $ks; done; done
