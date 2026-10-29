@@ -124,8 +124,70 @@ partial-sum tree differs by construction and the integer accumulator is confirme
 across the two paths - which is what makes the DPAS variant substitutable inside the engine's
 completion protocol rather than a second numerics regime to validate separately.
 
+## Step 2 (rev E, probe_dpas2.cpp): A assembled from trellis bytes, no byte expansion
+
+Same case, same epilogue, but the kernel now reads ONLY the trellis bytes (5.86 MiB) and builds the A
+operand itself: 16 lanes unpack a tile with rev C's validated window math, store each window's four
+product bytes as one u32, then four load/mad pairs consume the tile (2 column-blocks x 2 byte-blocks).
+B is the activation replicated 4x along K (4k x 16 tokens = 163 KB, L2-resident), staged once per
+k-slice and reused across every expert so it is not re-read per expert.
+
+The sourcing of the two operands turned out to matter more than anything else - a 2x2 factorial at
+rows=4, KS=8:
+
+    A source        B source       us    slots/weight
+    SLM             SLM          372.1        32.5
+    SLM             global       191.5        16.7
+    global scratch  SLM          456.5        39.9
+    global scratch  global       109.1         9.5   <- and bit-exact vs y_ref
+
+Feeding joint_matrix_load from LOCAL (SLM) space costs about 20 slots per weight; the same operand
+sourced from global space costs about 2. That is a 3.4x difference on the whole kernel, and it is a
+property of the lowering, not of the algorithm: the intuitive design (stage the assembled tile in SLM,
+which is fast memory and right next to the math unit) is the slow one here. A 1 KB global scratch region
+per sub-group, rewritten every tile, stays in L2 and costs no DRAM traffic at all - it reports 56 GB/s
+against the trellis, far below the 292 GB/s the GEMV achieves.
+
+rev E (global scratch A, global B) against rev C, min of 4 interleaved runs, E=10 gate_proj:
+
+    KS   rows |  revC us |  revE us  slots/w | revE vs revC
+     8     1 |     75.6 |    153.3     13.4 | x0.49
+     8     4 |    112.5 |    109.5      9.6 | x1.03
+     8     8 |    252.0 |    113.3      9.9 | x2.22
+     8    16 |    488.3 |    122.2     10.7 | x4.00
+    16     1 |     75.3 |     95.5      8.3 | x0.79
+    16     4 |    112.6 |     99.8      8.7 | x1.13
+    16     8 |    251.9 |    108.8      9.5 | x2.32
+    16    16 |    484.7 |    127.2     11.1 | x3.81
+
+  best per rows:  rows 1 x0.79 | rows 4 x1.13 | rows 8 x2.31 | rows 16 x3.98
+
+WHAT THIS SETTLES
+* The row term is genuinely removable: rev E spends 8.3 - 11.1 slots/weight across rows 1..16 (flat),
+  where rev C spends 7.0 at rows=1 and 31 at rows=16. Predicted crossover from the fitted model was
+  rows ~2.4; measured is ~3.5, so the model slightly flattered DPAS.
+* Assembly is NOT free and this is the number step 2 existed to produce: ~8.5 slots/weight all-in for
+  rev E versus ~5.8 for rev C's unpack-only fixed cost, i.e. assembling A and driving the matrix unit
+  costs roughly 2.7 slots/weight more than the dp4a path's own fixed work. Because it is a FIXED cost,
+  it is repaid once per weight instead of once per token - which is the entire argument for the matrix
+  path, and it pays back from rows ~4.
+* Consequence for the engine: two decode schedules keyed on rows - dp4a (rev C) at rows <= 2, DPAS
+  (rev E) at rows >= 4. Same integer accumulator, so both are bit-exact against the same reference and
+  they agree with each other bit-for-bit; the split is a performance decision, not a numerics regime.
+* Caveats, stated plainly: rev E is a first cut and unoptimized (matrix objects re-created inside the
+  inner loop, two barriers per tile, no double-buffering, scratch geometry untuned), so the x8/x16
+  numbers should be read as "a working DPAS path already wins this much" rather than as the ceiling.
+  Measured on ONE geometry (E=10, gate_proj, k=2560, n=640, K=3) - the other eight checkpoints,
+  including GLM's n=4096/tn=256 and Qwen3.5/3.6's tn=32, are unmeasured, and rows=1 losing means the
+  engine carries two code paths that both need Gate A in CI.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
     ./probe_dpas /tmp/gemv_dpE10 21 <rows> <KS>        # KS in {1,2,4,8}; KS*2*32 must divide 4k
     ./probe_gemv /tmp/gemv_dpE10 0 21 <rows> 1 4       # rev C on identical bytes for comparison
+
+    # rev E: A assembled from trellis bytes; the sourcing flags are the 2x2 experiment above
+    DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas2 /tmp/gemv_dpE10 21 <rows> <ks>
+    DPAS_NO_MAD=1 ./probe_dpas2 ...       # unpack + assembly only (prices the assembly)
+    DPAS_NO_UNPACK=1 ./probe_dpas2 ...    # matrix path only

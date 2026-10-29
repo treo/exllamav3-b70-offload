@@ -644,3 +644,31 @@ that nailed bug (2) are **both non-negative**, so they would have passed bug (3)
 bugs need a sign-carrying control: add `x ≡ −1` (expected accumulator `−Σbytesum + 510·k`, computable in
 two lines) alongside the zero and one cases. Cheap controls are only good if they cover the axis the bug
 lives on.
+
+## 32. The "obviously right" optimization was 3.4× wrong, and a 2×2 found it in one pass
+
+rev E — the DPAS kernel that assembles its A operand from trellis bytes — was 3.4× slower than it should
+have been, and the cause was not in the algorithm. I had staged the assembled tile in **SLM**, because
+SLM is fast, sits next to the math unit, and is where every handbook says to stage operands before
+feeding a systolic array. On this toolchain `joint_matrix_load` from `local_space` costs roughly ten
+times the same load from `global_space`, so the good-habit version was the bad one. Moving the tile to a
+1 KB **global** scratch per sub-group — rewritten every tile, so it never leaves L2 and adds no DRAM
+traffic — recovered the whole gap and more: 372 → 109 µs.
+
+What made it cheap to find was the design of the probe, not cleverness. Rather than change one thing per
+run on a hypothesis (the pattern that burned eight rounds on the rev C numerics), I ran the **2×2** of
+{A source} × {B source} in one pass:
+
+    A=SLM     B=SLM      372 us
+    A=SLM     B=global   192 us    <- B's source halves it
+    A=global  B=SLM      457 us    <- worse than both-SLM: an interaction
+    A=global  B=global   109 us    <- and so does A's
+
+Four points separate "which factor matters", "is there an interaction", and "is it the thing I was
+already suspicious of" — one-factor-at-a-time cannot do that without assuming the answer, and here it
+would have had to explain away global-A making things *worse*.
+
+Two rules. (1) When a design choice feels right because it is a habit, treat it as an unmeasured
+variable and price it: this defect lives in the *lowering*, so no amount of reading the algorithm would
+have revealed it. (2) Prefer factorial probes when toggling the factors is cheap — both switches existed
+already for a different measurement, so the design cost nothing but the runs.

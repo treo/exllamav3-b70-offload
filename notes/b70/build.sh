@@ -11,7 +11,7 @@ set -eo pipefail
 cd "$(dirname "$0")"
 
 for f in probe_transport probe_doorbell probe_notify probe_resident probe_stores probe_stores2 \
-         probe_unreg probe_coherency probe_rates probe_gemv probe_dpas; do
+         probe_unreg probe_coherency probe_rates probe_gemv probe_dpas probe_dpas2; do
     icpx -fsycl -O2 -o "$f" "$f.cpp"
     echo "built $f"
 done

@@ -11,5 +11,6 @@ probe_coherency
 probe_rates
 probe_gemv
 probe_dpas
+probe_dpas2
 libb70shim.so
 __pycache__/
