@@ -900,6 +900,55 @@ ISA was read with, and I have not dumped rev H here yet. Given LESSONS 40, the I
 H should be reproduced with the driver actually used for timing before treating "no spills" as one of our
 measurements.
 
+================================================================================
+REV H + EXPERT GRID (DPAS_X on rev H): the starvation was real, and the winner changes with batch
+================================================================================
+Ported the same four-site change that worked on rev G - grid = tn*KS*E, one expert and one k-slice per
+group - plus the two sites rev H's ESIMD structure adds: the fetch pointer's expert base (`fp` advances by
+`tk*kstride` per expert, so it has to start at eg*tk*kstride) and its ring bound. Doing only the store
+counter, as on rev G, would load expert 0 forever.
+
+Exactness after the port: **36 of 36 bit-exact again** (gate and down, K = 2/3/5, rows 1/4/16, KS 2/4/8/10/16),
+with a fresh output file per run.
+
+Warm interleaved min of 4, us, both with DPAS_X:
+
+  gate tn=40      H ks2  H ks4  H ks8  H ks16 |  H best |  G+X   | winner
+    rows=1         39.1   45.3   45.2   49.3  |   39.1  |  36.5  | G+X x1.07
+    rows=4         39.4   45.5   46.5   50.7  |   39.4  |  37.2  | G+X x1.06
+    rows=8         41.1   48.5   50.8   55.6  |   41.1  |  41.0  | tie
+   rows=16         44.2   53.5   61.0   69.9  |   44.2  |  56.4  | H x1.28
+
+  down tn=160     H ks2  H ks4  H ks10        |  H best |  G+X   | winner
+    rows=1         43.2   44.7   56.6         |   43.2  |  41.6  | G+X x1.04
+    rows=4         46.6   50.2   66.3         |   46.6  |  42.6  | G+X x1.09
+    rows=8         54.1   58.1   84.5         |   54.1  |  52.1  | G+X x1.04
+   rows=16         64.7   72.1  143.8         |   64.7  |  92.7  | H x1.43
+
+Three things to take from this.
+
+1. **The diagnosis was right, and it is visible as a flipped KS optimum.** rev H without the grid improved
+   monotonically with KS and its best cell was the largest allowed (gate ks16 = 43.1 us). With the grid its
+   optimum is ks2 at every row count and the same configuration runs 39.1 us - the kernel was never
+   instruction-poor, it was underfed with work.
+2. **The winner now splits by batch, the opposite way from dp4a-vs-DPAS.** rev G+X (assemble A in SLM, load
+   it back) is 4-9 % ahead at rows 1-8; rev H (products straight into the DPAS B operand, no SLM, no
+   barriers, no B loads) wins by x1.28 and x1.43 at rows=16 on gate and down. That is consistent with what
+   the two designs cost: rev H's per-tile budget is ~0.32 instructions per weight regardless of rows, while
+   rev G's assembly-plus-load terms grow with the padded token rows it carries.
+3. **Layer time, best measured per configuration** (2 x gate + down): b=1 114.6 us (G+X) vs 121.4 (H+X) vs
+   117.9 (dp4a) - all within 6 %; b=16 173.1 us (H+X) vs 205.5 (G+X) - H+X x1.19. So the schedule is becoming
+   three-way: dp4a or rev G+X at the smallest batches, rev H+X once a chunk carries many rows per expert.
+   Choosing between them needs the rows 32-256 measurements that still do not exist, which is now the single
+   most valuable missing number in this line (it is also what the 1024-token throughput estimate rests on).
+
+Local ISA check, partial and labelled as such: dumping rev H with IGC_ShaderDumpEnable emits a native
+`..._simd32_entry_0001.asm` for the ESIMD kernel (1129 lines, 2 `send` instructions in the dumped unit -
+consistent with 2 DPAS per tile, since DPAS is issued as a send message, and 0 literal `dpas` mnemonics).
+I did not complete a rigorous spill/message census on this driver, so the "128 registers, no spills" claim
+remains the other IGC's measurement, not ours (LESSONS 40 applies in both directions: an instrument I have
+not calibrated cannot refute one either).
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -929,7 +978,7 @@ measurements.
     DPAS_REG=1 ./probe_dpas4 CASE 5 1 16                                       # in-register B: refuted
     DPAS_X=1 ./probe_dpas4 CASE 5 <rows> <ks>      # experts in the grid too; best ks 2 (gate) / 1 (down)
     ./probe_dpas5 CASE 5 <rows> <ks>        # rev H, ESIMD xmx::dpas from registers; KS matters a lot (best = largest)
-    DPAS_M=1 ./probe_dpas5 CASE 5 1 16      # force rows per DPAS
+    DPAS_X=1 ./probe_dpas5 CASE 5 <rows> <ks>    # rev H with experts in the grid; optimum ks2 everywhere
     for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
       env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8

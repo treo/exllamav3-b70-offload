@@ -136,6 +136,9 @@ struct Launch
     int KS = 8;
     int zero = 0;                   // always 0; opaque to the device compiler (see the kernel)
     bool skip_mad = false, skip_unpack = false;
+    // 'X' (DPAS_X=1): experts in the grid as well as the k-slice (grid = tn*KS*E), so PART carries 2*KS
+    // partials per output instead of 2*KS*E. rev H's timing showed it starved for parallelism without this.
+    bool structx = false;
 };
 
 // K = trellis bits per weight, MR = token rows per DPAS (repeat count), NF = DPAS per byte-block (1, or 2
@@ -154,8 +157,8 @@ static void submit(const Launch &L)
     const int E = m.E, tk = m.tk, tn = m.tn, n = m.n;
     const int tps = tk / KS;                  // trellis tiles per k-slice
     const int per_sg = tps / 2;               // tiles per thread (main() enforces even halves)
-    const size_t threads = (size_t)tn * KS * 2;
-    const bool skip_mad = L.skip_mad, skip_unpack = L.skip_unpack;
+    const size_t threads = (size_t)tn * KS * (L.structx ? E : 1) * 2;
+    const bool skip_mad = L.skip_mad, skip_unpack = L.skip_unpack, structx = L.structx;
     const uint32_t *W = L.W;
     const uint32_t *XA = L.XA;
     int32_t *PART = L.PART;
@@ -170,10 +173,11 @@ static void submit(const Launch &L)
             const int sub = gid & 1;
             const int grp = gid >> 1;
             const int nt = grp % tn;
-            const int ks = grp / tn;
+            const int ks = structx ? (grp / tn) % KS : grp / tn;
+            const int eg = structx ? grp / (tn * KS) : 0;      // expert owned by this thread group under 'X'
             const int kt0 = ks * tps + sub * per_sg;
             const int ntile = per_sg;
-            const int total = E * ntile;
+            const int total = (structx ? 1 : E) * ntile;
 
             // --- ring geometry, once per thread, as vectors over the 16 columns (rev G's col_ring) ---
             // Column c reads ring positions t = 4*(c&7) + a4, j = 4*(c>>3) + jl: window starts
@@ -208,11 +212,16 @@ static void submit(const Launch &L)
             simd<uint32_t, NW> pf[NSET];
             const size_t kstride = (size_t)tn * NW;                                   // next kt, same expert
             const size_t estride = (size_t)tk * kstride - (size_t)(ntile - 1) * kstride; // last kt -> next expert
-            const uint32_t *fp = W + (size_t)kt0 * kstride + (size_t)nt * NW;         // next tile to fetch
-            int fe = 0, fti = 0;
+            const uint32_t *fp = W + (size_t)(structx ? eg : 0) * tk * kstride + (size_t)kt0 * kstride +
+                                 (size_t)nt * NW;         // next tile to fetch
+            // Under 'X' the ring must both start and stop at this group's expert. Getting only the store
+            // counter right (as happened on rev G) loads expert 0 while PART is indexed correctly, which
+            // yields confidently wrong output for every configuration.
+            int fe = structx ? eg : 0, fti = 0;
+            const int elast = structx ? eg + 1 : E;
             auto fetch = [&](simd<uint32_t, NW> &d) SYCL_ESIMD_FUNCTION
             {
-                if (fe >= E) return;
+                if (fe >= elast) return;
                 d = load_dw<NW>(fp);
                 if (++fti == ntile) { fti = 0; ++fe; fp += estride; }
                 else fp += kstride;
@@ -265,7 +274,7 @@ static void submit(const Launch &L)
             // One tile. U is the ring slot as a compile-time constant: the VC backend does not honour
             // #pragma unroll on a loop with an early exit, and a runtime slot index made it copy the tile
             // out of the ring one dword at a time (24 indirect moves per tile, seen in the BMG ISA).
-            int ce = 0, cti = 0;                      // current tile
+            int ce = structx ? eg : 0, cti = 0;          // current tile
             const uint32_t *ap = XA + (size_t)kt0 * ADW;   // this thread's activation tiles
             auto step = [&](auto U) SYCL_ESIMD_FUNCTION
             {
@@ -421,7 +430,8 @@ int main(int argc, char **argv)
 
     const double trellis_mib = wbuf.size() / 1048576.0;
     printf("case %s: E %d R %d k %d n %d K %d  trellis %.2f MiB  KS %d  threads %d\n",
-           dir.c_str(), m.E, m.R, m.k, m.n, K, trellis_mib, KS, m.tn * KS * 2);
+           dir.c_str(), m.E, m.R, m.k, m.n, K, trellis_mib, KS,
+           m.tn * KS * (getenv("DPAS_X") ? m.E : 1) * 2);
     printf("rev H (ESIMD): dpas repeat count %d x %d per byte-block (rows padded to %d), no SLM\n", MR, NF, RPAD);
 
     sycl::device dev{sycl::gpu_selector_v};
@@ -443,6 +453,7 @@ int main(int argc, char **argv)
     Launch L;
     L.q = &q; L.W = W; L.XA = XA; L.PART = PART; L.m = m; L.KS = KS;
     L.skip_mad = getenv("DPAS_NO_MAD") != nullptr;
+    L.structx = getenv("DPAS_X") != nullptr;
     L.skip_unpack = getenv("DPAS_NO_UNPACK") != nullptr;
     L.zero = 0;                     // a kernel argument, so the device compiler cannot fold it
 
