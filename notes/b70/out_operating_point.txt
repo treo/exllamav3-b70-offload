@@ -16,8 +16,10 @@ Method:
   * the DEVICE only owns a fraction h of the picks (three disjoint homes, no replication), so what one
     B70 reads per layer is h * |union| * expert_bytes. Sampling the rate curve at the all-picks
     footprint overstates the working set by 1/h and, because the curve is not flat, misstates the rate.
-  * rate: linear interpolation of the measured footprint bands below, scattered and clustered.
-  * us/layer = footprint_MiB * 1048.576 / GB_per_s; ms/token = us/layer * MoE layers.
+  * rate/footprint columns are LOCALITY DIAGNOSTICS only. The time column now comes from plan_decode_cost.py:
+    measured us per (expert, projection) per row count, dispatching dp4a (rows=1) vs DPAS (rows>=2). The old
+    `us/layer = footprint * 1048.576 / GB_per_s` model was retired by measurement - decode is instruction-bound
+    and recipe-independent - and it was 2.4x OPTIMISTIC at b=1 (42-51 us/layer modelled vs 107 us measured).
 
 Upper bound, not a prediction: probe_rates runs 10^3-10^5 items per launch, so it shows what the card
 can do with the pipe full. A b=1 decode launch is far smaller; E4 measures the real thing.
@@ -31,13 +33,12 @@ parent window per layer ~250 us at b=1 [M, doc/prep] (scales weakly with b until
   is what IT actually reads per layer, which is the only footprint the rate curve should be
   sampled at. The all-picks row (h=1) is printed as the upper bound a 3090-sized S_g would see.
  rows   union  dev picks  footprint  in L2?   GB/s  us/layer  x b=1  clust  ms/token  cards
-    1    10.0        9.8      14.3M     yes    292        51   1.0x     27      2.46    0.2
-    2    19.9       19.4      28.4M      no    292       102   2.0x     53      4.90    0.4
-    4    38.8       37.9      55.5M      no    292       199   3.9x    104      9.57    0.8
-    8    72.7       71.0     104.0M      no    234       465   9.1x    285     22.33    1.9
-   16   131.2      128.0     187.6M      no    214       919  17.9x    634     44.13    3.7
-   32   219.1      213.9     313.3M      no    234      1404  27.3x    936     67.39    5.6
-  b=1: 48 layers x 51 us = 2.46 ms/token of B70 read time (14.3 MiB/layer at the rate matched to that footprint)
+    1    10.0        9.8      14.3M     yes    292       107   1.0x    558      5.14    0.4
+    2    19.9       19.4      28.4M      no    292       212   2.0x    558     10.16    0.8
+    4    38.8       37.9      55.5M      no    292       414   3.9x    558     19.85    1.7
+    8    72.7       71.0     104.0M      no    234       888   8.3x    383     42.60    3.6
+   16   131.2      128.0     187.6M      no    214      2213  20.7x    310    106.24    8.9
+  b=1: 48 layers x 107 us = 5.14 ms/token of B70 time (14.3 MiB/layer read while doing 9.8 expert-projection-layers of work; dispatch picks dp4a)
   upper bound if this card owned every pick: 53 us/layer
 
 GLM@3.05:  topk=8 (config.json), expert block 9.000 MiB, 288 experts/layer, 42 MoE layers (45 total, H=4096), all-experts set 2.53 GiB, h=0.708 [profile upper bound]
@@ -45,13 +46,12 @@ GLM@3.05:  topk=8 (config.json), expert block 9.000 MiB, 288 experts/layer, 42 M
   is what IT actually reads per layer, which is the only footprint the rate curve should be
   sampled at. The all-picks row (h=1) is printed as the upper bound a 3090-sized S_g would see.
  rows   union  dev picks  footprint  in L2?   GB/s  us/layer  x b=1  clust  ms/token  cards
-    1     8.0        5.6      50.8M      no    132       405   1.0x    247     17.01      ?
-    2    15.8       11.2     100.6M      no    175       602   1.5x    477     25.27      ?
-    4    30.2       21.4     192.2M      no    220       917   2.3x    778     38.51      ?
-    8    55.1       39.0     351.2M      no    239      1539   3.8x   1246     64.63      ?
-   16    96.1       68.0     612.3M      no    253      2539   6.3x   2111    106.65      ?
-   32   153.1      108.4     975.6M      no    254      4020   9.9x   3204    168.83      ?
-  b=1: 42 layers x 405 us = 17.02 ms/token of B70 read time (50.9 MiB/layer at the rate matched to that footprint)
+    1     8.0        5.6      50.8M      no    132       335   1.0x    216     14.05      ?
+    2    15.8       11.2     100.5M      no    175       658   2.0x    221     27.62      ?
+    4    30.2       21.4     192.2M      no    220      1259   3.8x    259     52.90      ?
+    8    55.1       39.0     351.1M      no    239      2633   7.9x    296    110.57      ?
+   16    96.1       68.1     612.6M      no    253      6352  19.0x    304    266.80      ?
+  b=1: 42 layers x 335 us = 14.06 ms/token of B70 time (50.9 MiB/layer read while doing 5.7 expert-projection-layers of work; dispatch picks dp4a)
   upper bound if this card owned every pick: 534 us/layer
 
 Reading it:

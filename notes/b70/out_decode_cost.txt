@@ -1,0 +1,36 @@
+plan_decode_cost.py - the measured B70 decode cost model that replaces "bytes / GB-per-second".
+
+Why this module exists. plan_operating_point.py and plan_concurrency.py computed B70 decode time as
+`expert_bytes / rate(matched footprint)`, sampling a rate curve measured with memcpy-shaped launches. That
+model was retired by measurement: the real GEMV is instruction-bound, not bandwidth-bound, and its time is
+independent of the quantization recipe (Qwen3.8 across K=2..6: 73.6-74.8 us for identical weight counts,
+b70-kernels.md 2b/2c). Two kernel families now exist, both bit-exact against a Python reference:
+
+  dp4a   probe_gemv.cpp rev C with -DGEMV_KCONST  (compile-time trellis K)
+  dpas   probe_dpas4.cpp rev G with DPAS_X=1      (tokens on M, experts in the grid)
+
+and the engine dispatches between them by row count, which is why the tables below are indexed by rows.
+
+Every number is microseconds per (expert, projection) on Qwen3.8@2.68bpw, E=10, measured as the reported
+projection time divided by E, warm (>=15 s sustained load) and interleaved min-of-N, best split-K per
+configuration. Two windows were kept where they disagree, because they sometimes disagree by 20 %:
+see `SPREAD`. Cost is per weight, not per byte: these are the same weights at any trellis K.
+
+Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X).
+
+cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
+
+ rows  dp4a us/expert-layer  dpas us/expert-layer   dispatch  dpas/dp4a
+    1                 11.76                 12.57       dp4a      1.07x
+    2                 16.23                 11.69       dpas      0.72x
+    4                 30.99                 11.71       dpas      0.38x
+    8                 69.27                 13.40       dpas      0.19x
+   16                134.97                 18.53       dpas      0.14x
+
+Crossover: dp4a wins at rows=1 by ~5 %; the DPAS path wins from rows=2. Per-expert-layer cost is
+flat in rows for the DPAS path (11.2 -> 17.8 us from 1 to 16 tokens) and grows ~11x for dp4a,
+which is the whole reason the schedule exists.
+
+rows > 16 is outside the measured set; the DPAS path uses two M=8 fragments above 8 rows and its
+cost slope is still rising at 16, so quoting a 64- or 256-token decode number from this table
+would be an extrapolation, not a measurement.

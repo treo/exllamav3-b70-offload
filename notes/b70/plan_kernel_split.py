@@ -12,9 +12,14 @@ union(rows) * h * expert_bytes / rate. Two of those factors are kernel-addressab
                    out_rates_footprint.txt). This is not a "better kernel" in the usual sense: it is
                    grid ORDER - neighbouring lanes reading neighbouring addresses - which a b=1 GEMV
                    cannot arrange (there are too few tiles to order) and a bucketed large-b GEMM can.
-  flops            only addressable work if rows/expert >= 272 (the measured XMX crossover). At decode
-                   rows/expert stays ~1-6 even at b=256, so a DPAS path buys nothing there; it is a
-                   PREFILL mechanism, and only for the hot tail of big chunks.
+  flops    RETIRED as a decode argument. The old text here said matrix routes only pay above
+           rows/expert >= 272, so "a DPAS path buys nothing" at decode and DPAS is a prefill mechanism.
+           Measured otherwise: with tokens on M and experts in the grid (rev G + DPAS_X), the DPAS path beats
+           the dp4a GEMV from rows=2 (11.7 vs 16.2 us per expert-layer) and by 8.6x at rows=16, because its
+           per-weight cost is flat in rows while dp4a re-walks the weights per token. The 272 figure is a
+           compute-vs-byte crossover for large chunks and still governs PREFILL; it was never the right test
+           for decode, where the kernel is bound by operand assembly (66 % of the kernel) rather than by
+           arithmetic throughput. See b70-kernels.md 2c items 13o-13q and plan_decode_cost.py.
 
 Also priced here, because it is the second thing that changes with b: the activation path. x goes down
 as rows * hidden * 1 B (int8) and partials come up as rows * topk * hidden * sz_out, at 14.4 GB/s, so at

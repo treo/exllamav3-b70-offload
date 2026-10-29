@@ -18,8 +18,10 @@ Method:
   * the DEVICE only owns a fraction h of the picks (three disjoint homes, no replication), so what one
     B70 reads per layer is h * |union| * expert_bytes. Sampling the rate curve at the all-picks
     footprint overstates the working set by 1/h and, because the curve is not flat, misstates the rate.
-  * rate: linear interpolation of the measured footprint bands below, scattered and clustered.
-  * us/layer = footprint_MiB * 1048.576 / GB_per_s; ms/token = us/layer * MoE layers.
+  * rate/footprint columns are LOCALITY DIAGNOSTICS only. The time column now comes from plan_decode_cost.py:
+    measured us per (expert, projection) per row count, dispatching dp4a (rows=1) vs DPAS (rows>=2). The old
+    `us/layer = footprint * 1048.576 / GB_per_s` model was retired by measurement - decode is instruction-bound
+    and recipe-independent - and it was 2.4x OPTIMISTIC at b=1 (42-51 us/layer modelled vs 107 us measured).
 
 Upper bound, not a prediction: probe_rates runs 10^3-10^5 items per launch, so it shows what the card
 can do with the pipe full. A b=1 decode launch is far smaller; E4 measures the real thing.
@@ -44,6 +46,11 @@ MODELS = [("Qwen3.8@2.68", "2.68bpw", 512, 1.465, 48, 250.0, 0.976,
            "GLM-5.3-Flash-exl3@3.05bpw")]
 ROOT = "/home/treo/projects/vendor/tabbyAPI/models"
 L2_MIB = 18.0
+
+import importlib.util as _ilu                      # measured decode cost model (see plan_decode_cost.py)
+_spec = _ilu.spec_from_file_location("pdc", os.path.join(os.path.dirname(__file__), "plan_decode_cost.py"))
+pdc = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(pdc)
 
 
 def config_for(dirname):
@@ -126,13 +133,20 @@ def main():
                f"{'us/layer':>9s} {'x b=1':>6s} {'clust':>6s} {'ms/token':>9s} {'cards':>6s}")
         print(hdr)
         base = None
-        for B in (1, 2, 4, 8, 16, 32):
+        bpw_note = float(sub.replace("bpw", ""))
+        for B in (1, 2, 4, 8, 16):
             d = distinct_experts(cnt, topk, B, rng=rng)
             dev = d * h
             mib = dev * eb
             s = interp(band, mib, 1)
             c = interp(band, mib, 2)
-            us, usc = mib * 1048.576 / s, mib * 1048.576 / c
+            # Measured decode cost replaces bytes/rate: the GEMV is instruction-bound and recipe-independent,
+            # so the footprint curve is kept here only as a locality diagnostic. rows > 16 is outside the
+            # probed set and is clamped to rows=16 cost (optimistic; flagged below).
+            rr = min(B, max(pdc.MEASURED_ROWS))
+            us_layer, kern = pdc.layer_us(dev, rr, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
+            usc = c            # clustered-rate column is now diagnostic only
+            us = us_layer
             if B == 1:
                 base = us
             cards = f"{us / tlayer:.1f}" if tlayer else "   ?"
@@ -140,9 +154,10 @@ def main():
                   f"{us:9.0f} {us/base:5.1f}x {usc:6.0f} {us*layers/1000:9.2f} {cards:>6s}")
         d1 = distinct_experts(cnt, topk, 1, rng=rng)
         mib1 = d1 * h * eb
-        us1 = mib1 * 1048.576 / interp(band, mib1, 1)
-        print(f"  b=1: {layers} layers x {us1:.0f} us = {layers*us1/1000:.2f} ms/token of B70 read time "
-              f"({mib1:.1f} MiB/layer at the rate matched to that footprint)")
+        us1, kern1 = pdc.layer_us(d1 * h, 1, pdc.scale_from_eb(eb, bpw_note))
+        print(f"  b=1: {layers} layers x {us1:.0f} us = {layers*us1/1000:.2f} ms/token of B70 time "
+              f"({mib1:.1f} MiB/layer read while doing {d1*h:.1f} expert-projection-layers of work; "
+              f"dispatch picks {kern1})")
         print(f"  upper bound if this card owned every pick: {d1*eb*1048.576/interp(band, d1*eb, 1):.0f} us/layer\n")
     print("""Reading it:
 * A decode layer reads h*topk experts, not topk, and not the checkpoint. The footprint that the rate

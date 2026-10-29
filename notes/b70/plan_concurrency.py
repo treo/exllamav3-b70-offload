@@ -11,7 +11,10 @@ set by three worker terms per layer that scale differently:
       and flagged). Weight reads are batch-independent; the recurrent state is per SEQUENCE (3 MiB/layer
       read + written on Qwen3.8) and KV grows with rows x ctx, so the parent does have a rows slope - it
       is just much smaller than the expert term.
-  T_b70(rows)    = distinct_experts(rows) * h * expert_bytes / rate(matched footprint)
+  T_b70(rows)    = h * |union(rows)| * per_expert_layer_us(rows)   [measured, plan_decode_cost.py]
+      REPLACES the old bytes/rate formula. The decode GEMV is instruction-bound and recipe-independent
+      (b70-kernels 2b/2c), so bytes over a bandwidth curve is the wrong model; the measured per-expert cost
+      is per weight and per row count, and the engine dispatches dp4a (rows=1) vs DPAS (rows>=2).
       distinct experts is the union over rows, i.e. this ALREADY assumes perfect intra-step weight
       reuse: an expert read once per layer per step, however many rows picked it (the bucketed GEMM the
       CPU path uses). That is the right model, and it is why B70 work saturates instead of growing
@@ -42,6 +45,10 @@ _spec2 = importlib.util.spec_from_file_location("pq", os.path.join(os.path.dirna
                                                                    "plan_quant_scaling.py"))
 pq = importlib.util.module_from_spec(_spec2)
 _spec2.loader.exec_module(pq)
+_spec3 = importlib.util.spec_from_file_location("pdc", os.path.join(os.path.dirname(__file__),
+                                                      "plan_decode_cost.py"))
+pdc = importlib.util.module_from_spec(_spec3)
+_spec3.loader.exec_module(pdc)
 
 CTX = 4096
 CALIB = {"Qwen3.8": 250.0}          # measured T_layer at b=1, us (doc/prep); GLM unmeasured
@@ -106,12 +113,20 @@ def main():
         for rows in (1, 2, 4, 8, 16, 32, 64, 128, 256):
             u = union_at(cnt, E, topk, rows)
             dev_mib = u * h * eb
-            rate = pq.interp(band, dev_mib, 1)
+            rate = pq.interp(band, dev_mib, 1)      # diagnostic only now: footprint, not a rate driver
             tp = fixed + us(rd_l + rows * (state_l + kv_l), 936.0)
-            tb = us(dev_mib, rate)
+            # Measured decode cost. rows > 16 is outside the probed set, so those rows are held at the
+            # rows=16 per-expert cost (the DPAS path's slope is still rising there, so this is optimistic
+            # on the device side and is flagged in the printed note rather than silently extrapolated).
+            rr = min(rows, max(pdc.MEASURED_ROWS))
+            rr = min(rows, max(pdc.MEASURED_ROWS))
+            tb, kern = pdc.layer_us(u * h, rr, pdc.scale_from_eb(eb, float(lab)))
             tc_ = us(u * (1 - h) * eb, ppb.CPU_RATE)
             wall = max(tp, tb, tc_)
-            binds = "parent" if wall == tp else ("B70" if wall == tb else "CPU")
+            # rows > 16 is outside the probed set, so those rows are held at the rows=16 per-expert cost
+            # (the DPAS slope is still rising there, so this is optimistic on the device side and is flagged
+            # in the printed note rather than silently extrapolated).
+            binds = "parent" if wall == tp else (f"B70:{kern[0].upper()}" if wall == tb else "CPU")
             step = wall * nl / 1000.0
             tput = rows / (step / 1000.0)
             if rows == 1:

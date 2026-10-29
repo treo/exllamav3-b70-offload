@@ -620,6 +620,19 @@ measured rate curve at the matched footprint:
   42.5) → ×2.1 of the 250 µs parent window at 4× batch; b=1 ≈ 113–139 µs, parity with dp4a from one kernel
   family. All 27 new configurations bit-exact; the K ≤ 5 limit still excludes the 6.05 bpw recipe, and
   absolute times in this line carry ±15–20 % between warm windows (ratios are within-window).
+* **The planning artifacts were re-derived on the measured cost model, and the old one was 2.4× optimistic.**
+  `plan_operating_point.py`, `plan_concurrency.py` and `plan_kernel_split.py` computed B70 time as
+  `expert_bytes / rate(matched footprint)` off the memcpy-shaped rate curve. That model is replaced by
+  `plan_decode_cost.py` — measured µs per (expert, projection) per row count, dispatching dp4a at rows=1 and
+  DPAS from rows=2 — and the footprint/rate columns survive only as locality diagnostics. Consequences at
+  Qwen3.8@2.68, h≈0.98: **b=1 per-layer B70 time is 107 µs measured against 42–51 µs modelled**, so
+  48 layers cost 5.1 ms/token not 2.5 ms; and **the B70, not the parent, becomes the binding home from
+  rows≈4** (parent 272 µs vs B70 431 µs at rows=4; parent binds at rows 1–2), giving 83 tok/s at b=1, ~193 at
+  b=4, a dip to 166 at b=16 as the union outruns the batch, then 585 tok/s at b=128. GLM is worse in the same
+  shape (335 µs/layer at b=1, 14.05 ms/token across 42 layers) which strengthens the earlier conclusion that
+  GLM needs a second card for *rate*, not merely hit rate. Two honesty flags baked into the scripts: rows>16
+  is clamped to the rows=16 per-expert cost (still-rising slope, so those rows are optimistic), and the
+  cost-to-bytes conversion divides by bits-per-weight because cost is per weight, not per byte.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is
