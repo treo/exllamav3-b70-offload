@@ -579,3 +579,34 @@ recipe choice costs VRAM and link bytes and essentially **no decode compute time
 byte-based planner in `plan_quant_scaling.py` would have got backwards. Whenever a metric's denominator
 is itself a function of the variable you are sweeping, the metric is not comparable; normalize to the
 count of things worked on.
+
+## 30. Scope your absence claims, and check your own artifacts before calling something unprecedented
+
+I wrote "**no int8 DPAS anywhere in the tree**" after grepping `dpas<` under
+`doc/b70/llm-scaler` and finding only fp16/bf16/fp8 call sites. That was true of the subtree I searched
+and false of the repository. `doc/b70/b70-bench/bench.cpp` — which I had *already cited* in the same
+document for its 367 TOPS XMX int8 figure, and whose measured 366.92 TOPS sits in my own §1 table — runs
+`run_matrix<int8_t, int32_t, 8, 16, 32>` through `joint_matrix`. Two independent signals that integer
+DPAS works on this card, one of them my own measurement, and I connected neither.
+
+The cost was not cosmetic. That claim was load-bearing for a decision: it made "integer DPAS keeps
+bit-exactness" sound like an unproven route with no prior art, pushing E24 toward the fp16 path that
+forfeits bit-for-bit agreement with the CPU/3090 paths. Once corrected against the actual header
+(`xmx/dpas.hpp:243-256`'s static-assert table allows `A,B ∈ ub,b,u4,s4,u2,s2 → C ∈ ud,d`), a better third
+route appeared that neither harvest had suggested: feed DPAS the four bytes of `window * MUL1` as four
+K-steps against the activation replicated 4× along K, so the weight never needs more than 8 bits, the
+accumulator is int32, and Gate A survives untouched.
+
+Three rules out of it:
+
+* **State the scope of an absence claim as the search that produced it** — "no int8 DPAS in
+  llm-scaler's ESIMD kernels (`grep -rn 'dpas<' … | grep int8`, one subtree)", not "anywhere in the
+  tree". An unscoped negative invites someone to design against it, which is exactly what happened.
+* **For capability questions, the authoritative source is the toolchain header, not a sample corpus.**
+  The legal (A, B, C) combinations were sitting in a `static_assert` message in an installed header;
+  I mined a third-party kernel library for them instead. A corpus tells you what people *do*; a header
+  tells you what is *possible* — and novelty usually lives in the gap between them.
+* **Re-read your own artifacts before concluding something is unprecedented here.** I had cited a
+  measurement of the very capability I declared unavailable, sitting in this project's own reference
+  directory. Same failure class as the 150–180 GB/s inheritance: an earlier number, kept in a table,
+  unconnected to the inference being drawn next to it.

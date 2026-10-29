@@ -33,7 +33,7 @@ same inputs).
 |---|---|---|
 | VRAM read, measured on this exact access pattern | **132–292 GB/s scattered, 216–558 GB/s clustered** (608 GB/s spec; `probe_rates`, **[M]**; the range is working-set size, 64 MiB–2 GiB — `out_rates_footprint.txt`) | 351–919 G-weights/s scattered at K = 2.5–3.0; the spread is *ordering* and *footprint*, not layout — §3a |
 | lanes × clock | 4096 × 2.8 GHz = 1.15·10¹³ lane-ops/s | the real unpack density (+47 lane-inst per 32-lane word) costs 0.1–4.4 % of bandwidth at decode-like footprints, 14 % at a 64 MiB one — decode sits on the bandwidth side of that line, with less margin than the first measurement suggested |
-| XMX | 183 TFLOP/s fp16, 367 TOPS int8 **[M]** (`b70-bench`) | against the measured 674 GB/s copy peak that is **272 MAC per byte**, so a GEMM becomes compute-bound only at **~272 rows hitting the same expert** — see §4a: at a 2048-token chunk the hottest Qwen3.8 expert sees 41–522 rows and 0–13 of 512 experts qualify, so prefill is memory-bound in practice and XMX is an opportunistic per-expert path, not the default |
+| XMX | 183 TFLOP/s fp16, 367 TOPS int8 **[M]** (`b70-bench`; integer DPAS measured at 366.92 TOPS = 100 % of spec, and `dpas.hpp` allows u8×s8→int32) | against the measured 674 GB/s copy peak that is **272 MAC per byte** *for a 1-byte-per-weight format* — at our 0.375 B/weight with 4 byte-MACs per weight-token (b70-kernels.md §2c item 13b) the same arithmetic gives **~26 rows per expert**, or ~59 against the 292 GB/s the GEMV really gets; §4a carried the 272 number into a prefill eligibility claim and needs re-running, while decode is unaffected because at 5–6 rows/expert the limiter is instructions per row, not the matrix unit (§3b) |
 | SLM / L1 | 128 KiB per Xe core (driver-reported **[M]**), 18 MiB L2 | a Qwen3.8 decode job reads ~12 MiB, comparable to L2 — see §3a item 4 |
 | subgroup | 16 and 32; DPAS wants 16 | lane = output column = exactly the trellis permutation (§2.3) |
 
@@ -292,7 +292,10 @@ with the parent), not by elegance.
 | 11 | **On-device bucketing recipe**: counts → exclusive scan → scatter into `sorted_token_ids` grouped by expert with `expert_idx[e]` offsets, and the whole thing fused into one kernel that "replaces CPU build_sorted_token_ids + old Scatter kernel" (`moe_ops.h:235-260, 430`); chunks carry `{eid, t0, nt}` (`moe_q4k_ggemv.h:26`) | E23's precondition — the `union(rows)·expert_bytes` byte model only holds if rows are bucketed by expert — and their grouped kernels are exactly the ones that do it | strengthens E23 |
 | 12 | **Envelope for fused decode paths**: `SGL_XPU_GGUF_FUSE_MAX_M` defaults to **64** (sglang/README.md:226), and "each verify step runs at `num_draft_tokens × concurrency` rows, which is the batch the M-tiled ESIMD GEMVs are tuned for — measure at the intended concurrency" (`:166-171`) | tells us where the GEMV-shaped path stops and a GEMM path must start; and that quoting a decode rate at the wrong M is a known failure mode | feeds E21 |
 
-| 13 | **No int8 DPAS anywhere in the tree** — every `dpas<>` call site is fp16/bf16/fp8, and int8-quantized weights are dequantized to fp16 *before* XMX (`q8_0_GEMV.h:281-289`, `moe_q4k_ggemv.h`, the fp8 GEMMs) | bears directly on item 1's exactness fork: there is no in-tree precedent for integer DPAS to copy, so "two-term int8 DPAS keeps Gate A" is a route we would have to prove ourselves, while the fp16 route has prior art and no bit-exactness | decides E24's route |
+| 13 | **Integer DPAS exists, and this project already measured it at full rate on the B70.** My first claim — "no int8 DPAS anywhere in the tree" — was true only of llm-scaler's ESIMD kernels and is **retracted**: `doc/b70/b70-bench/bench.cpp:227` runs `run_matrix<int8_t, int32_t, 8, 16, 32>` and `bench-results.txt` records **XMX INT8 = 366.92 TOPS = 100 % of Intel's 367** (XMX FP16 178.54 / BF16 183.46 against 183.50). `sycl/ext/intel/esimd/xmx/dpas.hpp:243-256` gives the legal integer combos: `C = ud, d` (u32/s32) with `A, B ∈ ub, b, u4, s4, u2, s2` — i.e. **u8 × s8 → int32, the `dp4a_us` semantics natively in XMX**, no float and no 2^24 accumulator cliff | settles E24's exactness fork toward keeping bit-exactness, and turns the rows collapse from structural into fixable | **rewrites E24** |
+| 13b | **The 10-bit byte-sum problem dissolves if the A operand is the *bytes*, not their sum.** mul1 gives `prod = window * 0x83DCD12D` whose four bytes sum to the weight; rather than summing them and multiplying by `x`, feed DPAS the four bytes as four K-steps against `x` replicated 4× along K. One integer DPAS then computes Σ_bytes p_j·x = bytesum·x exactly in int32, with `A = u8` (the bytes are unsigned already) and `B = s8` activations VNNI-packed — the header states "B must have the VNNI encoded layout", which is what item 10's `lsc_gather` yields. Headroom: 183.5 T MAC/s ÷ 4 byte-MACs per weight-token ≈ **46 T weight-tokens/s** vs rev C's measured 0.205 T at R=1, a factor of ~224, so the DPAS kernel is bound by unpack and operand assembly and never by row count | this is what should make rows≈flat, the entire point of item 1 | **the primary E24 design** |
+| 13c | **XMX needs 16-lane sub-groups**: `bench.cpp:98` `constexpr int SG = 16; // XMX needs sub-groups of 16 work-items`, launched with `[[sycl::reqd_sub_group_size(SG)]]` | explains the silent 16-lane behaviour that cost a debug round (LESSONS 25) as a requirement, not compiler whim: a DPAS kernel must request SG=16, and any SYCL-level reduce must stay width-agnostic | adopt in E24 |
+| 13d | **A reference-free self-check**: the bench fills A and B with 1 and asserts every accumulator equals `ITERS × K` | Gate A needs an equivalent cheap invariant for DPAS operand layouts, where a wrong VNNI stride otherwise shows up as a plausible number | adopt in E24 |
 | 14 | **Per-SKU tuned policy as generated code, not literals**: `policies/kernel-policy-v1.json` + a JSON schema → `policy_codegen.py` → `bmg_kernel_policy_generated.h`, one `constexpr` struct per SKU passed as a **template parameter** to the kernel, plus `*CandidatePolicy` structs that inherit a SKU policy and override a single field so the autotuner can instantiate variants | our E27 fit needs exactly this home: tuned numbers out of kernel source, and "which card was this measured on" encoded in the artifact rather than in a comment | adopt as E27's output format |
 | 15 | **…but the B70 column is unpopulated**: `B70KernelPolicy` is identical to `GenericBmgKernelPolicy` in all 25 fields, as is `B580KernelPolicy`, while `B60KernelPolicy` differs in 17 of 25 (adaln block 32→512, `int8_dequant_fp32_elements` 32→256, `int8_dequant_bf16` 32→128 / WG 64→16) | nothing in the way of tuned constants is borrowable for our card, and it is direct evidence that per-SKU columns stay generic in practice — the plan's insistence on measuring the B70 rather than inheriting numbers is the difference between a tuned kernel and a guessed one | — |
 
@@ -301,15 +304,18 @@ arrays (`qs`, `qh`, `signs`) plus a 512-entry magnitude table — three streams 
 group, against our one ring stream and an arithmetic byte-sum. Our trellis unpack is the cheaper shape;
 the only thing worth stealing from that file is `merge()` for branchless sign/select in ESIMD.
 
-**Exactness is the real blocker on item 1, and it is a decision, not a discovery.** The whole gate-A
-contract is that decode matches the int32 accumulator bit for bit. XMX DPAS with fp16 inputs and fp32
-accumulation keeps products exact (11×11 bits fits fp32) and stays integer-exact only while
+**Exactness: settled toward keeping it.** The fp16 route (what llm-scaler does — dequantize to fp16,
+then DPAS) keeps products exact (11×11 bits fits fp32) and stays integer-exact only while
 `|acc| < 2^24` ≈ 16.8 M; measured magnitudes at k=2560 are ~10^6 so it holds comfortably, but the
-adversarial bound `k·510·127` = 2.7×10^8 at k=4096 does not. Two ways to keep the gate: split the
-10-bit byte-sum into two 8-bit terms and use integer DPAS (2× the instructions, still ≪ one dot per
-row once M ≥ 8), or re-baseline gate A to a tolerance for rows ≥ 4 and *state that the B70 and the
-3090/CPU paths then stop agreeing bit-for-bit*, which loses the cross-check the harness relies on.
-Decide this before writing the kernel, not after.
+adversarial bound `k·510·127` = 2.7×10^8 at k=4096 does not — and it ends bit-for-bit agreement with
+the 3090/CPU paths, which is the cross-check the harness leans on. The integer route (items 13/13b) has
+no such cliff: s8/u8 into int32 is exact up to ±2^31, which bound-checks to ~1.3×10^8 at k=4096 with
+order to spare, and it is measured at 100 % of spec on this card. So the risk moves from numerics to
+**operand assembly cost** — the unpack must write bytes directly into the A layout, and item 10's
+warning (register shuffling cost more than the DPAS saved) names the failure mode to measure first.
+Second-order but real: replicating `x` 4× along K multiplies the activation footprint the B operand
+cycles through (4·k bytes per token ≈ 10 KB at k=2560), which is SLM-sized, not DRAM-sized — so the
+replication should be done once per token-batch into SLM, not per weight.
 
 ## 3. Decode kernel (`rows ≤ 8`, i.e. the whole of token generation)
 
@@ -384,8 +390,14 @@ is one factor of `union(rows) · h · expert_bytes / rate`, so it is worth being
   bucketed grid, consecutive work-items belong to the same expert and read neighbouring tiles, which is
   the 1.08–1.99× of §3a. A `rows = 1` GEMV structurally *cannot* arrange that (too few tiles to order),
   which is why the win appears only at large b.
-* **flops** — not an opportunity at decode. Rows per expert peaks near 5–6 even at b=256, against the
-  ~272-row XMX crossover (§1), so a DPAS decode kernel buys nothing.
+* **flops** — **corrected: DPAS does buy something at decode, and this section used to say it buys
+  nothing.** The ~272-row figure in §1 is a compute-versus-bandwidth crossover; the thing that actually
+  costs us at rows > 1 is one instruction slot per (weight, row), which is a different axis. Fitting
+  `slots/weight = c0 + M·c1` to the two measured rev C points (205 G-w/s at R=1, 137 at R=4) against the
+  1.43e12 slot/s issue budget gives **c0 ≈ 5.8, c1 ≈ 1.15** [P from M]: ~6 slots of unpack, ~1 more per
+  token. Integer DPAS with the byte-replication operand (item 13b) drives c1 toward zero, so the predicted
+  gains are **×1.8 at R=4, ×2.6 at R=8, ×4.2 at R=16** — and they evaporate if assembling the A operand
+  costs more than ~2 slots per weight, which is precisely what E24 must measure first.
 
 Measured payoff (**[P]** from **[M]** rates, `plan_kernel_split.py` / `out_kernel_split.txt`), aggregating
 over the parent and the link rather than quoting the card alone:
@@ -419,15 +431,26 @@ Three design rules fall out, and the first is the honest limit:
 
 ## 4. Prefill kernels (`rows ≥ 32`): feeding XMX
 
-**Eligibility first, because it is narrower than the header suggests.** XMX binds only once ~272 rows hit
-the same expert (§1). Feeding real pick frequencies into chunk sizes: at R = 2048 the hottest Qwen3.8
-expert receives 41–522 rows and **0–13 of 512 experts** cross the line; at R = 8192, 60–115 do
-(**[M]** crossover ratio, **[P]** counts, `plan_concurrency.py`). So the DPAS routes below are an
-opportunistic path for the hot tail of large chunks, selected per expert from a bucket count the planner
-can predict at load — and the chunk-wide-GEMM reading of this section would be wrong for most experts.
+**Eligibility first — but the bar is lower than this section has been claiming, in the same units
+mistake as reading rates in GB/s across quantizations.** The ~272-row figure is
+(367 TOPS / 2) ÷ 674 GB/s: MACs per *byte* at 1 byte per weight, i.e. it belongs to fp16/u8-at-1-byte
+formats. Our trellis weights are 0.375 B each and the byte-replication route (item 13b) spends 4 MACs
+per weight-token, so the arithmetic-intensity bar is 4 / 0.375 ≈ 10.7 MAC/byte and the crossover lands at
+**~26 rows per expert at the 674 GB/s copy peak, or ~59 at the 292 GB/s this GEMV actually achieves**
+[P from M — and note it depends on which bandwidth figure is used, so quote it with its basis]. Against
+the real pick distributions (hottest Qwen3.8 expert sees 41–522 rows at R = 2048), that flips the
+conclusion for the hot tail: at a 26-row bar a substantial share of experts qualifies, where at 272
+rows essentially none did. `plan_concurrency.py`'s XMX eligibility numbers must be recomputed at the
+corrected bar before §4's per-expert routing rule is used — the counts themselves (41–522 rows, 0–13 of
+512 qualifying at 272) stay as recorded, but they answer the old question. The decode case is separate
+and clearer: at 5–6 rows per expert the matrix unit is nowhere near arithmetic-bound, yet DPAS still
+wins because it removes the per-row slot (§3b), not because it adds flops.
 
-Weights must reach DPAS. `mul1` values are not storable int8 (range −510…495 needs 11 bits), so both
-routes carry the value in a wider or split form, and `k_inv·q` stays in the epilogue:
+Weights must reach DPAS. Under the fp16 or split-operand reading this was a real obstacle — mul1 values
+span −510…495, i.e. 11 bits, so they cannot be stored as int8 and both routes had to carry a wider or
+two-term form. **Item 13b removes the obstacle**: the A operand is the four *bytes* of
+`window * 0x83DCD12D` (each 0…255, genuinely u8) against activations replicated 4× along K, so nothing
+needs 11 bits, the accumulator is int32 and exact, and `k_inv·q` stays in the epilogue as before.
 
 | route | A | B | per-weight ALU | XMX cost | notes |
 |---|---|---|---|---|---|
