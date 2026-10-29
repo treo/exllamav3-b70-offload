@@ -27,6 +27,8 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | `probe_crossproc.py` | the same, with the B70 engine in a **child process** on a `multiprocessing.shared_memory` segment the parent registered with CUDA — 10/10, so the engine may be a separate process |
 | `probe_stores.cpp`, `probe_stores2.cpp`, `probe_unreg.cpp` | which store pattern actually reaches host memory (answer: plain stores do, 100/100; `sycl::atomic_ref` on a registered pointer does not, and costs the device) |
 | `probe_coherency.cpp` | the disproved theory: it is not CPU-vs-GPU cache staleness (kept because the reasoning that led to it is the useful part) |
+| `probe_rates.cpp` | what the card sustains on the **real decode tile walk**: native vs banded layout, no-arithmetic vs realistic arithmetic density, scattered vs clustered work-item ordering; plus the four measurement traps this probe had to overcome (see its header and `LESSONS` 15) |
+| `plan_placement.py` | joins the safetensors census to the **real per-layer expert-selection counts** persisted by dynamic placement and answers, per model and per home-size: `h` (device-resident pick share), `\|res\|` (the migration set), one-time `fill` seconds, `σ`, and the CPU residue in ms/token (`out_placement.txt`) |
 
 ## The measured facts that shape the design
 
@@ -53,10 +55,18 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | 3090 `cuStreamWriteValue32` → B70 kernel sees it | **works** | — |
 | B70 kernel store → 3090 `cuStreamWaitValue32` retires | **works** (plain volatile store + `sycl::atomic_fence(acq_rel, system)`) | — |
 | device | 256 CUs reported, SG 16/32, SLM 128 KiB, 1024 max WG | — |
+| **decode tile walk, native order** | **287–313 GB/s** scattered (47–51 % of 608) | — |
+| same, consecutive work-items on consecutive tiles | **321–492 GB/s** (53–81 %) — the `LOCALITY payoff` is 1.03–1.71× | the CPU's band-8 repack exists for this reason |
+| same tiles, banded/repacked order | **0.95–1.00×** vs native: repacking buys nothing on Xe2 | band-2/band-8 + planar is worth ~20 % on x86 |
+| mul1 decode arithmetic at real density (extract+mul+dot per weight) | costs **1–4 %** of bandwidth versus the same reads with no arithmetic | decode is bandwidth-bound, not ALU-bound |
+| hardware int8 dot vs manual byte-sum | **≤1 %** apart at these rates | `vpdpbusd` vs `vpmaddubsw` fallback is a real gap on x86 |
+| routing breadth (from real selection counts) | Qwen3.8@2.68: 97.6 % of picks in 411/512 experts; GLM: 70.8 % in 91/288 (effective support 213–231) | the profile is a decayed cumulative, so both are upper bounds |
 
 Read as: the B70's link is not the problem (it is a shade faster than the 3090's on this box),
-and its compute is not the problem either (roughly 10x the CPU worker's expert-read rate). The
-budget is entirely in **how a job is published and how completion is observed**. Anything that
-costs 24 µs (`.wait()`, or a second `register_host_memory` per job) will dominate a 25 µs compute
-job; anything that costs 5 µs (flag-poll) or 3 µs (resident doorbell) hides behind the parent
-GPU's ~165 µs/layer of decode work.
+and its compute is not the problem either (roughly 10x the CPU worker's expert-read rate). Two things
+are load-bearing. The first is **how a job is published and how completion is observed**: anything
+that costs 24 µs (`.wait()`, or a second `register_host_memory` per job) will dominate a 25 µs compute
+job, while 5 µs (flag-poll) or 3 µs (resident doorbell) hides behind the parent's ~165 µs/layer of
+decode work. The second is **memory ordering inside the card**: the same bytes read at 287 or at
+490 GB/s depending on how work-items map to tiles, which is a bigger effect than any layout choice
+and is why `doc/port/b70-kernels.md` §3a is normative rather than advisory.

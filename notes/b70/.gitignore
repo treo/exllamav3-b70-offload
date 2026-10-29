@@ -1,4 +1,5 @@
-# probe binaries and the built shim (build.sh regenerates them)
+# probe binaries and the built shim (build.sh regenerates them). Listed by name rather than by
+# wildcard: `probe_*` would also swallow the probe_*.cpp sources, which are the point of this dir.
 probe_transport
 probe_doorbell
 probe_notify
@@ -7,6 +8,6 @@ probe_stores
 probe_stores2
 probe_unreg
 probe_coherency
-probe_exact
+probe_rates
 libb70shim.so
 __pycache__/

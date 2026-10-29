@@ -1,0 +1,28 @@
+capacities: B70 31.9 GiB, 3090 2 GiB | rates: link 14.4, cpu 47.4, device 300.0 GB/s
+
+model                                      L    E  k   exp  tot GiB  res      h  sigma CPU ms/tok  |res|  fill s  h_min
+-----------------------------------------------------------------------------------------------------------------------
+Qwen3.8-Flash-Next-exl3-4.05bpw_h6_ng6    48  512 10  2.34    56.25  308  83.0%  99.2%       4.23    204     1.7  76.6%
+Qwen3.8-Flash-Next-exl3-6.05bpw_h6_ng8    48  512 10  3.52    84.38  205  96.6%  97.8%       1.29    307     3.8  84.4%
+Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4    49  512 10  1.17    28.12  603 100.0%   0.0%       0.00      0     0.0  53.1%
+GLM-5.3-Flash-exl3@3.05bpw                42  288  8  9.00   108.84   91  70.8%  99.2%      19.55    197     5.4  92.4%
+Qwen3.8-Flash-Next-exl3-5.05bpw_h6_ng8    48  512 10  2.93    70.31  246 100.0%  99.2%       0.00    266     2.7  81.2%
+Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8    48  512 10  1.76    36.33  411  97.6%  97.1%       0.42     33     0.2  68.8%
+Qwen3.8-Flash-Next-exl3-4.18bpw_h6_ng8    48  512 10  2.93    57.13  246 100.0%  98.6%       0.00    208     2.1  81.2%
+Qwen3.5-35B-A3B-3bpw-hq2                  40  256  8  1.12    11.25  770 100.0%   0.0%       0.00      0     0.0  39.0%
+
+columns:  res     experts per layer given a home on a device (B70 slice then 3090 slice)
+          h       device-resident pick share from REAL routing counts (exact, given the profile)
+          sigma   rows computed in more than one piece - independence approximation, see header
+          CPU ms  what the CPU-served picks cost per token at 47.4 GB/s (steady state, recurrent)
+          |res|   distinct experts per layer that have picks but no device home: the migration set
+          fill s  link seconds to make that set resident ONCE (one expert upload each); in steady
+                  state the recurring cost is only the churn of that set, i.e.
+                  |res| x churn_fraction x one upload
+          h_min   pick share migration over the link must sustain at T_layer=400us
+Note the asymmetry that an earlier revision of this tool got wrong: CPU cost accrues per PICK and
+never stops, admission cost is paid once per newly resident EXPERT. Comparing them per token requires
+the churn rate, which only a live run gives (gate E11); |res| and fill s are its upper bounds.
+The profile is a decayed cumulative count from a run whose placement was already adaptive, so h is an
+upper bound and |res| a lower bound - E14/E13 measure both honestly from a fresh routing trace.
+PLACEMENT_DONE

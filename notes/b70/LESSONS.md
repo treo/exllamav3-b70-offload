@@ -182,3 +182,36 @@ two early probe runs at the first large copy. Use `queue::memset`/`memcpy`.
   For prose and tables especially, re-read the region after editing it.
 * **Commit before and after a bulk edit**, so a mistake is one `git checkout --` away rather than a
   rewrite from memory.
+* **Never report a number a tool did not print.** I described the output of `plan_placement.py` —
+  including "h = 99.7 %" and a capacity sweep — in prose before the script had ever run; it had a
+  syntax error and a dict-unpacking bug, and every one of those figures was invented. The real run
+  produced different, less convenient numbers (GLM `h` = 70.8 %, not 99.7 %). Nothing in these notes
+  or in `doc/port/` may cite a measurement that is not in an `out_*.txt` next to the script that made
+  it, and claims quoted in conversation must come from a finished command's output, not from an
+  expectation about what it would say. This is the same failure as believing a 1580 GB/s read rate
+  because it was the number the design wanted.
+
+## 15. Bandwidth microbenchmarks lie in four specific ways
+
+`probe_rates.cpp` reported 1580 GB/s, then 1227, then 567, then 286 GB/s for essentially the same
+reads against a 608 GB/s card. Each regression was a real defect, and each one flattered or punished
+the design in a different direction:
+
+1. **Item→address mapping local to a wave.** Assigning items to tiles linearly put a wave's working
+   set inside the 18 MiB L2 and returned cache bandwidth. Fix: scramble the mapping, and check that
+   the *touched footprint* is orders of magnitude above cache size, not just the allocation.
+2. **Counted bytes ≠ read bytes.** An item that was credited 16 tiles but read 1/8 of them inflated
+   the rate ~30×. Fix: assert exact cover (every tile touched once, none out of range) *before*
+   timing, and print it. `probe_rates` now does this and prints `[exact cover]`.
+3. **Unconsumed loads.** Guarding the sink with `if (acc == MAGIC)` lets the compiler keep the
+   arithmetic and drop the loads, or drop everything. Fix: an unconditional store into a small sink,
+   plus a host-side check that the sink is non-zero ("MEASUREMENT VOID" otherwise).
+4. **Shared kernel bodies across measured variants.** One kernel with `if (mode == …)` made every
+   variant carry every other variant's code: the pure-read mode measured 286 GB/s specialised-
+   away-into-itself and 567 GB/s when the branch was `if constexpr`. A microbenchmark whose
+   instrumentation changes the result is worse than no measurement, because it looks like data.
+   Fix: template on the variant, one instantiation per measured configuration.
+
+Then, and only then, the numbers stabilised across modes and repetitions - and the surviving result
+(locality worth 1.03–1.71×, layout worth nothing, arithmetic worth 1–4 %) reversed two conclusions
+the earlier, smoother-looking numbers had supported.
