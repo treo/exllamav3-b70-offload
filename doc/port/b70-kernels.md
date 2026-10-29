@@ -144,6 +144,68 @@ weights cannot bound the cost of the arithmetic it omits — it walked the same 
 and reported 292 GB/s), and "decode is bandwidth-bound" is a property of the *byte stream*, not of the
 kernel. Both are open again, behind E4.
 
+## 2b. Rules lifted from `doc/b70/llm-scaler` — Intel's own XPU MoE kernels, with their perf post-mortems
+
+`doc/b70/llm-scaler/sglang/custom-esimd-kernels/csrc/` contains production ESIMD MoE kernels for the
+same hardware generation (Q4_K/Q5_K/Q6_K grouped GEMV, batched decode GEMV, DPAS prefill, fused
+bucket/topk), and several files carry annotated *why the first version was slow* notes with numbers.
+What they say that changes our design:
+
+1. **Wide, LSC-granular loads; one flat accumulator; fold once.** `moe_kquant_GEMV.h`: the original
+   "stepped 32 at a time, issuing 16-byte nibble loads (below LSC granularity) and re-reading a scalar
+   scale/min per block", and folding "a full horizontal sum … into a serial `dot` chain every block" —
+   it "only reached ~180 GB/s"; widening the tile and removing the per-block reduction is what fixed it.
+   `q8_0_GEMV.h` states the reason outright: a per-iteration `reduce<>()` would cost
+   "M × K_ITERS cross-lane reductions (128 per work-item at M=4, K=2048) whose shuffles do not produce
+   useful FLOPs, and **this kernel is ALU bound, not bandwidth bound**" — an independent confirmation of
+   what `probe_gemv` measured on our trellis.
+   → Rev C: `simd`-width tiles (≥32 B per load), accumulate lane-parallel into `simd<int32_t, VL>`,
+     one `reduce` per output at the very end. Never reduce inside the k loop.
+2. **~180 GB/s is the realistic ceiling for a mature MoE GEMV on this class of card**, not the
+   292 GB/s bare-stream rate. → recalibrate the decode planning rate to **150–180 GB/s** and treat 292 as
+   the unreachable asymptote; at 165 GB/s Qwen3.8's b=1 layer is 14.3 MiB → **91 µs/layer**, inside the
+   ~250 µs window with ~2.7× margin (real, but far less than the 5× the plan claimed).
+3. **Amortise the activation load across output columns.** `moe_kquant_GEMV.h`: with one column per
+   work-item, "every work-item re-reads `inter` in full (N=2048 work-items × 512 B = 1 MB of cache
+   traffic per route for a 4 KB tensor)"; handling `ROWS>1` columns per work-item removed it. My rev B
+   has the same defect in SLM form (each item reloads `xs[]` per weight).
+4. **Grid order for L2 reuse across row-tiles**: `q8_0_GEMV.h` lays groups out **M-tile-fastest** "so the
+   MT groups that share a weight row block are adjacent: tile mt+1 then finds that block still in L2
+   instead of re-pulling it from memory." Same family of rule as §3a, and it applies to our
+   multi-row/multi-chunk decomposition too.
+5. **Row tiling is bounded by GRF, and by the compiler, not by taste**: "M=4/VL=256 fits;
+   M=8/VL=256 is what the AOT gen compiler refuses to lower", and the m-loop "must stay fully unrolled
+   (`vacc[m]` needs a compile-time index)". This matches `probe_gemv`'s collapse at R = 128 — the answer
+   is to tile rows **in the grid** (their `MT`) with M ≤ 4 in-kernel, not to widen the accumulator array.
+6. **They bucket by expert and fold the gather into the load.** `moe_q4k_ggemv.h` takes
+   `chunks = {eid, t0, nt}` (route-sorted ranges) and an optional `tok_ids` permutation so the kernel
+   "reads the activation directly from `expert_states` at row `tok_ids[t0+m]` — folding the per-expert
+   input gather INTO the load (no `index_select` round-trip)". Two consequences for us: the §3b schedule
+   should look like this, and — important — their *decode* GEMVs are **per-route**
+   (`grid = (n_routed, n_col)`), i.e. they do **not** dedup an expert across routes and rely on L2.
+   Our entire concurrency model assumes the union (`bytes = union(rows) · expert_bytes`); that is only
+   true if we bucket, so bucketing is a *correctness precondition* of the byte model, not an optimisation
+   — without it the b=8 footprint is 8× worse than modelled.
+7. **Repack for dequant ergonomics is a different question from repacking for locality.** Their formats
+   are stored as an interleaved nibble plane plus a *plain* high-bit plane (`qh`, "byte j bit b = elem
+   8j+b") plus fp16 scale/min per 32, specifically so the inner loop is wide and mask-free
+   (`v5 = nibble | (qh << 4)`). `b70-architecture.md` §2.2's null result (banded/native 0.96–1.05×)
+   tested locality-driven repacking only; a dequant-driven repack is untested and is the kind Intel chose.
+8. **DPAS tiles are chosen by wasted lanes, not by arithmetic intensity.** `moe_q4k_ggemv.h` is
+   instantiated at `MS_=4` (64-token tiles) for prefill and `MS_=1` (16-token) precisely because "for
+   SMALL M (e.g. MTP verify M=4) the 64-row DPAS wastes ~60/64 rows". So the real rule for our §4 is
+   *tile height ≤ rows per expert*, with the GEMV preferred below ~16 — which is much more aggressive than
+   the 272-row arithmetic-intensity crossover, and consistent with the `…CACHE-MISS / JIT-recompile`
+   warning in `q8_0_GEMV.h` about falling back to oneDNN `jit:gemm:any` per new `(M,K,N)` shape. Our
+   engine must own every shape it uses, and the XMX/GEMV decision is a per-(M,K,N) table, not one number.
+9. **Two driver-level hazards, both already biting us.** Cross-subgroup SLM exchange needs the full
+   barrier: "a named barrier only orders execution, it does not make the SLM stores visible to the other
+   subgroups, so the split arrive/wait form leaves the exchange racy; `barrier()` carries the required
+   memory fence" — our groups are 64 items = 2 subgroups sharing `bs[]`, so this is live, not theoretical.
+   And unclamped tail addressing "is an out-of-bounds device read (observed as
+   `UR_RESULT_ERROR_DEVICE_LOST`)" — same failure signature as `LESSONS` 4, reached from a different
+   direction: on this driver an OOB *read* does not fault verbosely, it kills the device.
+
 ## 3. Decode kernel (`rows ≤ 8`, i.e. the whole of token generation)
 
 Unit of work: `(expert, projection, 128-output-column band, k-slice, chunk of ≤4 tokens)`. At decode

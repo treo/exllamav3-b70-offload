@@ -247,7 +247,12 @@ streams are in flight, yet GLM's banded gain appears at 2 GiB, 512 MiB and 64 Mi
 256 MiB or 128 MiB. The honest summary is **no reliable gain, and this instrument is not sharp enough
 to prove the gain is exactly zero** — the configuration variance (which moves absolute rates ~2×, see
 `out_rates_footprint.txt`) exceeds the effect. §12 therefore records the layout decision as made on
-engineering grounds and revisitable, not as closed by measurement.
+engineering grounds and revisitable, not as closed by measurement. One distinction added by
+`llm-scaler`: their formats are *repacked* as an interleaved nibble plane plus a plain high-bit plane and
+per-32 fp16 scales, so the inner loop is wide and mask-free (b70-kernels.md §2b item 7). That is
+repacking for **dequant ergonomics**, which §2.2 never tested — the null above covers locality-driven
+repacking only, and an instruction-count-driven repack of the trellis would have to be judged against the
+cost of losing byte-identity with the 3090 kernels all over again.
 
 What *does* move the number, consistently and in one direction, is **locality**: clustered
 work-item→tile mapping over scattered, **1.08–1.99×** across both geometries and all six footprints,
@@ -513,7 +518,11 @@ measured rate curve at the matched footprint:
   **not** hidden at b=1 for Qwen3.8 either. Qwen3.5 is proportionally cheaper; **GLM** at 50.9 MiB/layer
   is 870 µs/layer at that rate, ~17 ms/token, so it needs both the kernel fix and more than one card.
   Restated per-layer figures at the *modelled* byte-stream rate (what the design will achieve if §2a's
-  prescription is implemented, NOT what has been measured): Qwen3.8 **51 µs**, GLM **405 µs**.
+  prescription is implemented, NOT what has been measured): Qwen3.8 **51 µs**, GLM **405 µs**. Intel's own
+  mature XPU MoE GEMVs reach **~180 GB/s** and describe themselves as ALU-bound
+  (`llm-scaler/…/moe_kquant_GEMV.h`, `q8_0_GEMV.h`; b70-kernels.md §2b), so the planning rate should be
+  **150–180 GB/s**, giving Qwen3.8 ~91 µs/layer at b=1 — a real ~2.7× margin rather than 5× or the 61 GB/s
+  measured today.
 * The concurrency table below inherits the same caveat: its `rate` column is the byte-stream rate, so its
   tok/s figures are ceilings conditional on E4.
 * **Batch is the variable that the per-token view hides, and it cuts against offloading.** Distinct
@@ -1061,7 +1070,8 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | three disjoint homes, two cut points, no replication | **weakened**: holds where capacity is scarce, not where it is surplus | the old 1.5× rate premise was spec-to-spec; footprint-matched the homes are 3.2× (Qwen3.8) to 7× (GLM) apart. Disjointness now rests on the CPU residue costing `bytes/47.4`, which still holds for GLM. `plan_parent_budget.py` also shows Qwen3.8 running `h` = 100 % with ~12 GiB spare **[M]** | E20: replicating the hottest experts and steering per pick, if surplus survives real context lengths (E14) |
 | native tile layout on the B70, no repack | **decided on engineering grounds, not closed by measurement** | banded/native 0.96–1.05× over 2 geometries × 6 footprints: no consistent sign, and the probe's configuration variance exceeds the effect **[M]** | E4c: a *consistent* win in the real GEMV at decode footprints, large enough to pay for a load-time repack and for losing byte-interchangeability with the 3090 kernels |
 | locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | clustered/native 1.08–1.99×, never below 1.08 **[M]** | E4 measuring the real GEMV below 200 GB/s |
-| decode is bandwidth-bound, instruction count second-order | **RETRACTED** — a real GEMV is instruction-bound | `probe_gemv`: 17 ops/weight → 27.9 GB/s, 8 ops → 61.4 GB/s, both within 10 % of the issue-rate model, against 292 GB/s for the bare byte stream **[M]** | — (this is the new baseline); the §2a prescription targets 150–250 GB/s |
+| decode is bandwidth-bound, instruction count second-order | **RETRACTED** — a real GEMV is instruction-bound | `probe_gemv`: 17 ops/weight → 27.9 GB/s, 8 ops → 61.4 GB/s, both within 10 % of the issue-rate model, against 292 GB/s for the bare byte stream **[M]**; Intel's own XPU MoE GEMV comments say "ALU bound, not bandwidth bound" and report ~180 GB/s as their fixed-point figure **[M, source]** | — (new baseline); planning rate reset to 150–180 GB/s, §2a/§2b name the fixes |
+| the byte floor `union(rows) · expert_bytes` holds | **conditional on expert bucketing** | llm-scaler's decode GEMVs are per-route (`grid = (n_routed, n_col)`) and rely on L2 rather than dedupping; only their grouped/prefill kernels bucket by expert (`chunks = {eid, t0, nt}`) **[source]** | if the real kernel does not bucket, b=8 reads ~5× the modelled bytes and every concurrency figure here is optimistic — E23 must report bytes actually read, not bytes touched |
 | dot-availability does not gate decode | **RETRACTED**, reopened behind E4 | the closure rested on a proxy that computed no weights; `dot_acc` in the byte sum alone measured 2.2× **[M]** | E4 with the register-resident `prod` + one `dot_acc` per (weight, row) |
 | streamed/staged prefill dead for `S_b`, live for `S_c` | closed on the byte/rate crossover, but see the row below — that crossover's rate side is now in question | ~200-row crossover from measured bytes/rates | E7′ on a model with more skewed routing, or the corrected per-row cost below |
 | XMX/DPAS crossover at ~272 rows per expert | **uncertain** — derived as (367 TOPS/2)/674 GB/s, i.e. assuming the matrix unit is the only fast path; a dp4a-style loop spends ~1 instruction per (weight, row), so the *instruction* crossover is far lower and may bind before XMX ever helps | `probe_gemv` per-row scaling: 61 → 13.8 → 4.6 GB/s at R = 1/8/32, i.e. ~4 instructions per row per weight today **[M]**; with the §2a rewrite it should be ~1 | re-measure the per-row marginal cost after the rewrite, then redo `plan_concurrency.py` and `plan_kernel_split.py`'s XMX eligibility numbers |

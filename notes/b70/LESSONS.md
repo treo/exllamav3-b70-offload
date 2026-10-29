@@ -386,7 +386,35 @@ the first run — and any sweep where a varied parameter has zero effect is trea
 script, not as a finding about the system. After the fix the same code shows 13 % gaps in one direction
 and 20 % in the other, which is a far more interesting and far more believable answer.
 
-## 24. When a model and a measurement disagree by 30×, check the model's units first
+## 24. The vendor's own kernels are documentation — and two more Xe2 hazards they recorded
+
+`doc/b70/llm-scaler/` (Intel's XPU serving stacks with hand-written ESIMD MoE kernels) was in the repo
+the whole time. Reading it after writing `probe_gemv` would have been the cheap order. It supplied, with
+numbers: the ~180 GB/s realistic ceiling for a mature MoE GEMV, the "this kernel is ALU bound, not
+bandwidth bound" diagnosis that independently confirms our measurement, the LSC-granularity/flat-
+accumulator rules, GRF-bounded row tiling ("M=8/VL=256 is what the AOT gen compiler refuses to lower"),
+and the fact that their decode GEMVs are per-route rather than dedupped by expert — which our byte model
+silently assumed we would do.
+
+Two hazards they documented that we would have hit anyway:
+
+* **Cross-subgroup SLM needs a real barrier, not a named one.** "A named barrier only orders execution,
+  it does not make the SLM stores visible to the other subgroups, so the split arrive/wait form leaves the
+  exchange racy; `barrier()` carries the required memory fence." Our work-groups are 64 items = two
+  subgroups sharing a staged buffer, so this is exactly the shape that breaks. Same family as `LESSONS` 2
+  and 4: on this stack, ordering and visibility are separate API promises and it is easy to get one
+  without the other.
+* **An out-of-bounds device *read* presents as `UR_RESULT_ERROR_DEVICE_LOST`.** They traced a device loss
+  to unclamped tail-index addressing in a paged read, after the arithmetic had already masked the values
+  as numerically inert. So "the results are wrong" is not the symptom to watch for — the device vanishes.
+  Any kernel with a partial tail iteration must clamp addressing even where the data is discarded, and
+  that belongs in the kernel test suite next to `LESSONS` 4a's payload assertions.
+
+The general lesson: before treating a platform question as open, check whether a mature kernel for the
+same hardware generation is sitting in the tree. A comment that says "the original reached ~180 GB/s and
+here is why" is worth more than a fresh microbenchmark of my own guess.
+
+## 25. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed
