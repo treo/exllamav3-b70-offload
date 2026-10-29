@@ -562,6 +562,14 @@ measured rate curve at the matched footprint:
   at rows ≈ 4 versus rows ≈ 5 on gate_proj, both bit-exact. rev E's best split-K moved with geometry *and*
   row count (ks=4 at rows 1/8, ks=2 at rows 16, against ks=16 best on gate), so E27's policy fit is
   mandatory rather than a refinement.
+* **Rev F (`probe_dpas3.cpp`) improves the DPAS path by ×1.21 at rows=1 and changes what SLM is for.**
+  Storing the activation operand VNNI-packed (identical tensor size, only the layout tag and stride differ)
+  is the single switch that pays on both projections (×1.06–1.19 gate, ×1.04–1.08 down); combined with
+  sub-group-scoped fences and a 32-bit funnel-shift unpack it reaches 87.7 µs against rev E's 106.2, all
+  bit-exact against rev E. Prefetching trellis loads is ×0.58 — decode stays issue-bound, not latency-bound.
+  The crossover for the dp4a→DPAS switch moves from rows ≈ 5 to **rows ≈ 3–4** (rev C+KCONST still wins ×2.5
+  at rows=1, ties at rows=4, loses ×2.4 and ×4.2 at rows=8 and 16). Two caveats: `u` needs K ≤ 4, and all of
+  this is measured with a 20 s warm-up plus interleaving, without which the same command varies 2.3×.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is
@@ -1080,9 +1088,12 @@ answer goes the wrong way:
    within 10 % — so instruction count *is* the decode bottleneck, and whether the dot is one instruction
    or several is a first-order question again. What is settled: `sycl::ext::oneapi::dot_acc` exists in
    this toolchain (`sycl/ext/oneapi/dot_product.hpp`, u32×u32 and mixed-sign vec<u8,4> forms) and using
-   it for the byte sum was worth a measured 2.2×. Direct ISA inspection remains unavailable
-   (`IGC_ShaderDumpEnable` emitted nothing, `SYCL_SAVE_TEMPS` left no files), so the remaining question
-   is answered by variants of `probe_gemv`, not by a disassembler.
+   it for the byte sum was worth a measured 2.2×. ~~Direct ISA inspection remains unavailable~~ **corrected:
+   it works with `IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=<dir>`** (19–34 files including native
+   `*_simd16_entry_*.isaasm`, `.spv`, `.progbin`); my earlier attempt used `IGC_ShaderDiscoveryEnable` and no
+   dump directory, so it produced nothing and I recorded a false blocker (LESSONS 38). The dumps obtained so
+   far captured a 724-line unit with a single `send` — not the tile loop — so no message census has been read
+   off them yet, and the findings below still rest on probe variants.
 3. ~~How much of the 608 GB/s does the decode GEMV actually reach?~~ **Measured, with a surprise**:
    scattered 132–292 GB/s (Qwen3.8) and 132–260 (GLM), clustered 216–558, native order — and the
    absolute rate depends ~2× on the *working-set size*, non-monotonically, which is why no design

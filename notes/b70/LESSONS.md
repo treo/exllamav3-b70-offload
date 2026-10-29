@@ -780,6 +780,50 @@ not the thing you changed. Second, when an experiment turns out confounded, the 
 I caught this only by writing the per-window tallies down after the fact, which is now the first thing I
 do for any mapping change.
 
+## 37. Warm the device up, and say which state a number was taken in
+
+Identical command, identical case, five consecutive processes:
+
+    rev E rows=1 KS=8:   242.4  242.5  225.5  106.2  106.2 us
+
+A 2.3× swing that has nothing to do with the code. The device ramps its clocks over the first tens of
+seconds of load, so the first processes after idle run slow — and my protocol (min of N *internal*
+repetitions, several processes per measurement) averages over states rather than controlling for them.
+After a 20 s sustained-load warm-up plus four interleaved rounds, rev E returns to 106.2–106.3 and rev C
+to 39.6, matching numbers taken in an entirely different session to ~1%. So warm + interleaved reproduces
+across sessions; cold reproduces nothing.
+
+This cost me two readings inside one hour, both published to me and not to the repo: "rev F psu is ×0.64 on
+down_proj" (truly ×0.90) and "p and u don't combine" (they do). Both were *sequentially ordered* comparisons,
+which is exactly the shape that turns thermal drift into a fake result: whatever runs late in the sequence
+looks good. Three rules now: (1) warm up with ~15–20 s of real load before the first timed process; (2)
+round-robin every configuration within a measurement, never finish one configuration before starting the
+next; (3) print the per-round values alongside the min, so drift is visible in the artifact instead of
+hidden by it. `[1 138 138 132]` next to a min of 106 says "this min came from a luckier round", which is
+information I need when deciding whether a ×1.05 effect is real.
+
+Absolute magnitudes are only comparable inside one warm window. That is a stricter statement than the
+footprint-matching rule (item 19): matching footprint but not thermal state still yields garbage.
+
+## 38. The ISA dump was available all along; I had the wrong variable, and gave up
+
+For most of this project I recorded that "direct ISA inspection remains unavailable", because
+`IGC_ShaderDiscoveryEnable=1` and `SYCL_SAVE_TEMPS=1` produced no files. The working combination is
+
+    IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa ./probe_dpas3 CASE 1 1 8
+
+which emits 19–34 files including native `*_simd16_entry_*.isaasm`, plus `.spv`, `.dat`, `.progbin`,
+`.zeinfo` and the LLVM IR stages. Two lessons, not one. The narrow one: an env-var name I got subtly wrong
+(I thought I had tried both spellings) closed off an entire class of evidence for weeks, and I substituted
+inference from probe variants — some of which I then got wrong, e.g. the operand-layout mechanism in item
+13e/13k, where the ISA would have shown the transform directly. The general one: when a tool "does not
+work", the failure to produce output is not evidence about the tool. Before writing "unavailable", look up
+the exact spelling and semantics in the vendor docs, and check whether output went somewhere other than
+where I was looking — `DumpToCustomDir` defaults are precisely the kind of thing that made my earlier
+attempt look empty. Note also what the dump still did *not* settle here: the captured unit was 724
+instruction lines with one `send`, so it is not the tile loop, and I declined to read a message census off
+it rather than invent one.
+
 
 
 

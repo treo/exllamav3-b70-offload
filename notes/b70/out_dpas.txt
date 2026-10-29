@@ -343,6 +343,120 @@ x2.13 inside the 250 us parent window. Using each projection's single best ks is
 see E27 - and the naive same-ks-for-all composition gives 2 x 51.8 + 38.1 = 141.7 us (x1.77). Both are far
 from the 239.2 us that started this chain.
 
+================================================================================
+REV F (probe_dpas3.cpp): the operand-path fixes from outside review, one switch each
+================================================================================
+DPAS_F selects: p = B stored VNNI-packed and loaded as ext_intel_packed; s = sub-group fences instead of
+work-group barriers, double-buffered A tile; f = ring indices hoisted, trellis dwords fetched ahead;
+u = window cut with one 32-bit funnel shift, 16x32 multiply, 8-byte paired A stores. Always on: SLM
+sized from the actual operand sources. Every one of the nine combinations tested is BIT-EXACT against
+rev E's output (and psu is bit-exact against down_proj's own y_ref) - so all the timing below is
+same-numerics.
+
+## First: the machine drifts 2.3x, and it invalidated two of my readings in this session
+
+Same binary, same case, same env, successive processes:
+
+    rev E rows=1 KS=8:   242.4  242.5  225.5  106.2  106.2 us
+
+That is clock/power ramp across processes, not the case directory (both cases show both values). With a
+20 s sustained-load warm-up and 4 interleaved rounds, rev E lands back on 106.2-106.3 and rev C+KCONST on
+39.6 - both reproducing numbers measured in an earlier session (106.0, 39.7). So warm + interleaved is
+reproducible to ~1% across sessions; cold is not reproducible at all.
+
+Two of my readings this session were made before I noticed and are withdrawn: "rev F psu is x0.64 on
+down_proj" (really x0.90) and "p and u do not combine" (they do on gate_proj: 94.2 vs 98.9/108.4).
+Anything measured without a warm-up line is not trustworthy.
+
+Warm fixed-overhead decomposition (rev E, gate k=2560, KS=8, rows=1, min of 5, sequential so read as
+upper bounds on ordering effects):
+
+    no mad, no unpack (loads + PART + combine + launch)  19.4 us
+    + unpack and A-tile assembly                         64.1 us   (+44.7, 3.9 slots/weight)
+    + the mad path itself                               126.8 us   (+62.7, 5.5 slots/weight)
+
+## Item 2 (unconditional SLM allocation) is real, and its effect is zero
+
+Confirmed in code: rev E computes slmTotal = slmB*2 + 2*16*TILE_BYTES with slmB = per_sg*TILE_BYTES*NTOK
+derived only from geometry - at KS=8 that is ~544 KiB requested on a device reporting 128 KiB of SLM, and
+the launch succeeds anyway (open question, recorded below). Rev F sizes it from the source flags and
+prints "SLM per work-group 0.0 KiB" under A+B global. Interleaved effect of the fix alone:
+
+    gate  rows 1/4/8/16:   x0.97  x1.01  x0.97  x0.98
+    down  rows 1/8:        x0.99  x1.01
+
+Why it is null: the grid is tn*KS = 320 work-groups over 256 compute units, so ~1-2 groups land per unit
+and the occupancy cap was never binding. So the A/B-source comparison earlier in this file was
+contaminated in principle but not in practice - and its conclusion turns out to need correcting anyway,
+below. Caveat kept honest: at KS=1 (40 groups), or on a part with fewer units, the same defect would bind.
+
+## The ladder, warm and interleaved (gate k=2560, KS=8, min of 4, A+B global)
+
+  DPAS_F     rows=1   rows=4   rows=8   rows=16   read
+  rev E       106.2    122.6    112.9    122.0   baseline
+  none        109.8    121.3    116.0    124.8   allocation fix: null
+  p            98.9    101.6    105.7    114.6   WIN x1.06-x1.19, best at rows=4
+  u           108.4    123.2    113.5    122.1   ~null alone
+  pu           92.7     95.6     99.6    108.5   WIN x1.12-x1.19 (they do combine)
+  ps           94.2     97.2    101.1      -     ~same as pu
+  psu          87.7     92.2     94.4      -     BEST on gate, x1.21 vs rev E at rows=1
+  f           162.2    165.8    169.8      -     REGRESSION x0.58
+  psfu        114.6    117.4    121.5      -     f drags the recommended combo below psu
+
+Same switches on down_proj (k=640, tn=160, KS=4, min of 3, warm, interleaved):
+
+  DPAS_F     rows=1   rows=8     vs rev E
+  rev E        81.4    110.4     -
+  p            78.2    101.9     x1.04 / x1.08   win on both
+  u            79.3    102.8     x1.03 / x1.07   win on both
+  s            86.1    111.0     x0.95 / x0.99   loss at rows=1
+  pu           88.9    101.1     x0.92 / x1.09   loss at rows=1, win at rows=8
+  psu          90.1    105.8     x0.90 / x1.04   loss at rows=1
+
+So p wins everywhere (+4% down_proj, +19% gate_proj); u is a small win alone and combines with p on the
+wide-k grid but not on the transposed one; s helps gate and hurts down. The reviewer's bet - "switching B
+will matter much more than switching A" - is confirmed: the B-path change is the only switch that pays on
+both geometries and it is the largest single effect. Prefetch (f) is refuted outright, 1.7x slower.
+
+## The correction this produces to my own earlier conclusion
+
+At F=pu, operand sourcing stops mattering (gate, rows=4, interleaved min of 4):
+
+    A global / B global   95.6 us
+    A global / B SLM      95.6 us
+    A SLM   / B global    95.8 us
+    A SLM   / B SLM       97.1 us
+
+Rev E measured 372 -> 192 -> 457 -> 109 us for those same four cells. So "do not feed joint_matrix_load
+from SLM" was wrong as stated: SLM was never the problem. The 4x spread came from B's row-major layout
+(forcing an element-wise transform plus byte-wise staging) and from work-group barriers taken twice per
+tile. With B packed and barriers scoped to the sub-group, SLM and L2-resident global are indistinguishable.
+
+## Where this leaves the schedule decision
+
+Best rev F (psu on gate, p on down) against rev C+KCONST in the same window:
+
+    rows        1        4       8       16
+    rev C+KC   39.6    103.3   231.0   445.5
+    rev F      87.7     92.2    94.4    105.8
+    winner   revC x2.5  revC x1.02  revF x2.4  revF x4.2
+
+Crossover moves from rows ~5 to rows ~3-4: the two-schedule policy stands, switching slightly earlier.
+Two costs of 'p' for the engine: the packed B tensor is built per forward pass (one pass over x8, 4*k*
+NTOK bytes - the same size as rev E's replicated B, so no new capacity question), and 'u' requires K <= 4
+(enforced in main), so the K=5 and K=6 shipped recipes run p+s only.
+
+Unresolved, deliberately not guessed at: why a 544 KiB local_accessor on a 128 KiB-SLM device launches at
+all. And the ISA question - IGC_ShaderDumpEnable=1 with IGC_DumpToCustomDir DOES emit native .isaasm
+(along with .spv/.dat/.zeinfo, 19-34 files), which retracts the earlier note that no dump could be
+produced; but the captured unit is 724 instruction lines (558 for psu) with a single send, so it is not the
+tile loop and no SLM-message census was obtained. Instruction lines dropping 23% is directionally
+consistent with the win and is not evidence for the mechanism.
+
+Item 5 (partial-sum traffic: KS*2*E*n*16 int32 = 128*KS/k bytes per weight - 0.5 B/weight at k=2560/KS=8
+against 0.375 B/weight of trellis, and 1.0 B/weight on down_proj at KS=4) is untouched by rev F and is now
+the largest known lever. Not yet priced directly.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -355,3 +469,9 @@ from the 239.2 us that started this chain.
     icpx -fsycl -O2 -o /tmp/devinfo devinfo.cpp && /tmp/devinfo
     DPAS_NO_MAD=1 ./probe_dpas2 ...       # unpack + assembly only (prices the assembly)
     DPAS_NO_UNPACK=1 ./probe_dpas2 ...    # matrix path only
+
+  rev F (warm up first, then interleave; DPAS_F picks switches, default psfu):
+    ./probe_gemv CASE 0 400 8 1 1 >/dev/null     # ~15-20 s sustained load, then time
+    for f in none p u pu ps psu f psfu; do DPAS_F=$f DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
+    DPAS_F=psu DPAS_CHECK=/tmp/revE_ref.bin ./probe_dpas3 CASE 3 4 8    # bit-identity vs rev E
+    IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa ./probe_dpas3 CASE 1 1 8   # native .isaasm
