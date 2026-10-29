@@ -38,6 +38,19 @@ DPAS = {          # probe_dpas4 rev G + DPAS_X, ks=2 (gate) / ks=1 (down); windo
     8: (4.11, 4.11),
     16: (5.65, 5.65),
 }
+# Third family: rev H (probe_dpas5.cpp) + DPAS_X - ESIMD xmx::dpas fed straight from registers, no SLM, no
+# barriers, no B operand loads. Best at ks2 everywhere once the expert grid was ported onto it. It is
+# slightly behind rev G at rows 1-8 and clearly ahead at rows=16 (gate 44.2 vs 56.4 us, down 64.7 vs 92.7).
+# Source: notes/b70/out_dpas.txt, "REV H + EXPERT GRID".
+DPAS_REG = {
+    1: 3.91,
+    2: 3.91,      # interpolated between the measured rows=1 and rows=4 (within 1 % of both)
+    4: 3.94,
+    8: 4.11,
+    16: 4.42,
+}
+DPAS_REG_DOWN_FACTOR = {1: 1.10, 2: 1.19, 4: 1.18, 8: 1.32, 16: 1.46}
+MEASURED_ROWS_REG = (1, 4, 8, 16)   # rows=2 is interpolated, not measured
 # down_proj measures a little dearer than gate/up at the same weight count (transposed geometry, tn=160):
 DPAS_DOWN_FACTOR = {1: 1.15, 2: 1.16, 4: 1.14, 8: 1.26, 16: 1.28}
 DP4A_DOWN_FACTOR = {r: 1.0 for r in DP4A}      # dp4a is within noise of gate at every rows measured
@@ -73,6 +86,8 @@ def per_proj_us(rows, kernel, proj="gate_proj"):
     if kernel == "dpas":
         lo, hi = DPAS[rows]
         return ((lo + hi) / 2.0) * f
+    if kernel == "dpas_reg":
+        return DPAS_REG[rows] * (DPAS_REG_DOWN_FACTOR[rows] if proj == "down_proj" else 1.0)
     raise KeyError(kernel)
 
 
@@ -82,7 +97,7 @@ def layer_us(picks, rows, scale=1.0, kernel=None):
     Each owned expert runs three projections (gate, up, down). `scale` converts the reference weight count
     to the model's: pass expert_weights / 1.6384e6, or expert_bytes*K/8/1.6384e6. kernel=None dispatches.
     """
-    ks = ("dp4a", "dpas") if kernel is None else (kernel,)
+    ks = ("dp4a", "dpas", "dpas_reg") if kernel is None else (kernel,)
     best = None
     for k in ks:
         t = sum(per_proj_us(rows, k, p) for p in PROJS) * picks * scale
@@ -104,7 +119,12 @@ def main():
     for r in MEASURED_ROWS:
         a = sum(per_proj_us(r, "dp4a", p) for p in PROJS)
         b = sum(per_proj_us(r, "dpas", p) for p in PROJS)
-        print(f"{r:5d} {a:21.2f} {b:21.2f} {'dp4a' if a < b else 'dpas':>10} {b / a:9.2f}x")
+        try:
+            h = sum(per_proj_us(r, "dpas_reg", p) for p in PROJS)
+        except ValueError:
+            h = float("nan")
+        win = min((a, "dp4a"), (b, "dpas"), (h, "dpas_reg"))
+        print(f"{r:5d} {a:21.2f} {b:21.2f} {win[1]:>10} {b / a:9.2f}x   dpas_reg {h:6.2f}")
     print("\nCrossover: dp4a wins at rows=1 by ~5 %; the DPAS path wins from rows=2. Per-expert-layer cost is")
     print("flat in rows for the DPAS path (11.2 -> 17.8 us from 1 to 16 tokens) and grows ~11x for dp4a,")
     print("which is the whole reason the schedule exists.")

@@ -37,7 +37,7 @@ parent window per layer ~250 us at b=1 [M, doc/prep] (scales weakly with b until
     2    19.9       19.4      28.4M      no    292       212   2.0x    558     10.16    0.8
     4    38.8       37.9      55.5M      no    292       414   3.9x    558     19.85    1.7
     8    72.7       71.0     104.0M      no    234       888   8.3x    383     42.60    3.6
-   16   131.2      128.0     187.6M      no    214      2213  20.7x    310    106.24    8.9
+   16   131.2      128.0     187.6M      no    214      1827  17.1x    310     87.67    7.3
   b=1: 48 layers x 107 us = 5.14 ms/token of B70 time (14.3 MiB/layer read while doing 9.8 expert-projection-layers of work; dispatch picks dp4a)
   upper bound if this card owned every pick: 53 us/layer
 
@@ -50,7 +50,7 @@ GLM@3.05:  topk=8 (config.json), expert block 9.000 MiB, 288 experts/layer, 42 M
     2    15.8       11.2     100.5M      no    175       658   2.0x    221     27.62      ?
     4    30.2       21.4     192.2M      no    220      1259   3.8x    259     52.90      ?
     8    55.1       39.0     351.1M      no    239      2633   7.9x    296    110.57      ?
-   16    96.1       68.1     612.6M      no    253      6352  19.0x    304    266.80      ?
+   16    96.1       68.1     612.6M      no    253      5242  15.7x    304    220.17      ?
   b=1: 42 layers x 335 us = 14.06 ms/token of B70 time (50.9 MiB/layer read while doing 5.7 expert-projection-layers of work; dispatch picks dp4a)
   upper bound if this card owned every pick: 534 us/layer
 

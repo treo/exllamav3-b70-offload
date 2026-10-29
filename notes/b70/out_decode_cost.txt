@@ -21,11 +21,11 @@ Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 
  rows  dp4a us/expert-layer  dpas us/expert-layer   dispatch  dpas/dp4a
-    1                 11.76                 12.57       dp4a      1.07x
-    2                 16.23                 11.69       dpas      0.72x
-    4                 30.99                 11.71       dpas      0.38x
-    8                 69.27                 13.40       dpas      0.19x
-   16                134.97                 18.53       dpas      0.14x
+    1                 11.76                 12.57       dp4a      1.07x   dpas_reg  12.12
+    2                 16.23                 11.69       dpas      0.72x   dpas_reg  12.47
+    4                 30.99                 11.71       dpas      0.38x   dpas_reg  12.53
+    8                 69.27                 13.40       dpas      0.19x   dpas_reg  13.65
+   16                134.97                 18.53   dpas_reg      0.14x   dpas_reg  15.29
 
 Crossover: dp4a wins at rows=1 by ~5 %; the DPAS path wins from rows=2. Per-expert-layer cost is
 flat in rows for the DPAS path (11.2 -> 17.8 us from 1 to 16 tokens) and grows ~11x for dp4a,
