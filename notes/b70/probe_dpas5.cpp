@@ -145,6 +145,19 @@ struct Launch
     // 'X' (DPAS_X=1): experts in the grid as well as the k-slice (grid = tn*KS*E), so PART carries 2*KS
     // partials per output instead of 2*KS*E. rev H's timing showed it starved for parallelism without this.
     bool structx = false;
+    // DPAS_DUP_LOAD=1: issue a second, non-CSE-able load of the same tile per iteration and sink the result
+    // into a 4-byte scratch. Same unpack arithmetic, same DPAS, same y - so the delta over the plain build
+    // is the marginal price of the load message stream itself (the LSU-volume hypothesis), which the K sweep
+    // alone cannot settle because duplicated bytes scale with K while the time does not.
+    bool dup_load = false;
+    // DPAS_DUP_UNPACK=1: run the unpack a second time into a shadow operand image each tile, xor the result
+    // into an accumulator and store it once after the loop (so nothing can be dead-code eliminated). Doubles
+    // the unpack arithmetic at unchanged loads, DPAS and y: if the cost is ~0 the kernel is latency-bound and
+    // ILP is the lever; if it roughly doubles the unpack term the kernel is issue-bound and the instruction
+    // count has to come down.
+    bool dup_unpack = false;
+    uint32_t *bsink = nullptr;
+    uint32_t *sink = nullptr;
 };
 
 // K = trellis bits per weight, MR = token rows per DPAS (repeat count), NF = DPAS per byte-block (1, or 2
@@ -168,6 +181,9 @@ static void submit(const Launch &L)
     const uint32_t *W = L.W;
     const uint32_t *XA = L.XA;
     int32_t *PART = L.PART;
+    uint32_t *SINK = L.sink;
+    const bool dup_load = L.dup_load;
+    const bool dup_unpack = L.dup_unpack;
     const int zero = L.zero;
 
     L.q->submit([&](sycl::handler &cgh)
@@ -240,7 +256,11 @@ static void submit(const Launch &L)
 
             // --- B operands: weight row r of byte-block r/8 is dwords (r%8)*16 .. +15, one per column ---
             simd<uint32_t, 128> Bop[2] = {simd<uint32_t, 128>(0u), simd<uint32_t, 128>(0u)};
-            auto unpack = [&](simd<uint32_t, NW> &t) SYCL_ESIMD_FUNCTION   // non-const: iselect is not const
+            // shadow image for DPAS_DUP_UNPACK (16 registers: 128 elements over 16 lanes)
+            simd<uint32_t, 128> Bop2[2] = {simd<uint32_t, 128>(0u), simd<uint32_t, 128>(0u)};
+            simd<uint32_t, 128> keep(0u);
+            uint32_t *BSK = L.bsink + (size_t)gid * 256;
+            auto unpack_into = [&](simd<uint32_t, NW> &t, simd<uint32_t, 128> (&B)[2]) SYCL_ESIMD_FUNCTION
             {
 #pragma unroll
                 for (int a4 = 0; a4 < 4; ++a4)
@@ -257,10 +277,11 @@ static void submit(const Launch &L)
                         // shift is the same for every column, so it is an immediate, not a per-lane funnel
                         const simd<uint32_t, NCOL> win = (w32 >> (16 - K * jl)) & 0xFFFFu;
                         const int r = 2 * a4 + (jl & 1) + 8 * (jl >> 1);
-                        Bop[r >> 3].template select<NCOL, 1>((r & 7) * NCOL) = win * HASH;
+                        B[r >> 3].template select<NCOL, 1>((r & 7) * NCOL) = win * HASH;
                     }
                 }
             };
+            auto unpack = [&](simd<uint32_t, NW> &t) SYCL_ESIMD_FUNCTION { unpack_into(t, Bop); };
 
             simd<int32_t, MR * NCOL> acc[NF];
             auto store_part = [&](int e) SYCL_ESIMD_FUNCTION
@@ -294,6 +315,19 @@ static void submit(const Launch &L)
                 {
                     fetch(pf[(u + PF_DIST) % NSET]);  // the set the previous tile just used
                     unpack(pf[u]);
+                    if (dup_unpack)
+                    {
+                        // a DIFFERENT ring slot, so the compiler cannot fold this into the real unpack
+                        unpack_into(pf[(u + 1) % NSET], Bop2);
+                        keep = keep ^ (Bop2[0] ^ Bop2[1]);
+                    }
+                    if (dup_load)
+                    {
+                        // `zero` is a kernel argument that is always 0 and opaque to the optimizer (see the
+                        // ring-index comment above): without it the duplicate folds into the real load.
+                        const simd<uint32_t, NW> j = load_dw<NW>(fp + zero);
+                        if (j[0] == 0xDEADBEEFu) *SINK = j[1];   // data-dependent, never true, cannot be removed
+                    }
                 }
                 if (!skip_mad)
                 {
@@ -318,6 +352,11 @@ static void submit(const Launch &L)
                 }
             };
             for (int g0 = 0; g0 < total; g0 += NSET) unrolled<0, NSET>(step, g0, total);
+            if (dup_unpack)
+            {
+#pragma unroll
+                for (int i = 0; i < 128; ++i) BSK[i] = keep[i];
+            }
         });
     });
 }
@@ -445,6 +484,12 @@ int main(int argc, char **argv)
     sycl::queue q{ctx, dev, sycl::property::queue::in_order{}};
 
     uint32_t *W = (uint32_t *)sycl::malloc_device(wbuf.size(), q);
+    uint32_t *SINK = (uint32_t *)sycl::malloc_device(4, q);
+    // sized by the ACTUAL thread count: under DPAS_X the grid is tn*KS*E, so the old tn*KS*2 sizing would
+    // have been an out-of-bounds write exactly when the ablation was switched on.
+    uint32_t *BSINK = (uint32_t *)sycl::malloc_device(
+                          (size_t)m.tn * KS * (getenv("DPAS_X") ? m.E : 1) * 2 * 256 * 4, q);
+    q.memset(SINK, 0, 4);
     uint32_t *XA = (uint32_t *)sycl::malloc_device(hXA.size(), q);
     float *Q = (float *)sycl::malloc_device(qbuf.size(), q);
     int32_t *SX8 = (int32_t *)sycl::malloc_device(sbuf.size(), q);
@@ -458,8 +503,12 @@ int main(int argc, char **argv)
 
     Launch L;
     L.q = &q; L.W = W; L.XA = XA; L.PART = PART; L.m = m; L.KS = KS;
+    L.sink = SINK;
+    L.bsink = BSINK;
     L.skip_mad = getenv("DPAS_NO_MAD") != nullptr;
     L.structx = getenv("DPAS_X") != nullptr;
+    L.dup_load = getenv("DPAS_DUP_LOAD") != nullptr;
+    L.dup_unpack = getenv("DPAS_DUP_UNPACK") != nullptr;
     L.skip_unpack = getenv("DPAS_NO_UNPACK") != nullptr;
     L.zero = 0;                     // a kernel argument, so the device compiler cannot fold it
 

@@ -1048,6 +1048,57 @@ Correction to my own record: the flat-in-K result means the decode kernels here 
 nor issue-bound; they are bound by per-tile data movement inside the thread. "We are near the DRAM floor"
 was a story told from two of the three required measurements (instructions and bytes, without the K sweep).
 
+================================================================================
+REV H IS ISSUE-BOUND ON THE UNPACK: doubling the arithmetic costs +75-86 %, doubling
+the loads costs ~0-5 %. That fixes the target for further work.
+================================================================================
+Two marginal ablations added to rev H, both bit-exact in every mode (the sinks are write-only, and y is
+identical with them on, which is the check that they did not perturb the real path):
+
+* `DPAS_DUP_LOAD=1` - a second, non-CSE-able tile load per iteration (the `zero` opaque-argument trick).
+* `DPAS_DUP_UNPACK=1` - the whole unpack run a second time per tile into a shadow operand image, xor-accumulated
+  and stored once after the loop, so nothing can be dead-code eliminated. (Caught while writing it: the sink
+  buffer was sized tn*KS*2, but under DPAS_X the grid is tn*KS*E - an out-of-bounds write that would have
+  fired exactly when the ablation was enabled.)
+
+Warm interleaved min of 4, us, ks2:
+
+  gate tn=40    control   2x loads    d    2x unpack    d
+    rows=1         40.5      41.5    +1.0      75.2   +34.7     unpack +86 %, loads +2 %
+    rows=4         42.4      42.1    -0.3      76.6   +34.2     unpack +81 %, loads -1 %
+    rows=8         44.0      44.1    +0.1      78.1   +34.1     unpack +77 %, loads  0 %
+   rows=16        45.5      47.0    +1.5      79.4   +33.9     unpack +75 %, loads +3 %
+  down tn=160
+    rows=1         45.2      47.3    +2.1      82.8   +37.6     unpack +83 %, loads +5 %
+    rows=4         49.2      51.0    +1.8      85.1   +35.9     unpack +73 %, loads +4 %
+    rows=8         55.7      57.0    +1.3      90.8   +35.1     unpack +63 %, loads +2 %
+   rows=16        64.1      66.3    +2.2      99.3   +35.2     unpack +55 %, loads +3 %
+
+Putting the four exclusions side by side: bytes are free (flat across a 2.5x K range), load messages are free
+(+0-5 %), the XMX arithmetic is free (0.8-1.8 us), prefetch depth is free - but a second copy of the unpack
+arithmetic costs a second unpack. **The kernel is issue-bound on the unpack instruction stream**, and the
+headroom is the whole distance from 40 us to the ~10 us its loads and DPAS would allow.
+
+The instruction count implied by the doubling (~277 per tile at 2 GHz, or ~140 at ~1 GHz effective with
+half-rate 16-wide ALU) is 1.3-2.7x the ~104 I counted in the tile block, which says my block reading
+undercounted - the unrolled ring has prologue/epilogue variants and the placement writes are not free.
+
+Where to cut, from the actual code rather than taste. Per ring-position group the unpack does:
+
+    d0, d1 = t.iselect(...)          2 indirect selects
+    w32 = (d0 << s0) | ((d1>>1)>>rs0)   4 ops
+    x4:  win = (w32 >> imm) & 0xFFFF    2 ops
+         Bop[r>>3].select<16,1>((r&7)*16) = win * HASH   1 mul + a sub-register insert
+
+That last line is the suspicious one: `r = 2*a4 + (jl&1) + 8*(jl>>1)`, so a lane's four windows land at r =
+{2a4, 2a4+1, 2a4+8, 2a4+9} - two different B rows and non-adjacent slots - which is exactly the pattern that
+forces insert-into-register behaviour instead of whole-register writes, and `mov` is already rev H's largest
+opcode class (141). The concrete experiment is therefore a **lane-to-column remap so that each unpack
+iteration writes one contiguous B row** (equivalently: choose the column assignment so a lane's four windows
+have consecutive r within a single row). No layout change to the stored trellis, no extra bytes, no change to
+the arithmetic - purely turning 4 inserts into 1 register write. If the mov class is what I think it is, that
+is a 20-40 % kernel cut; if it isn't, the ablation says so in one measurement.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -1078,6 +1129,7 @@ was a story told from two of the three required measurements (instructions and b
     DPAS_X=1 ./probe_dpas4 CASE 5 <rows> <ks>      # experts in the grid too; best ks 2 (gate) / 1 (down)
     ./probe_dpas5 CASE 5 <rows> <ks>        # rev H, ESIMD xmx::dpas from registers; KS matters a lot (best = largest)
     DPAS_X=1 ./probe_dpas5 CASE 5 <rows> <ks>    # rev H with experts in the grid; optimum ks2 everywhere
+    DPAS_DUP_LOAD=1 / DPAS_DUP_UNPACK=1 : marginal ablations - loads free, unpack is the whole cost
     PF_DIST_OVERRIDE=n: prefetch depth sweep - measured null (2/3/4 within noise), keep 2
     K-sweep for the byte question: ./probe_dpas5 /tmp/rc_K2_gate|/tmp/gemv_dpE10|/tmp/rc_K5_gate 5 1 2
     # ISA dumps: NEO_CACHE_PERSISTENT=0 is required (LESSONS 41); archived dumps in notes/b70/isa/
