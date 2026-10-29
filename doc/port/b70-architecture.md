@@ -378,6 +378,20 @@ Supporting decisions for this regime:
   is a free space reclaim — unlike the 3090↔arena demote path, which writes bytes back. Only the
   `EXL3_MOE_B70_ARENA=0` mode (all experts on the B70, no host copy) forbids eviction, and it is only
   offered when `bytes(S_b) ≤ VRAM_b70`.
+* **`S_d` is not hypothetical on this box.** Host DRAM is 125.6 GiB and GLM-5.3-Flash's expert trellis
+  alone is 108.84 GiB (the whole checkpoint is 117 GB on disk — experts dominate a Flash-Next model to
+  that degree), so a full arena would leave ~14 GiB for torch, the pinned ring, the in-flight 3090
+  weights and the page cache. `S_c` therefore needs its own cap
+  (`EXL3_MOE_B70_ARENA_CAP_GB`), with anything beyond it living only on disk; the placement table
+  records the tier per expert (`S_b` / `S_c` / `S_d`) so a miss knows whether to pay 655 µs or 2.5 ms,
+  and the cache policy then has two admission prices rather than one (cheap from `S_c`, expensive from
+  `S_d` — evicting to `S_d` should be avoided in favour of evicting an expert that is still in `S_c`).
+* **Scaling out is the real fix for this class.** `h_min` disappears once `bytes(experts) ≤ VRAM_b70`:
+  two B70s make GLM 59 % resident (quota 168 of 288 per layer), four make it fully resident. The
+  protocol already supports it — one engine child, ring and slot region per device, and the row-split
+  predicate extended from "on the B70 or not" to "which of the N" (the `dev_count`-per-device
+  mechanism the multi-GPU CUDA path already has). A capacity–device curve belongs in the same sweep
+  as E9.
 * **`S_d` (DRAM exhausted)** reuses the loader's deferred/paged reads into a *bounded pinned ring*
   (`EXL3_MOE_B70_DISK_RING_MB`), never an unbounded arena: read → DMA → recycle. Keep the expert's
   *presence* metadata (tier + byte offset) in the placement table so a miss knows whether to pay
@@ -501,6 +515,7 @@ CLI aliases in `config.py`). Family A/B/C = shape / policy / implementation, per
 | `EXL3_MOE_B70_EVICT` | B | `lfu-decay` | victim rule for `S_b`; `hyst` mirrors `EXL3_MOE_CPU_SWAP_HYST` semantics |
 | `EXL3_MOE_B70_PRIME` | B | 1 | at load, fill `S_b` from the saved expert-stats profile before the first forward |
 | `EXL3_MOE_B70_DISK_RING_MB` | A | 64 | pinned ring size for the `S_d` (checkpoint→B70) path; also bounds transient host memory |
+| `EXL3_MOE_B70_ARENA_CAP_GB` | A | auto | cap on the host arena, so an oversized model keeps a DRAM tier instead of trying to hold 109 GiB in 125 GiB; beyond it, experts are `S_d` and admission is disk-priced |
 | `EXL3_MOE_B70_THREADS`, `…_PIN` | C | 2, 1 | engine thread count/pinning (transfer thread + engine loop) |
 | `EXL3_MOE_B70_PROF`, `…_STREAM_DEBUG`, `…_VERIFY`, `…_MAX_ISA` | C | off | observability parity with the CPU worker; `…_VERIFY` runs the same job on the CPU worker and diffs |
 | inherited | | | `EXL3_MOE_CPU_SPLIT_STATS` (placement profile — same state-pinning requirement, `doc/prep/measured-costs.md` §8.3), `EXL3_HOST_CORES`, `EXL3_MOE_STREAM_MIN_ROWS` (path selector), `EXL3_MOE_STREAM_T` (only for `S_c`) |
