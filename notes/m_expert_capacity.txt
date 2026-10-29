@@ -1,0 +1,22 @@
+tiers: offload VRAM 31.9 GiB, link 14.4 GB/s, CPU 47.4 GB/s, device 420.0 GB/s, disk 5.0 GB/s, parent layer work 400 us
+
+checkpoint                                       E  experts  exp MiB  total GiB  fit % quota/lay  admit ms  CPU/use brk-even  h_min
+-----------------------------------------------------------------------------------------------------------------------------------
+GLM-5.3-Flash-exl3@3.05bpw                       8      288     9.00     108.84   29.3      84.4     0.655     199u      3.7  92.4%  <-- oversized: prefetch alone cannot converge
+Qwen3-0.6B-exl3@8.0bpw_H8                        -  (no routed experts)
+Qwen3.5-35B-A3B-3bpw-hq2                         8      256     1.12      11.25  100.0     725.9     0.082      25u      3.7  39.0%   +0.4 GiB in other families (MTP/draft)
+Qwen3.6-27B-exl3-4.00bpw                         -  (no routed experts)
+Qwen3.6-35B-A3B-exl3-2.49bpw                     8      256     1.12       9.09  100.0     725.9     0.082      25u      3.7  39.0%
+Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4          10      512     1.17      28.12  100.0     580.7     0.085      26u      3.7  53.1%   +0.6 GiB in other families (MTP/draft)
+Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8          10      512     1.76      36.33   87.8     387.1     0.128      39u      3.7  68.8%   +0.7 GiB in other families (MTP/draft)
+Qwen3.8-Flash-Next-exl3-4.05bpw_h6_ng6          10      512     2.34      56.25   56.7     290.4     0.171      52u      3.7  76.6%   +1.2 GiB in other families (MTP/draft)
+Qwen3.8-Flash-Next-exl3-4.18bpw_h6_ng8          10      512     2.93      57.13   55.8     232.3     0.213      65u      3.7  81.2%   +1.2 GiB in other families (MTP/draft)
+Qwen3.8-Flash-Next-exl3-5.05bpw_h6_ng8          10      512     2.93      70.31   45.4     232.3     0.213      65u      3.7  81.2%   +1.5 GiB in other families (MTP/draft)
+Qwen3.8-Flash-Next-exl3-6.05bpw_h6_ng8          10      512     3.52      84.38   37.8     193.6     0.256      78u      3.7  84.4%   +1.8 GiB in other families (MTP/draft)
+
+columns:  fit %   = fraction of the routed-expert trellis that fits one offload tier
+          quota/lay = experts per layer if capacity is split evenly by bytes across layers (§4a rule 2)
+          admit ms  = one expert uploaded over the link;  add expert_bytes/disk for the S_d path
+          brk-even  = uses per window before admission pays for itself (scale-invariant, ~3-4)
+          h_min     = 1 - link*T_layer/(topk*expert_bytes): the hit rate the cache must exceed
+Read h_min > 90 % as: the model needs more than one B70, or the CPU worker must serve the misses.

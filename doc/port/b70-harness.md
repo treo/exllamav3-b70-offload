@@ -112,6 +112,11 @@ is the oracle.
 | E7′ | rows-to-B70 ≥ **4×** "stream everything to the 3090" at 2048 rows, on a model whose experts are `S_b`-resident | successor of the CPU path's E7 (`stream_t`) gate: it re-checks, per model, that the streaming decision is still the right one — the crossover is `expert_bytes/(hi+2·ho)` ≈ 184–200 rows/expert here |
 | E8 host cost | the engine must add ≤ 20 µs/token of *parent* host time; engine-thread CPU time charged separately | the forward thread is already 3.6 ms/token |
 
+| E9 capacity curve | `tok/s` vs `S_b` capacity (sweep `-mb`/quota from 0 to full) must be **monotone and smooth**: no adjacent pair differing by more than 15 %, and ≥ 90 % of the resident-case rate at 50 % capacity. The property that says the cache degrades gracefully instead of cliff-edging |
+| E10 hit-rate floor | measured `h` on the calibration corpus ≥ the planner's computed `h_min = 1 − link_rate·T_layer/(topk·expert_bytes)` (§4a); reported with `T_layer`, `link_rate` and the profile state. If it fails, the configuration is declared oversized, not "slow" |
+| E11 thrash convergence | alternate two disjoint corpora (chat vs code) and record tok/s and `h` per window: must return within 2 % of the single-corpus steady state within `EXL3_MOE_B70_WINDOW` tokens, and the admission count per step must stay under the budget |
+| E12 admission/eviction cost | one `S_b` admission (expert upload) measured cold: ≤ 1.15 × `expert_bytes / link_rate`; and a decode step *while* N admissions are in flight ≤ 1.1 × the no-admission step (proves the low-priority queue and the budget actually work) |
+
 ### U — utilisation and power (the "is the card actually working" channel)
 
 Sensors available on this box, no extra daemon needed:
@@ -156,6 +161,7 @@ Scripts (all in `notes/b70/`, extending the existing harnesses rather than repla
 | `b70_bench_kernel.py` | B′ + E4: GEMV/GEMM rate vs rows × experts × threads × rate × layout, cold selections |
 | `b70_bench_engine.py` | E1–E3, E8: real jobs through the ring with the engine child live (the `notes/bench_handoff.py` analogue) |
 | `b70_prof.py` | per-layer decode/prefill attribution + power phases (the `notes/prof_e2e.py` analogue; CUDA events on the parent, engine-side `EXL3_MOE_B70_PROF` gap/queue/compute per 64 jobs, hwmon sampler) |
+| `b70_bench_capacity.py` | E9–E12: capacity sweep, hit-rate/`h_min` accounting, corpus-switch thrash test, admission cost with and without concurrent jobs (drives `-mba` and the admission knobs) |
 | `b70_power.py` | the U channel alone: sampler + phase integration + `J/token`, `J/GiB`, clock/temperature, used by every other script |
 | `b70_run_e2e.sh` | E6/E7′: `eval/perf.py` over named configs (`b70_split`, `b70_all`, `b70_auto`, `b70_plus_cpu`, `cpu_split`, `ref`) with the profile pinned per row |
 | `b70_compare.py` | diffs a run against `notes/b70/baseline.json` with per-gate tolerances (±30 % protocol-bound, ±10 % bandwidth-bound, absolute for the numerics levels) and refuses to compare runs whose placement state or link rate differ |

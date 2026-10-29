@@ -33,6 +33,13 @@ material for the card is symlinked at [`doc/b70/`](../b70/) (cheat sheets, the L
 | activation payload per decode layer | 5.1 KiB down, 10 KiB up | same, and it hides entirely |
 | GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — and now 4–7× the offload cost |
 
+Oversized models are covered too, and they are a different problem: at 108.8 GiB of routed-expert
+trellis (GLM-5.3-Flash@3.05, present on this box) only 29 % of the experts fit the B70, so the B70
+tier becomes a **cache** and the port's problem becomes hit-rate engineering — a 655 µs admission
+against a 199 µs CPU compute makes "admit on the third use" roughly size-independent, and the
+prefetchable link bandwidth sets a hard floor (`h_min`, 92 % there) below which no policy converges.
+See [`b70-architecture.md` §4a](b70-architecture.md).
+
 Consequence: at decode the offload should become **free** (hidden behind the parent GPU's own work)
 rather than the 20–56 % tax it is today, and at prefill the question flips from *"is it cheaper to
 ship the weights or the rows?"* to *"how do we split rows between two fast devices without

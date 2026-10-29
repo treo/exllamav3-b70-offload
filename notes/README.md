@@ -18,6 +18,7 @@ The system `gcc` is 16.2, which the installed nvcc refuses; the extension is bui
 |---|---|---|
 | `geom.py` | handoff-region / slot / weight-ring geometry tables (`geom.txt`) | data-paths §1, measured-costs §1 |
 | `scan_widths.py` | tile-width (bitrate) census per module class, from safetensors headers (`widths.txt`) | mul1-trellis §1 |
+| `scan_expert_capacity.py` | routed-expert trellis bytes, per-tier residency and the B70 cache economics (admission cost, break-even uses, `h_min`) per local checkpoint (`m_expert_capacity.txt`) | [`doc/port/b70-architecture.md`](../doc/port/b70-architecture.md) §4a |
 | `scan_mixed_rates.py` | per-layer bitrate uniformity check per model (catches mixed-rate layers) | mul1-trellis §1, README watch-outs |
 | `verify_trellis.py` | the five format checks ([1] tail-biting, [2] NumPy-vs-`reconstruct`, [3] codebook, [4] packed-layout round trip, [5] int8 identity) | every claim in mul1-trellis |
 | `bench_cpu_moe.py` | cold-expert CPU GEMV sweep vs rows and thread count | measured-costs §5 (`m_cpu_*.txt`) |
