@@ -91,20 +91,26 @@ to match), `[0, F_g)` is the 3090's `num_local_experts` slice, `[F_g, F_g+F_b)` 
 range, per home. Three homes, two cut points, no new addressing machinery.
 
 Loading: the engine child receives the same `("layer", spec)` pipe messages as the CPU child, reads
-the expert tensors from the checkpoint, and uploads each layer's expert block over the link
-(`14.4 GB/s` **[M]** ⇒ 36 GiB in ~2.7 s, overlapped with the parent's own module load — same
-trick `model.py:614` uses to hide the CPU child's interpreter start). Aux tensors (`suh`, `svh`,
-bias) are uploaded alongside, per expert, in a side table the kernels can index.
+**only the experts whose home is `S_b`** (the cut points are decided before either side loads, so the
+3090's slice and the CPU's slice are simply never sent to it), and uploads them over the link
+(`14.4 GB/s` **[M]** ⇒ a full 31.9 GiB tier in 2.3 s, overlapped with the parent's own module load —
+same trick `model.py:614` uses to hide the CPU child's interpreter start). Aux tensors (`suh`, `svh`,
+bias) are uploaded alongside, per expert, in a side table the kernels can index. The parent's
+`num_local_experts` shrink (`cpu_maybe_split_load`, `block_sparse_mlp_cpu.py:428`) keeps covering the
+3090's slice exactly as `-mcs` does today, so nothing else about the load path forks.
 
 `S_c` handling: **keep the existing host arena byte-for-byte as it is**, including the CPU tier's
-packed layout, because it is also (a) the source for streamed prefill of spilled experts and
-(b) what promote/demote and `moe_unswizzle_trellis` operate on. The B70's VRAM copy is made in the
-B70's own layout (below) at upload time; when an expert is spilled out of B70 VRAM the B70 reads it
-from the arena over the link (rare, and the layout question recurs there).
+packed layout, because the arena is the CPU's *home* copy and at the same time the source for a
+migration into `S_b` (655 µs) and for the streamed-prefill path of P3. The B70's VRAM copy is made in
+the B70's own layout (below) at upload time; when an expert is migrated into `S_b` later, the bytes
+come from the arena in the CPU's layout and are repacked on the way in — a load-time cost paid once
+per migration, on the low-priority queue, never inside a job. `EXL3_MOE_B70_ARENA_CAP_GB` bounds the
+arena to the `S_c` slice; anything below it is `S_d` (§4a).
 
-If the B70 holds all offloaded experts, the host arena can be dropped entirely (`EXL3_MOE_B70_ARENA=0`):
-a second, independent saving of the same 36 GiB in *host RAM*. That is only sound when nothing is in
-`S_c`, so it stays opt-in.
+When `bytes(S_b ∪ S_g) = bytes(experts)` — nothing in `S_c` — the host arena can be dropped entirely
+(`EXL3_MOE_B70_ARENA=0`), a second, independent saving of the same tens of GiB in *host RAM* (which
+matters because the arena competes with the page cache the checkpoint reads go through). Opt-in only:
+it also means eviction from `S_b` has nowhere to go, so the tier is then a static partition.
 
 ### 2.2 Weight layout on the B70
 
