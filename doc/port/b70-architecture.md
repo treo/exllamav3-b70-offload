@@ -374,20 +374,39 @@ composition do. (The dot
 still matters for the XMX prefill routes and for power, and `spillMemSize`/ISA checks stay in the
 harness; what no longer gates the design is "what if `dot_acc` becomes seven ops".)
 
-What the model says at a glance:
+What the model says at a glance. **The footprint that sets the rate is the set of experts a layer
+actually touches, not the checkpoint**: `topk` (10 on Qwen3.8, 8 on GLM, from `config.json`) unioned
+across the rows of the batch, times the fraction `h` this card owns. `plan_operating_point.py`
+(`out_operating_point.txt`) computes that per batch from the real selection counts and samples the
+measured rate curve at the matched footprint:
 
-* Decode, at the **measured** read rates, per layer: Qwen3.8's 49.2 M weights (10 picks × 4.92 M)
-  take **55–95 µs** scattered across the footprint sweep, 31–62 µs at the clustered end — against a
-  parent window of ~250 µs/layer, so the offload is hidden with a 2.6–4.5× margin. Qwen3.5 is
-  proportionally cheaper. **GLM is the hard case: 201 M weights per layer is 278–548 µs** at its
-  measured band (132–260 GB/s scattered, and only 1.08–1.64× available from locality), so GLM's
-  offload is plausibly *not* hidden — whether it is depends entirely on GLM's own per-layer parent
-  work (45 layers at H=4096, 64 heads), which E10 must measure before anyone
-  promises "free at decode" for it. The claim is therefore conditional per model, not universal.
+| rows | Qwen3.8 MiB/layer | GB/s | µs/layer | vs parent 250 µs | GLM MiB/layer | GB/s | µs/layer |
+|---|---|---|---|---|---|---|---|
+| 1 | 14.3 | 292 | **51** | 4.9× margin | 50.9 | 132 | **405** |
+| 4 | 55.5 | 292 | 199 | 1.3× | 192.2 | 220 | 917 |
+| 8 | 104.0 | 234 | 465 | **0.5×** | 351.2 | 239 | 1539 |
+| 32 | 313.3 | 234 | 1404 | 0.2× | 975.6 | 254 | 4020 |
+
+* Decode at **b=1**, rate-matched: Qwen3.8 takes **51 µs/layer** (27 µs if the kernel clusters) inside a
+  ~250 µs parent window — hidden ~5×, and the whole model's routed-expert reads are 2.46 ms/token of
+  B70 time. Qwen3.5 is proportionally cheaper. **GLM is the hard case: 405 µs/layer, 17.0 ms/token**,
+  because its 9 MiB experts put a single token's 50.9 MiB footprint on the *worst* point of the measured
+  curve (132 GB/s) with little locality to recover (1.6× at best). Whether that hides depends entirely on
+  GLM's own parent work (45 layers, H=4096, 64 heads), which E10 must measure before anyone promises
+  "free at decode" for it. The claim is conditional per model, not universal.
+* **Batch is the variable that the per-token view hides, and it cuts against offloading.** Distinct
+  experts per layer grow almost linearly with rows (72.7 of 512 at b=8 for Qwen3.8) until routing's
+  effective support saturates, so B70 work per layer grows ~9× from b=1 to b=8 while the parent's window
+  grows far more slowly — at b=1 it is bound by *weight* reads, which are batch-independent. Qwen3.8's
+  margin goes 4.9× → 1.3× → 0.5× over b = 1 → 4 → 8: **the offload stops hiding at single-digit batch**.
+  Two consequences: the harness must report decode at several batch sizes (E9/E10, not just b=1), and
+  past the crossover the extra rows belong on the XMX routes, where batch is what pays.
+* **A second/third B70 buys rate, not only capacity.** Each pick is computed in exactly one home, so a
+  layer's expert bytes divide linearly across cards: GLM's 405 µs/layer becomes ~202 with two cards and
+  ~135 with three. The §4a card sweep (19.6 → 6.9 → 0.9 ms/token of *CPU* residue) was about hit rate
+  alone; this is an independent reason to add cards for exactly the models that need them.
 * Prefill is link-bound at ~2048 rows unless `sz_out` drops to fp16 or the row split keeps more work
   on the 3090; the model gives the crossover for both, and the harness measures which the box lands on.
-* Adding a *second* B70 (32 GiB each) would make Qwen3.8 fully resident and GLM 59 % resident; the
-  ring/protocol already supports several workers because each gets its own `MoeCpuHost`-shaped object.
 
 ---
 
@@ -614,6 +633,27 @@ Supporting decisions for this regime:
   `expert_bytes` (1–9 MiB) three orders of magnitude below tier capacity the granularity is already
   ~10³ experts per tier, and striping would need a second partial-combine path plus a per-band layout
   rule. Not worth the protocol cost.
+* **Combine the tiers as a maximum, not a sum, and the card decision becomes obvious.** The `ms/token`
+  figures quoted above and in `out_placement.txt` are per-*worker busy time*; the homes compute
+  concurrently, so per-layer latency is `max(T_parent, T_b70/N_cards, T_cpu)` and throughput is
+  `1 / (layers × that)`. Adding the two would double-count and hide the real ceiling. With the
+  rate-matched per-layer times from `plan_operating_point.py`:
+
+| GLM @3.05 | h | B70 µs/layer (each) | CPU µs/layer | per-layer max | binding | tok/s @ 42 layers, `T_parent` = 300 µs |
+|---|---|---|---|---|---|---|
+| 1 card | 0.708 | 405 | 467 | 467 µs | **CPU** | 51 |
+| 2 cards | 0.897 | 202 | 164 | 300 µs | **parent** | 79 (+55 %) |
+| 3 cards | 0.986 | 135 | 21 | 300 µs | **parent** | 79 (+0 %) |
+
+  which says something the hit-rate view could not: the second card is worth 55 % because it takes the
+  CPU off the critical path, and the **third buys literally nothing** unless `T_parent` is below ~135
+  µs/layer — at which point the B70s bind again. So the question "how many B70s for GLM?" reduces to a
+  single unmeasured number, `T_parent`, and a rule: *add cards while `max(T_b70/N, T_cpu) > T_parent`.*
+  Two caveats on the B70 column, both honest: it divides bytes by N **at the same rate**, and it drives
+  the per-card footprint to 32 MiB/layer, which is *below the smallest footprint this card has been
+  measured at for GLM's geometry*. If GLM's rate keeps falling as the footprint shrinks (it fell from
+  208 to 132 GB/s between 128 and 64 MiB), the second card buys less than the table claims — E4 must
+  measure below 64 MiB before this table is used to decide a purchase.
 * Prefill behaves differently and more kindly: rows are already crossing for the resident experts,
   so a miss costs only the *incremental* link time of its upload against a chunk that is link-bound
   anyway, and the `stream_t`-style rule for the 3090 (≥200 rows/expert) still applies. Measure both;
@@ -811,11 +851,13 @@ answer goes the wrong way:
    absolute rate depends ~2× on the *working-set size*, non-monotonically, which is why no design
    number is allowed to rest on one microbenchmark point (`out_rates_footprint.txt`). The arrangement
    is worth 1.08–1.99× while the tile permutation is worth 0.96–1.05× with no consistent sign, so the
-   lever moved from
-   layout (§2.2, closed) to kernel scheduling and VRAM allocation (b70-kernels.md §3a, and gate E4
-   restated against both regimes). Qwen3.8's decode layer stays hidden at 4–8× margin; **GLM's does
-   not clear comfortably** (~241 µs/layer of expert reads), which is now a measured concern rather
-   than a projection, and it compounds with its flat routing distribution.
+   lever moved from layout (§2.2, decided on engineering grounds rather than closed) to kernel
+   scheduling and VRAM allocation (b70-kernels.md §3a; gate E4 restated against both regimes). Once the
+   rate is sampled at the footprint a decode layer really
+   presents (`plan_operating_point.py`), Qwen3.8's b=1 layer is **51 µs** and stays hidden ~5×, while
+   **GLM's is 405 µs** — worse than the pooled figure suggested, because its 9 MiB experts put a token's
+   50.9 MiB of reads on the worst point of the curve. It compounds with GLM's flat routing distribution,
+   and it is batch-sensitive: Qwen3.8's own margin is gone by b≈8.
 4. **Is a resident engine survivable in production** (device-loss semantics, a second B70 client,
    `power1_cap` behaviour while spinning)? Measured: 3.2 µs round trip and a 21–371 µs drain, so it
    is worth ~2–5 µs/layer and nothing more.
@@ -858,6 +900,9 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | DPAS route R1 (fp16 B) vs R2 (u8 product bytes) | open, gated | unmeasured; undocumented DPAS operand byte order | E4/E7 prefill sweep at 32/128/512 rows |
 | quantise `x` on the 3090 (int8 payload) | adopted, cheap to flip | halves payload; B′5 makes either side verifiable | E5 showing the link is not the prefill bottleneck |
 | GLM-class oversized verdict (cards needed, CPU share) | measured for the local profile | 19.6 → 6.9 → 0.9 ms/token at 1/2/3 cards | E14/E11 with live traces |
+| …and the verdict **revised** by the parallel-max view | per-worker busy time is real but does not set throughput | `max(T_parent, T_b70/N, T_cpu)` → 51 → 79 → 79 tok/s, so the 3rd card buys nothing unless `T_parent` < 135 µs | E10 (GLM's `T_parent`); E4 below 64 MiB/launch, because the 2-card case presents 32 MiB and that part of the curve is unmeasured |
+| decode rates must be footprint-matched before use | adopted as a rule | `plan_operating_point.py`: 14.3 MiB/layer (Qwen3.8 b=1) → 292 GB/s → 51 µs; 50.9 MiB (GLM b=1) → 132 GB/s → 405 µs **[M]** | any estimate multiplying a GB/s figure by layer bytes without naming the footprint it measured that rate at (`LESSONS` 19) |
+| "the offload hides at decode" | true for Qwen3.8 at b ≤ 4, **not** general | margin 4.9× → 1.3× → 0.5× over b = 1 → 4 → 8, from real selection counts | E9's batch axis; if the measured crossover is below b=4, the decode path is a small-batch optimization and the docs must say so |
 | every knob default except the rate-derived ones | provisional | — | phases 1–4 gates |
 
 Nothing else in this document is a decision: the remaining prose is rationale, and rationale does not

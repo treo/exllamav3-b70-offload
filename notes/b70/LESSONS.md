@@ -261,7 +261,36 @@ surfaced only because the output had one block where three were expected. The pr
 arguments that are not a shape index and prints the shape table. Generalise: any tool whose arguments
 are integers must validate them, because the failure mode is a plausible result, not an error.
 
-## 19. When a model and a measurement disagree by 30×, check the model's units first
+## 19. Match the measurement's condition to the workload's operating point (`topk`, batch, `h` — not the checkpoint)
+
+Every decode estimate in the plan was built by asking "what GB/s does the card sustain?" and multiplying.
+The question that decides the answer was never asked: **what is the working set of the thing being timed?**
+Per token only `topk` of E experts fire, so one MoE layer reads `topk × expert_bytes`, times the fraction
+`h` this card owns — **14.3 MiB** for Qwen3.8 at b=1, **50.9 MiB** for GLM. That is 2 orders of magnitude
+below the 1–2 GiB sweeps the rates came from, and since the measured curve moves ~2× over exactly that
+range, the old numbers were not conservative or optimistic in a predictable direction: they were sampled
+at the wrong x. Recomputed at matched footprints, Qwen3.8 gets *better* (51 µs/layer, not 55–95) and GLM
+gets much *worse* (405 µs/layer, not 278–548), which flips the practical recommendation for the model
+that matters most.
+
+Three siblings of the same mistake, all found only after writing the first version down:
+
+* **`topk` was guessed.** Qwen3.8 is 10, GLM is 8; the script had 8 for both because the number came from
+  my memory of `doc/prep` instead of from `config.json`. Now read from the checkpoint.
+* **Batch was treated as a constant.** Distinct experts per layer grow almost linearly with rows (10 → 39
+  → 73 for Qwen3.8 at b = 1 → 4 → 8), so offloaded work scales ~9× while the parent's window — bound by
+  weight reads at b=1 — barely moves. "The offload hides at decode" is a b≤4 statement dressed as a
+  general one.
+* **Parallel workers were summed.** The homes compute concurrently, so per-layer latency is
+  `max(T_parent, T_b70/N, T_cpu)`; adding worker ms/token (17.0 + 19.6 ms for GLM) implies 27 tok/s when
+  the max-based figure is 51 with one card and 79 with two — and shows that a third card buys exactly
+  nothing. Every capacity recommendation must be built on the max, or it argues for hardware that cannot
+  help.
+
+The general rule these probes should have enforced on themselves: before multiplying a measured rate by a
+quantity, verify that the measurement was taken *at that quantity*.
+
+## 20. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed

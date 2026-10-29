@@ -62,6 +62,10 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | hardware int8 dot vs manual byte-sum | **0.2–0.4 %** apart over three independent runs: not measurable | `vpdpbusd` vs `vpmaddubsw` fallback is a real gap on x86 |
 | accumulator dependency | splitting into 8 chains is **1.2–1.4 % slower**, so the density cost is instruction count / register pressure, not latency | R9 exists to kill that explanation |
 | routing breadth (from real selection counts) | Qwen3.8@2.68: 97.6 % of picks in 411/512 experts; GLM: 70.8 % in 91/288 (effective support 213–231) | the profile is a decayed cumulative, so both are upper bounds |
+| **what one decode layer actually reads** | `topk` (10 Qwen3.8 / 8 GLM, from `config.json`) unioned over rows × `h`: **14.3 MiB** (Qwen3.8 b=1) and **50.9 MiB** (GLM b=1) — 2 orders below the checkpoint | this is the footprint the rate curve must be sampled at (`plan_operating_point.py`), and it is why "GB/s" alone never answered the decode question |
+| decode µs/layer at the matched footprint | Qwen3.8 **51** (27 clustered, ~5× inside the 250 µs parent window); GLM **405** (247 clustered) | GLM's 9 MiB experts land on the curve's worst point (132 GB/s) |
+| batch is the real variable | Qwen3.8 margin 4.9× → 1.3× → 0.5× over b = 1 → 4 → 8: distinct experts per layer grow ~linearly with rows while the parent window is weight-bound | "offload hides at decode" is a small-batch claim |
+| tiers are parallel, so combine by max | GLM 1 card is CPU-bound (467 µs/layer), 2 cards parent-bound (300 µs assumed), 3 cards add **nothing** unless `T_parent` < 135 µs | summing worker ms/token double-counts and hides the ceiling |
 
 Read as: the B70's link is not the problem (it is a shade faster than the 3090's on this box),
 and its compute is not the problem either (roughly 10x the CPU worker's expert-read rate). Two things

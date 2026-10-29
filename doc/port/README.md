@@ -31,12 +31,12 @@ material for the card is symlinked at [`doc/b70/`](../b70/) (cheat sheets, the L
 
 | | CPU offload today (RTX 3090 + Ryzen 9 5950X) | B70 offload (measured or projected) |
 |---|---|---|
-| one cold expert read at decode | 403 µs/layer (Qwen3.8, 15 threads) | **54–63 µs/layer** at the measured read rate, 31–49 µs if the kernel obeys the locality rules (**[M]**, `probe_rates`) |
+| one cold expert read at decode | 403 µs/layer (Qwen3.8, 15 threads) | **51 µs/layer** for Qwen3.8 at b=1 — sampled at the footprint a decode layer actually presents (14.3 MiB: `topk` 10 × the picks this card owns), 27 µs if the kernel obeys the locality rules — but **405 µs/layer for GLM**, whose 9 MiB experts put the same token at 50.9 MiB, the worst point of the measured curve (**[M]**, `plan_operating_point.py`) |
 | handshake floor, job with nothing to do | 20 µs/layer | **5.0–6.3 µs** (submit + flag) / **3.2 µs** (resident doorbell) |
 | expert bytes must cross the link for prefill | yes — 28.6 % of device time is that DMA | **no** for experts homed on the B70; yes for the residue, priced per use (§4a) |
 | pinned ↔ device bandwidth | 13.3 GB/s (Gen4 ×8) | **14.4 GB/s** |
 | activation payload per decode layer | 5.1 KiB down, 10 KiB up | same, and it hides entirely |
-| GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — and now 3–8× the offload cost on Qwen, **not** on GLM (241 µs/layer of expert reads) |
+| GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — ~5× the offload cost for Qwen3.8 at b=1, **not** for GLM, and gone by b=8: distinct experts per layer grow ~linearly with rows (10 → 39 → 73), so B70 work scales ~9× while the window barely moves |
 | what the trellis tile walk actually sustains | — (the CPU is DRAM-bound at 45 GB/s) | **132–292 GB/s scattered, 216–558 clustered** (the spread is working-set size, not code): tile repacking buys **0.96–1.05×** with no consistent sign, work-item ordering buys **1.08–1.99×** and never less |
 | is the decode arithmetic affordable? | 7-op VNNI fallback costs ~20 % on x86 | yes: real unpack density costs **0.1–4.4 %** of bandwidth at decode-like footprints (14 % at 64 MiB), and the hardware int8 dot and a manual byte-sum are indistinguishable (0.2–0.4 %) |
 
