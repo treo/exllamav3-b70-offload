@@ -457,6 +457,63 @@ Item 5 (partial-sum traffic: KS*2*E*n*16 int32 = 128*KS/k bytes per weight - 0.5
 against 0.375 B/weight of trellis, and 1.0 B/weight on down_proj at KS=4) is untouched by rev F and is now
 the largest known lever. Not yet priced directly.
 
+================================================================================
+ITEM 5 PRICED: what partial-sum traffic actually costs (rev F switch 'd')
+================================================================================
+Added F_DUPP ('d'): the gemm writes its int32 partials a SECOND time into an equal-sized shadow region
+that combine never reads. Tile-loop instructions, combine and y are untouched - all four combinations
+checked bit-exact vs rev E - so the delta over the plain build is the marginal price of PART bytes plus
+their store instructions, measured rather than modeled.
+
+Warm (20 s), interleaved, min of 3, A+B global, E=10, gate k=2560 (weights 5.86 MiB):
+
+  KS  PART MiB  B/weight |  psu r1  psud r1   delta |  psu r8  psud r8   delta
+   2      1.56     0.100 |   263.3    264.3    +1.0 |   311.1    266.4  (-44.7)*
+   4      3.12     0.200 |   141.6    142.3    +0.7 |   144.1    145.0    +0.9
+   8      6.25     0.400 |    88.0     92.8    +4.8 |    96.1     99.8    +3.7
+  16     12.50     0.800 |    95.5   123.2   +27.7 |   107.4   117.3    +9.9
+                                          (*) KS=2 is grid-starved (80 groups over 256 units); noisy
+
+down k=640 (weights 5.86 MiB):
+
+  KS  PART MiB  B/weight |  psu r1  psud r1   delta |  psu r8  psud r8   delta
+   2      6.25     0.400 |    80.8     85.8    +5.0 |    94.5     99.8    +5.3
+   4     12.50     0.800 |    82.2     98.9   +16.7 |   106.3   115.8    +9.5
+  10     31.25     2.000 |   146.3   168.6   +22.3 |   195.0   244.1   +49.1
+
+Three readings.
+
+1. **The marginal price has two regimes, and the break is L2 capacity (24 MiB).** While weights + partials
+   fit, extra PART writes are nearly free - 0.2-0.8 us/MiB, i.e. 1.3-5 TB/s absorbed by L2. Once they do
+   not, the price jumps to 1.3-2.2 us/MiB = 450-770 GB/s, which is the DRAM stream rate this card measured
+   all project (copy peak 674 GB/s). So PART is a cliff, not a slope, and the cliff is at 128*KSIk
+   B/weight where weights + partials + activations cross ~24 MiB - which is why down_proj (k=640, so the
+   same KS buys 4x more bytes per weight) pays 3x what gate does at KS=4.
+2. **Item 5 is worth roughly 5-11% on gate and 15-25% on down_proj, not the headline it looked like.**
+   Single-copy cost is about half a duplicated delta: gate KS=8 ~2.4 us of 88 written, plus a similar
+   amount read back by combine; down_proj KS=4 ~8 us of 82 written plus ~8 read. Eliminating PART and the
+   combine kernel entirely (structural variant) therefore recovers ~5-10 us on gate and ~16 us on
+   down_proj, plus one enqueue that burst timing hides but real decode pays.
+3. **PART traffic explains the KS optima, which is a policy result.** Gate gets worse beyond KS=8 (+27.7 us
+   duplicated at KS=16 versus +4.8 at KS=8) and down_proj beyond KS=4, exactly where the measured best KS
+   sits. E27's launch-policy table should cap KS by a bytes-per-weight bound (keep 128*KSIk <~ 0.4 B/w,
+   i.e. KS <~ 0.003*k) rather than only by grid-fill, otherwise the parallelism bought past that point is
+   paid back in partials.
+
+## The bigger inefficiency this surfaced, which is not item 5
+
+Chasing PART made the rows=1 loss legible: the DPAS path always computes NTOK=16 token columns, so at
+b=1 it spends fifteen sixteenths of its matrix work on lanes that are thrown away. That - not partials -
+is why rev F still loses x2.5 to rev C+KCONST at rows=1 while winning x2.4-x4.2 at rows 8-16, and it is
+why its rows curve is "flat" in the first place. Specializing the N dimension (8 columns instead of 16 for
+rows <= 8) would halve BOTH the mad work and PART traffic at once.
+
+Recorded as not-yet-implemented, deliberately: N is entangled with the B tensor's pitch throughout rev F
+(matrix shape vs 16-token pitch, staging stride, and the SLM bulk-copy offsets all use the same NTOK
+constant), and splitting those two meanings correctly is a delicate change across ~8 sites where an
+off-by-4 would still run fast and produce wrong numbers. Given how this session went, that is worth doing
+with a clean bit-exactness check in front of it, not squeezed in behind a price measurement.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -475,3 +532,5 @@ the largest known lever. Not yet priced directly.
     for f in none p u pu ps psu f psfu; do DPAS_F=$f DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
     DPAS_F=psu DPAS_CHECK=/tmp/revE_ref.bin ./probe_dpas3 CASE 3 4 8    # bit-identity vs rev E
     IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa ./probe_dpas3 CASE 1 1 8   # native .isaasm
+    # item 5 price: compare psu vs psud (duplicate PART stores) per KS, warm + interleaved
+    for ks in 2 4 8 16; do for f in psu psud; do DPAS_F=$f DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 $ks; done; done

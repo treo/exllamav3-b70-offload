@@ -79,7 +79,8 @@ static constexpr int PF_DIST = 2;              // 'f': tiles fetched ahead (6 GR
 enum : unsigned
 {
     F_AGLOB = 1u, F_BGLOB = 2u, F_PACKB = 4u, F_SGBAR = 8u, F_PREF = 16u, F_U32 = 32u,
-    F_COUNT = 64u
+    F_DUPP = 64u,          // 'd': write PART twice (shadow) - prices partial-sum traffic, same numerics
+    F_COUNT = 128u
 };
 
 struct Meta
@@ -194,6 +195,7 @@ struct Launch
     const int8_t *B = nullptr;     // replicated activation for the global path: row-major, or packed with 'p'
     const int8_t *X16 = nullptr;   // x8 padded to NTOK rows (rows >= R repeat R-1): source of packed staging
     int32_t *PART = nullptr;
+    int32_t *PART2 = nullptr;    // 'd': equal-sized shadow region, written but never read
     uint8_t *ASC = nullptr;        // A-tile scratch for DPAS_A_GLOBAL: 2 tiles per sub-group
     Meta m;
     int KS = 8;
@@ -216,7 +218,7 @@ template <unsigned F>
 static void submit(const Launch &L)
 {
     constexpr bool AGLOB = F & F_AGLOB, BGLOB = F & F_BGLOB, PACKB = F & F_PACKB;
-    constexpr bool SGBAR = F & F_SGBAR, PREF = F & F_PREF, U32 = F & F_U32;
+    constexpr bool SGBAR = F & F_SGBAR, PREF = F & F_PREF, U32 = F & F_U32, DUPP = F & F_DUPP;
     constexpr int NBUF_A = SGBAR ? 2 : 1;
     constexpr int BLD = PACKB ? 4 * NTOK : NTOK;   // B stride in int8 elements
 
@@ -243,6 +245,7 @@ static void submit(const Launch &L)
     const int8_t *B = L.B;
     const int8_t *X16 = L.X16;
     int32_t *PART = L.PART;
+    int32_t *PART2 = L.PART2;
     uint8_t *ASC = L.ASC;
 
     L.q->submit([&](sycl::handler &cgh)
@@ -375,6 +378,25 @@ static void submit(const Launch &L)
                                                     sycl::access::decorated::no>(P + 8 * NTOK);
                 mx::joint_matrix_store(sg, c0, pC0, NTOK, mx::layout::row_major);
                 mx::joint_matrix_store(sg, c1, pC1, NTOK, mx::layout::row_major);
+                // 'd': identical partials written a second time to a shadow region. Nothing else changes -
+                // same instructions in the tile loop, same combine, same y - so the gap over the plain
+                // build is the marginal price of PART bytes plus their store instructions, which is what
+                // decides whether item 5 deserves a restructuring rather than a tweak.
+                if constexpr (DUPP)
+                {
+                    int32_t *P2 = PART2 + (((size_t)ks * 2 + sub) * E + e) * (size_t)n * NTOK
+                                  + (size_t)nt * 16 * NTOK;
+                    mx::joint_matrix_store(
+                        sg, c0,
+                        sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                 sycl::access::decorated::no>(P2),
+                        NTOK, mx::layout::row_major);
+                    mx::joint_matrix_store(
+                        sg, c1,
+                        sycl::address_space_cast<sycl::access::address_space::global_space,
+                                                 sycl::access::decorated::no>(P2 + 8 * NTOK),
+                        NTOK, mx::layout::row_major);
+                }
             };
 
             auto tile_ptr = [&](int e, int ti) -> const uint32_t *
@@ -522,6 +544,7 @@ static unsigned parse_flags()
         case 's': f |= F_SGBAR; break;
         case 'f': f |= F_PREF; break;
         case 'u': f |= F_U32; break;
+        case 'd': f |= F_DUPP; break;
         case ',': case ' ': case '+': break;
         default: fprintf(stderr, "DPAS_F: unknown switch '%c' (use any of p s f u, or none)\n", *s); exit(2);
         }
@@ -537,6 +560,7 @@ static std::string flag_str(unsigned f)
     if (f & F_SGBAR) s += 's';
     if (f & F_PREF) s += 'f';
     if (f & F_U32) s += 'u';
+    if (f & F_DUPP) s += 'd';   // without this the label and the output filename silently lie about 'd'
     return s.empty() ? "none" : s;
 }
 
@@ -638,7 +662,8 @@ int main(int argc, char **argv)
     float *Q = (float *)sycl::malloc_device(qbuf.size(), q);
     int32_t *SX8 = (int32_t *)sycl::malloc_device(sbuf.size(), q);
     float *Y = (float *)sycl::malloc_device((size_t)m.E * m.R * m.n * 4, q);
-    int32_t *PART = (int32_t *)sycl::malloc_device((size_t)KS * 2 * m.E * m.n * NTOK * 4, q);
+    const size_t part_n = (size_t)KS * 2 * m.E * m.n * NTOK;
+    int32_t *PART = (int32_t *)sycl::malloc_device((flags & F_DUPP ? 2 : 1) * part_n * 4, q);
     q.memcpy(W, wbuf.data(), wbuf.size());
     q.memcpy(B, hB.data(), hB.size());
     q.memcpy(X16, hX.data(), hX.size());
@@ -653,6 +678,7 @@ int main(int argc, char **argv)
 
     Launch L;
     L.q = &q; L.W = W; L.B = B; L.X16 = X16; L.PART = PART; L.ASC = ASC; L.m = m; L.KS = KS;
+    L.PART2 = PART + ((flags & F_DUPP) ? part_n : 0);
     L.skip_mad = getenv("DPAS_NO_MAD") != nullptr;
     L.skip_unpack = getenv("DPAS_NO_UNPACK") != nullptr;
 
