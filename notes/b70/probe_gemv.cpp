@@ -384,15 +384,29 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
                     const uint64_t V01 = ((uint64_t)d0 << 32) | d1;
                     const uint64_t V12 = ((uint64_t)d1 << 32) | d2;
                     const int rel0 = 2 * a4;
+#ifndef GEMV_CONSTSHIFT
                     const int kk0 = kt * 16 + rel0;
+#endif
                     for (int bq = 0; bq < 4; ++bq)
                     {
                         const int j1 = bq, j2 = bq + 4;
+#ifdef GEMV_CONSTSHIFT
+                        // IDEALIZATION PROBE - numerics deliberately WRONG, timing is the only
+                        // legitimate output. Prices the ceiling of an aligned-group extraction: shift
+                        // amounts become compile-time constants (K=3 literal) and the V01/V12 straddle
+                        // select disappears. Deliberately conservative: still three dword loads, still
+                        // the same mul and dot, still the same grid and reduction. If this variant does
+                        // not get meaningfully faster, no layout work can help and E28 closes negative.
+                        (void)j1; (void)j2;
+                        const uint32_t win1 = (uint32_t)((V01 >> (3u * (uint32_t)bq)) & 0xFFFFu);
+                        const uint32_t win2 = (uint32_t)((V01 >> (12u + 3u * (uint32_t)bq)) & 0xFFFFu);
+#else
                         const int s1 = (int)of + K * j1, s2 = (int)of + K * j2;
                         const uint32_t win1 = (uint32_t)((s1 >= 32 ? (V12 >> (48u - (uint32_t)(s1 - 32)))
                                                                     : (V01 >> (48u - (uint32_t)s1))) & 0xFFFFu);
                         const uint32_t win2 = (uint32_t)((s2 >= 32 ? (V12 >> (48u - (uint32_t)(s2 - 32)))
                                                                     : (V01 >> (48u - (uint32_t)s2))) & 0xFFFFu);
+#endif
                         const uint32_t p1 = win1 * MUL1_MULT, p2 = win2 * MUL1_MULT;
                         if (GEMV_FIXTURE && ks == 0 && sub == 0 && kt == 0 && e == 0 && nt == 0)
                         {

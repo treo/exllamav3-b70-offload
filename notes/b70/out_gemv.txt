@@ -110,3 +110,37 @@ unusable. Identical E=10/R=1 configs measured 38.7, 45.7 and 52.5 GB/s in three 
 and rev B's own spread at E=10/R=4 was 94%. The provisional "split-K recovers 5x at E=10" was drawn from
 exactly that noise. Interleaving configs within each repetition and comparing minima (the estimator
 probe_rates already used) gives 0.9-1% spread and reverses the conclusion.
+
+================================================================================
+IDEALIZATION PROBE - how much of rev C's fixed cost is extraction, not memory?
+================================================================================
+`-DGEMV_CONSTSHIFT` replaces the window extraction with compile-time-constant shifts and no V01/V12
+straddle select. Its NUMERICS ARE DELIBERATELY WRONG (verified: output is not bit-exact); it exists only
+to bound what an aligned-group layout could win. Conservative on purpose: same grid, same three dword
+loads, same mul, same dot_acc. E=10 gate_proj, min of 4 interleaved runs, burst mode:
+
+  rows  ks |  rev C real  |  const-shift ideal |  ceiling
+     1   1 |       75.1   |        49.5        |  x1.52
+     1   4 |       75.4   |        36.5        |  x2.07
+     4   1 |      266.2   |       211.6        |  x1.26
+     4   4 |      112.6   |        96.4        |  x1.17
+     8   1 |      300.4   |       244.5        |  x1.23
+     8   4 |      251.7   |       214.8        |  x1.17
+
+The ceiling is biggest exactly where the design is tightest - rows=1, where rev C is at parity with the
+parent (75 us against a 250 us window for three projections). Translated: 49.5 us would be 331 G-w/s, or
+~4.3 slots/weight against the fitted 5.8 + 1.15*rows.
+
+And the layout work this was meant to justify turns out not to be needed. Extraction becomes cheap when
+a lane's group of windows starts on a dword boundary, so solve K*i = 16 (mod 32) for the first aligned
+window i, and the period is the group size: K=2 -> i=8, period 16 (span 46 bits, 2 dwords);
+K=3 -> i=16, period 32 (109 bits, 4 dwords); K=4 -> i=4, period 8 (44 bits); K=5 -> i=16, period 32
+(171 bits - needs two 64-bit bases); K=6 -> i=8, period 16 (106 bits). Every period divides 256, so the
+groups tile a 256-position ring cyclically with no gaps and no leftover. In other words the ring ALREADY
+contains dword-aligned groups; reaching them is a matter of which windows each lane is assigned, so:
+no repack, no extra bytes, no loss of byte-interchangeability with the 3090/CPU trellis kernels, and the
+E4c trade-off does not come due. That was found by checking the premise in five minutes of modular
+arithmetic rather than by building the repacker - see LESSONS 33.
+
+Reproduce: icpx -fsycl -O2 -DGEMV_CONSTSHIFT -o /tmp/pg_cs probe_gemv.cpp; run either binary on
+/tmp/gemv_dpE10 with argv = CASE order reps rows impl ks. Never quote the idealized build as a rate.

@@ -672,3 +672,29 @@ Two rules. (1) When a design choice feels right because it is a habit, treat it 
 variable and price it: this defect lives in the *lowering*, so no amount of reading the algorithm would
 have revealed it. (2) Prefer factorial probes when toggling the factors is cheap — both switches existed
 already for a different measurement, so the design cost nothing but the runs.
+
+## 33. Check the premise before building the thing, and price a refactor with a deliberately wrong build
+
+E28 was opened as "repack the trellis so a lane's windows are aligned, and see whether it pays for the
+loss of byte-interchangeability with the 3090/CPU kernels." A repacker is a day of work plus a format
+policy argument. Instead I spent five minutes on arithmetic — and the gate mostly evaporated.
+
+Extraction is cheap when a window group begins on a dword boundary, which asks for `K·i ≡ 16 (mod 32)`
+to have a solution. It does, for every K we ship, and the solution's period (8, 16 or 32) divides the
+256 windows in a tile, so **aligned groups already exist in the ring as stored**. The improvement is
+about which windows a lane is assigned, not how the bytes are laid out — no repack, no extra bytes, and
+the E4c interchangeability cost that justified the whole gate was never due.
+
+The other half of the turn was equally cheap: rather than build the aligned kernel to find out if
+alignment matters, I built an *idealization* of it — constant shift amounts, no straddle select, numerics
+deliberately wrong, timing only (`-DGEMV_CONSTSHIFT`). That gave a ceiling (×1.5–2.1 at rows=1) for a
+two-line diff, which is what decided the direction is worth real work at all. The discipline that makes
+this safe is labelling: the probe states in its comment and in the artifact that its output is not a rate
+and is not bit-exact (and I re-verified non-exactness rather than trusting that it would be wrong),
+because a deliberately-wrong fast build is precisely the kind of number that leaks into a plan.
+
+Generalized: a refactor's premise usually contains one factual claim ("the layout is misaligned") and one
+value claim ("the gain would be worth the cost"). The factual claim is often checkable in minutes and,
+when wrong, saves the whole task; the value claim is checkable with an idealized build before the real
+one. Doing either before writing the code is not avoidance — it is the cheapest experiment available.
+
