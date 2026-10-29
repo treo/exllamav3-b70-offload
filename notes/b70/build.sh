@@ -20,5 +20,9 @@ done
 # them - harmless for min-of-N timing but it makes a cold first process look anomalous.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas3 probe_dpas3.cpp
 echo "built probe_dpas3"
+# rev G (tokens on M) also instantiates one kernel per M in {1,2,4,8} and per KS path, so it wants the
+# same per-kernel code split probe_dpas3 needs.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas4 probe_dpas4.cpp
+echo "built probe_dpas4"
 icpx -fsycl -O2 -shared -fPIC -o libb70shim.so b70_shim.cpp
 echo "built libb70shim.so"

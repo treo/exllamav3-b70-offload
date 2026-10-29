@@ -599,6 +599,18 @@ measured rate curve at the matched footprint:
   single remaining lever: ceiling ~65 % of the kernel, batch-independent cost, so it improves exactly the
   rows 4–16 regime the schedule selects (§2c 13o). Caveat: `'x'` is measured at E=10; `tn·E` must stay
   ≳ 256 groups, so low-E models need grid = `tn·E·KS`.
+* **Rev G (§2c item 13p) moves tokens onto M and collapses the schedule.** With the activation as the M-dim
+  operand (XMX fixes N=16 for int8, which was the whole reason revs D–F were flat in rows), the DPAS path
+  reaches **parity with dp4a at b=1** — gate_proj 41.5 µs vs rev C+KCONST's 39.6, against rev F's 74.3 — and
+  wins from rows=2 onward (×1.44, ×2.40, ×4.33 at rows 2, 4, 8). **Layer time at b=4: 141.2 µs** (2 × 43.0 +
+  55.2) versus 310.2 µs on rev C+KCONST and 232.5 µs on rev F+`'x'`, which is the best single projection in
+  this line and lands at ×1.8 inside the 250 µs parent window at four times the batch. Two costs come with
+  it: rev G's unpack requires **K ≤ 5**, excluding the 6.05 bpw recipe, and it still loops experts inside the
+  thread, losing ×1.50 to rev F at rows=16 on down_proj where its usable KS drops from 16 to 2 — so the
+  schedule is now *one kernel plus a b=1 exception*, and the follow-up that removes even that is rev G with
+  the `'x'` grid. Its author's own prediction that matrix work scales with M did not survive measurement
+  (M=8/M=1 matrix cost 1.19×, not 8×), which is worth stating plainly: the gain came from operand layout and
+  partial-sum scaling, and the mechanism attribution in §2c 13p is mine, not his.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is

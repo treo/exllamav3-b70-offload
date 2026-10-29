@@ -1,5 +1,8 @@
 # probe binaries and the built shim (build.sh regenerates them). Listed by name rather than by
-# wildcard: `probe_*` would also swallow the probe_*.cpp sources, which are the point of this dir.
+# wildcard: `probe_*` would also swallow the probe_*.cpp sources, which are the point of this dir - and
+# `probe_*` plus `!probe_*.cpp` would swallow probe_cross.py. Consequence of choosing safety here: a new
+# probe_*.cpp must have its binary name added to this list in the same commit, or the ELF gets committed
+# (it did, for probe_dpas4). `git status --porcelain` before committing shows it, but only if you look.
 probe_transport
 probe_doorbell
 probe_notify
@@ -14,6 +17,7 @@ probe_dpas
 probe_dpas2
 probe_unpack
 probe_dpas3
+probe_dpas4
 libb70shim.so
 # IGC shader dumps (IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=...): ~1.2 MB of .isaasm/.spv/.ll per run
 isa/

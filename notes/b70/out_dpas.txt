@@ -728,6 +728,79 @@ Feasibility first, and calibrated this time: `doc/b70/b70-bench/bench.cpp` alrea
 a probe of this route starts from a configuration that is measured to run at full rate, not from a shape
 guess.
 
+================================================================================
+REV G (probe_dpas4.cpp, tokens on M): runs on the B70 for the first time, bit-exact, and
+it changes the rows schedule. Outside authorship; measured here.
+================================================================================
+Rev G swaps the operands: A = activation (int8, replicated 4x along K, M = token rows), B = weights
+(uint8, ext_intel_packed, 32 bytes x 16 output columns), so C is [token][column] and the token dimension
+moves onto M, which the hardware lets us shrink, instead of N, which XMX fixes at 16 for int8. Assembly is
+unchanged in substance - a packed B dword is one weight's four product bytes - at a transposed address, and
+partials keep only the padded token rows. He had validated 384 combinations under the host emulator and
+never run it on this card.
+
+Correctness on the B70, against each case's own y_ref: bit-exact for gate_proj at K = 2, 3 and 5, rows 1/4/8
+and 16, KS in {4, 8, 16}, and for down_proj at KS in {2, 4, 10}. Independence check: at rows=1 rev G's output
+is bit-identical to rev C+KCONST running the same bytes through a completely different instruction path.
+
+One scare, and it was mine: a sweep reported ks8/rows=1 WRONG after the same configuration had reported OK.
+Adding a delete-the-output-file-before-each-run guard gives 0 wrong in 18 repeats across KS 4/8/16, so the
+prime suspect is my own glob reading a stale artifact - `f[0]` of a wildcard match, which is exactly the
+shape of bug that a fresh-file guard turns into an error instead of a verdict. Recorded rather than
+forgotten: if it ever reappears under the guard, it is rev G's and not mine.
+
+Limitation to respect: rev G's unpack requires **K <= 5** (four windows of a ring-position group must fit
+in two dwords), so the 6.05 bpw recipe (K=6) cannot use this kernel as written.
+
+## Rate: rev G vs rev F (structural, psux) vs rev C+KCONST - one warm window each, interleaved min of 4
+
+  gate k=2560 n=640          rev C+KC   rev F psux   rev G ks16   winner
+    rows=1                      39.6         74.3         41.5    rev C x1.05 over rev G
+    rows=2                      60.9         74.4         42.3    rev G x1.44 over rev C
+    rows=4                     103.2         74.8         43.0    rev G x2.40 over rev C
+    rows=8                     230.9         75.5         53.3    rev G x4.33 over rev C
+
+  down k=640 n=2560          rev C+KC   rev F psux   rev G ks10   winner
+    rows=1                      38.7         79.3         45.0    rev C x1.16
+    rows=4                     103.8         83.4         55.2    rev G x1.88 over rev C
+    rows=8                     232.1        111.8         91.5    rev G x1.22 over rev F
+   rows=16                     459.2         94.9        142.8    rev F x1.50 over rev G
+
+So: rev G beats rev F by x1.4-x1.8 at rows 1-8 on gate_proj, and the DPAS path is at parity with the dp4a
+path at b=1 (41.5 vs 39.6, x1.05) instead of losing x1.85. The crossover for the schedule moves from
+rows ~= 3-4 to **rows ~= 1-2**: one kernel now covers everything except batch=1, where dp4a is still
+marginally ahead on both projections. Layer time at b=4: 2 x 43.0 + 55.2 = 141.2 us, against 310.2 us on
+rev C+KCONST and 232.5 us on rev F - the strongest single-projected result in this line so far.
+
+## What actually produced the win, since it is not the advertised mechanism
+
+His model predicts DPAS work scales with M, so matrix cost should fall ~8x going M=8 -> M=1. Forced at
+rows=1, KS=8 (rev G, min of 3):
+
+    M                1      2      4      8
+    full            56.3   58.0   58.8   77.1 us
+    matrix only     24.4   25.3   25.7   29.1 us     ratio M=8/M=1 = 1.19, not 8
+
+The matrix term barely moves, which is what this file's factorial predicted from the other direction: mads
+are 0.13 slots/weight, 2 % of the kernel, so no reparametrisation of the matrix shape can be the headline.
+M still buys x1.37 on the full kernel at rows=1 - through the A operand loads (M rows of activation read per
+byte-block) and the partial rows that no longer need padding - and the remaining gain comes from the
+third thing he changed: because partials now scale with rows, KS can go to 16 (grid 640 groups instead of
+400) without paying the partial traffic that made high KS self-defeating in rev F. Attribution matters here
+because the same reasoning says the next win is structural, not more shape tuning: rev G still loops
+experts inside the thread, so porting the 'x' grid (experts in the grid, KS -> 1) onto rev G's layout should
+remove the KS sensitivity that currently makes it lose x1.50 to rev F at rows=16 on down_proj, where its
+best KS collapses from 16 to 2.
+
+## joint_matrix_apply is refuted as the in-register route
+
+DPAS_REG=1 (build B in registers with joint_matrix_apply, no SLM at all) is **bit-exact** - his
+fill-before-apply fix holds, and I verified exactness before timing rather than after - but it is the wrong
+direction: 96.3 us at rows=1 against 41.5 with SLM, and 452.8 us at rows=8 against 53.3, i.e. x2.3 and x8.5
+slower, degrading with M. That is the answer to the question he flagged as unknown: the per-element
+coordinate loop does not lower to register moves, it lowers to per-element work. If B is ever to be fed from
+registers it has to be ESIMD `xmx::dpas`, which is the rewrite, not this one-liner.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -750,6 +823,12 @@ guess.
     # structural variant: KS is forced to 1, so pass any ks (it is ignored)
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
     # cost factorial (assembly vs loads vs mads vs stores), all warm + interleaved
+    for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
+      env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
+    # rev G: tokens on M. Fresh output file per verification run (stale-artifact globs cost me a scare).
+    for ks in 4 8 16; do DPAS_M=1 ./probe_dpas4 /tmp/gemv_dpE10 5 1 $ks; done   # M-scaling diagnostic
+    DPAS_REG=1 ./probe_dpas4 CASE 5 1 16                                       # in-register B: refuted
+    ./probe_dpas4 CASE 5 <rows> <ks>     # ks must divide tk with an even quotient; K <= 5 only
     for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
       env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
