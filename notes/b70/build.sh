@@ -24,5 +24,9 @@ echo "built probe_dpas3"
 # same per-kernel code split probe_dpas3 needs.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas4 probe_dpas4.cpp
 echo "built probe_dpas4"
+# rev H is ESIMD with K and M as template parameters (20 variants); per-kernel split keeps a run from
+# JIT-compiling all of them.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas5 probe_dpas5.cpp
+echo "built probe_dpas5"
 icpx -fsycl -O2 -shared -fPIC -o libb70shim.so b70_shim.cpp
 echo "built libb70shim.so"
