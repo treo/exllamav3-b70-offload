@@ -655,16 +655,20 @@ layout. Stated as a hypothesis, not a result: legality must be established by ch
 trusted construction), not by the standalone probe, and the test is the same y_ref comparison that has
 caught everything else here.
 
-## The probe was invalid, and how I know
+## The throwaway shape probe was invalid, so it was deleted rather than annotated
 
-`probe_shapes.cpp` was written to enumerate legal shapes and reported that M=8, N=16, K=8 is unsupported -
-the shape rev F runs continuously. It also rejected every M=16 accumulator and most of the N sweep on that
-basis. Two causes found, one unfixed: `joint_matrix_fill` has its own shape restrictions (switching to
-`joint_matrix_load` from global changed nothing), and the remaining difference from rev F's construction was
-never isolated. A switch of work-group shape (16 threads / 1 sub-group vs 32 / 2) made no difference either.
-So no shape conclusion in this file comes from that probe; the N=8/N=4 results above come from rev F
-itself, which is its own oracle. Full lesson in LESSONS 40: calibrate an oracle on a case you already know
-passes before believing one negative from it.
+A standalone enumerator was written to map the legal `joint_matrix` shapes. It reported that M=8, N=16,
+K=8 is unsupported - the shape rev F runs continuously - and on that basis rejected every M=16 accumulator
+and most of the N sweep. Two causes found, one never fixed: `joint_matrix_fill` has its own shape
+restrictions (switching to `joint_matrix_load` from global changed nothing), and the residual difference
+from rev F's construction was never isolated; work-group shape (16 threads / 1 sub-group vs 32 / 2) made no
+difference either. It initially stayed in the tree with a KNOWN-INVALID banner at the top of the file, and
+that was the wrong call: a committed instrument that contradicts a working kernel is more likely to be
+misread by someone later than to remind them of anything, so it has been removed. Nothing here depends on
+it - the N=8/N=4 results come from rev F itself, which is its own oracle, and the K=32 shape that motivated
+the K question is corroborated independently by `doc/b70/b70-bench/bench.cpp`'s int8 configuration
+(`run_matrix<int8_t, int32_t, 8, 16, 32>`, measured at 366.92 of 367 TOPS), not by the probe. Lesson kept:
+LESSONS 40, calibrate an oracle on a case you already know passes before believing one negative from it.
 
 ## Reproduce
 
@@ -690,7 +694,6 @@ passes before believing one negative from it.
     # does narrowing the token operand at compile time work? (it does not: launcher throws for N<16)
     for n in 16 8 4; do icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DNTOK_OVERRIDE=$n -o /tmp/revF_n$n probe_dpas3.cpp; done
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 /tmp/revF_n8 CASE 1 1 8      # "Rows=8, Cols=8 is not supported"
-    ./probe_shapes                                                          # INVALID oracle, see above
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
     # regression guard for the non-structural path (compare against the HEAD build in one window)
     git show HEAD:notes/b70/probe_dpas3.cpp > /tmp/revF_head.cpp && icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revF_head /tmp/revF_head.cpp

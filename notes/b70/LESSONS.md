@@ -874,6 +874,13 @@ Separating what survived: the *in-situ* negative is real. Building rev F itself 
 this device" from inside the working kernel, identically for every flag combination. The working kernel is
 its own oracle; only my standalone generalization died.
 
+The probe file itself was deleted the same day rather than left in the tree with a KNOWN-INVALID banner at
+the top, which is a judgement worth naming: a committed instrument that contradicts a working kernel invites
+someone later to re-derive a wrong conclusion from it, and a warning comment is weak protection against a
+plausible-looking results table further down the same file. What should survive a dead instrument is the
+lesson plus whatever facts were independently corroborated - here the K=32 int8 shape comes from
+`doc/b70/b70-bench/bench.cpp`, not from my probe, so deleting it cost no evidence.
+
 
 
 
