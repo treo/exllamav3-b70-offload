@@ -244,6 +244,39 @@ merits, x1.1-x1.2 does not justify the remap; rev E's bigger levers are the per-
 A scratch round trip itself, which only ESIMD register fragments (xmx::dpas on simd operands) can remove -
 this toolchain has no joint_matrix_construct, so the API forces the memory round trip.
 
+## REFUTATION: compile-time K does NOT transfer to rev E, and the aligned lane map is 2.3x WORSE
+
+The prediction above (x1.1-1.2) was wrong, and the change was reverted. Attribution, KS=8, A in L2
+scratch, B global, min of 4 interleaved runs, every variant bit-exact against y_ref:
+
+    variant (all same algorithm, same grid)            rows=1  rows=4  rows=8  rows=16
+    runtime K, current lane map  (committed rev E)      106.0   109.4   112.9   123.9
+    compile-time K only, same lane map                  106.6   109.5   148.1*  122.4    x0.99 - x1.01
+    pair-map (aligned groups + constant shifts)         252.7   255.3   259.8   268.1    x0.42 - x0.45
+    pair-map, unroll none / a4 / j / both               within 0.5% of each other         no effect
+
+    * single outlier at rows=8; the other three points are within 0.6% of baseline.
+
+So: making K a compile-time constant, which bought rev C x1.90, buys rev E **nothing**. And the lane map
+that makes the shifts constant - rev C's own mapping, which is what enabled the win there - makes rev E
+2.3x SLOWER. Unrolling was a non-factor: all four pragma combinations produce the same binary in
+practice, because the loops have fixed trip counts and are already unrolled (the earlier 2x regression
+from runtime loop *bounds* was about the bounds, not the pragma - recorded separately).
+
+WHY, as a hypothesis rather than a measurement: rev C's bottleneck IS the extraction ALU, so folding
+shifts and the straddle select removes most of its fixed cost. rev E's bottleneck is the store pattern
+into the A scratch. Its current map is accidentally excellent for stores: with t = lane + 16*tt, four
+lanes share one column and write adjacent 4-byte slots, i.e. a contiguous 16-byte run per group of four
+lanes. rev C's map gives each of 8 lanes a different column, 64 bytes apart, so the same 32 stores per
+tile become 8 separate transactions instead of 2. That is worth far more than the arithmetic saved.
+
+WHAT CHANGES:
+* The x1.1-1.2 estimate above is dead; do not template K for rev E's sake. (For rev C it stands at x1.90.)
+* rev E's real lever is now identified by elimination: the store pattern. Arrange the 32 lanes' u32
+  writes to be contiguous in the A region - which is a free choice, since SLM decouples producer lanes
+  from fragment mapping - and re-measure. Worth up to the ~25-35% that extraction+store accounts for.
+* Unroll pragmas are not a tuning knob on this toolchain for fixed-trip loops; stop budgeting for them.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes

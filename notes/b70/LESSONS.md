@@ -726,4 +726,33 @@ only) said ×1.5–2.1 and the honest build delivered ×1.90. When an idealizati
 the idealization was measuring something true — and it cost a two-line diff to know that before writing
 the kernel I had planned instead.
 
+## 35. A win transfers only if the bottleneck transfers
+
+rev C gained **x1.90** from making trellis K a compile-time constant. The obvious move was to do the same
+for rev E, the DPAS kernel that shares that extractor. I built it, isolated the two changes, and measured:
+compile-time K alone gave **x0.99–1.01** — nothing — and the lane remap that makes the shifts constant
+(rev C's own mapping) made rev E **2.3x slower**. Every variant was bit-exact, so this was a pure
+performance refutation of my own prediction, which I had written down as x1.1–1.2 an hour earlier.
+
+The reason is that the two kernels are bound by different things even though they run the same extraction
+code. rev C is bound by extraction ALU, so removing shifts and a select removes most of its fixed cost.
+rev E is bound by writing the assembled operand: its existing lane map has four lanes writing adjacent
+4-byte slots of one column (a tidy 16-byte contiguous run), while rev C's map gives each of eight lanes a
+different column 64 bytes apart, turning two store transactions into eight. Optimization gains are not
+portable across kernels; only the bottleneck is portable, and I had not measured rev E's.
+
+Two smaller findings from the same run. **Unroll pragmas did nothing** — none / a4 / j / both all landed
+within 0.5%, because fixed-trip-count loops are already unrolled. An earlier 2x regression I had blamed
+on "missing unroll" was really about *runtime loop bounds*, and I nearly optimized the wrong thing again.
+And **reverting is a first-class outcome**: the tree went back to `HEAD`, the restored binary was
+re-verified bit-exact, and the negative result is recorded in `out_dpas.txt` with the numbers that killed
+it — including the earlier prediction, left in place so the disagreement is visible rather than edited
+away.
+
+The productive residue: rev E's lever is now identified by elimination rather than guesswork. The 32
+lanes' stores into the operand scratch can be arranged however I like — SLM decouples producer lanes from
+fragment mapping — so making them contiguous is a free experiment worth the 25–35% that assembly and
+stores account for. Had I not tried the analogy and watched it fail, I would still be optimizing shifts.
+
+
 
