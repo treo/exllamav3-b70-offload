@@ -170,6 +170,12 @@ struct Launch
     int32_t *PART = nullptr;       // [ks][sub][e][rpad][n]
     Meta m;
     int KS = 8;
+    // DPAS_DUP_UNPACK=1: run unpack_col a second time per tile on a different ring slot and fold all 16
+    // products into one data-dependent predicate, so none of them can be eliminated. Same loads, same
+    // stores, same DPAS, same y. Priced alongside rev H's identical knob to answer "whose unpack is
+    // cheaper per tile", since rev G is faster overall while also doing 16 SLM stores per tile.
+    bool dup_unpack = false;
+    uint32_t *gsink = nullptr;
     // 'X' (DPAS_X=1): put the experts in the grid as well as the k-slice. A group then covers one expert and
     // one k-slice, so PART holds 2*KS partials per output instead of 2*KS*E - the item-5 reduction, on top
     // of rev G's rows-scaled partial layout. KS stays usable (grid = tn*KS*E), which is what makes the trade
@@ -200,6 +206,8 @@ static void submit(const Launch &L)
     const size_t slmSub = REG ? 0 : 2 * (size_t)B_TILE;   // double-buffered B tile per sub-group
     const size_t slmTotal = std::max<size_t>(2 * slmSub, 64);
     const bool skip_mad = L.skip_mad, skip_unpack = L.skip_unpack;
+    const bool L_dup_unpack = L.dup_unpack;
+    uint32_t *L_gsink = L.gsink;
     const uint32_t *W = L.W;
     const int8_t *X4 = L.X4;
     int32_t *PART = L.PART;
@@ -280,6 +288,15 @@ static void submit(const Launch &L)
                     {
                         fetch(pf[(u + PF_DIST) % NSET]);    // the set the previous tile just used
                         unpack_col(prod, pf[u], cr.s0, K);
+                        if (L_dup_unpack)
+                        {
+                            uint32_t px[16];
+                            unpack_col(px, pf[(u + 1) % NSET], cr.s0, K);
+                            uint32_t z = 0u;
+#pragma unroll
+                            for (int i = 0; i < 16; ++i) z ^= px[i];
+                            if (z == 0xDEADBEEFu) *L_gsink = z;   // never taken; keeps all 16 products live
+                        }
                     }
 
                     if constexpr (!REG)
@@ -485,6 +502,8 @@ int main(int argc, char **argv)
     Launch L;
     L.q = &q; L.W = W; L.X4 = X4; L.PART = PART; L.m = m; L.KS = KS;
     L.skip_mad = getenv("DPAS_NO_MAD") != nullptr;
+    L.dup_unpack = getenv("DPAS_DUP_UNPACK") != nullptr;
+    L.gsink = (uint32_t *)sycl::malloc_device(4, q);
     L.skip_unpack = getenv("DPAS_NO_UNPACK") != nullptr;
     L.structx = getenv("DPAS_X") != nullptr;
 
