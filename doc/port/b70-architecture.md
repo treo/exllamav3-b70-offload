@@ -514,17 +514,49 @@ measured rate curve at the matched footprint:
   61.4 GB/s** on the same bytes (`probe_gemv`, bit-exact, `[M]`), i.e. **~250 µs/layer, and the margin is
   gone**. The gap is instructions per weight, not bandwidth: see b70-kernels.md §2a for the two revisions
   measured (17 ops → 27.9 GB/s, 8 ops → 61.4 GB/s) and the CUDA/CPU structures that reach ~2 + R ops.
-  Until E4 is met by a kernel, the honest decode figure is `expert_bytes / 60 GB/s`, and the offload is
-  **not** hidden at b=1 for Qwen3.8 either. Qwen3.5 is proportionally cheaper; **GLM** at 50.9 MiB/layer
-  is 870 µs/layer at that rate, ~17 ms/token, so it needs both the kernel fix and more than one card.
-  Restated per-layer figures at the *modelled* byte-stream rate (what the design will achieve if §2a's
-  prescription is implemented, NOT what has been measured): Qwen3.8 **51 µs**, GLM **405 µs**. Intel's own
-  mature XPU MoE GEMVs reach **~180 GB/s** and describe themselves as ALU-bound
-  (`llm-scaler/…/moe_kquant_GEMV.h`, `q8_0_GEMV.h`; b70-kernels.md §2b), so the planning rate should be
-  **150–180 GB/s**, giving Qwen3.8 ~91 µs/layer at b=1 — a real ~2.7× margin rather than 5× or the 61 GB/s
-  measured today.
+  Until E4 is met by a kernel, the honest decode figure was `expert_bytes / 60 GB/s` (rev B), and the
+  offload was **not** hidden at b=1 for Qwen3.8 either. Qwen3.5 is proportionally cheaper; **GLM** at
+  50.9 MiB/layer is 870 µs/layer at that rate, ~17 ms/token, so it needs both the kernel fix and more
+  than one card. Rev C below moves these numbers but does not change GLM's conclusion.
+  Restated with the per-layer figure **measured on all nine MoE checkpoints on disk**
+  (`sweep_models.py`, `out_gemv_models.txt`; rev C bit-exact at every recipe K = 2…6; gate + up + down
+  composed from per-projection measurements; single-launch mode, which includes the ~5 µs completion
+  tax and runs at boost clocks — the mode decode actually lives in at a few-percent duty cycle):
+
+  | model (E = topk, R = 1) | MiB/layer | µs/layer | vs parent window | tok/s ceiling |
+  |---|---|---|---|---|
+  | Qwen3.8@2.68 | 17.58 | **239.2** (gate 80.7 ×2 + down 77.8) | ×1.05 of 250 µs | 87 |
+  | Qwen3.8@2.68, batch 4 | 17.58 | 360.3 | ×0.69 — B70 binds | 58 |
+  | GLM-5.3@3.05 | 72.00 | **717.2** (gate 245.7 ×2 + down 225.8) | parent window unmeasured (E10); it is 2.9× Qwen3.8's | 31 |
+  | Qwen3.6-35B-A3B@2.49 | 9.00 | **126.6** (gate 45.4 ×2 + down 35.8) | ×1.3 against the ~165 µs Qwen3.5-class window (same geometry) | 198 |
+  | Qwen3.5-35B@3bpw-hq2 | 9.00 | 134.6 | ×1.2 | 186 |
+
+  So for Qwen3.8 at b=1 the B70's expert work is **at parity with the parent's layer time, not inside
+  it** — the hiding margin the byte-stream view promised (4.9×, then 2.7×) does not exist, and in the
+  §4 min-max objective `S_b`'s compute term is now co-binding with `T_parent` rather than hidden under
+  it. GLM needs more than one card for rate, not only for hit rate; the cheapest geometries here
+  (small hidden × intermediate, wide `tn`) are the ones the single-card case actually suits.
+  rev C is ×1.82 median over rev B at these operating shapes (×2.18 at R=1, range ×0.97–4.22, n=36).
+* Two structural findings travel with those numbers.
+  * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
+    (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is
+    **229.1 / 239.2 / 239.3 / 239.0 / 239.6 / 238.5 µs** — flat within 0.5 % above K=2 — at
+    205–206 G-weights/s every time. The kernel is instruction-bound, so *weights* cost and *bytes*
+    don't. Bytes still govern the link and VRAM terms: `plan_quant_scaling.py`'s byte-based time model
+    is valid for transfers, not for the B70's compute tier, and cross-recipe rates must be compared in
+    G-weights/s (at K bits/weight, GB/s = G-w/s × K / 8, so GB/s across recipes is not comparable).
+    This holds within the mul1/trellis family the probe exercises; a different codebook is a different
+    instruction mix and is not covered by it.
+  * **Grid width, not split-K, is what fills the machine.** Pooled single-launch medians rise
+    76.5 → 109 → 126 → 135 → 203 G-weights/s as `tn` goes 32 → 40 → 128 → 160 → 256 (work-groups =
+    E·tn). The direction is sound — Qwen3.5/3.6's gate_proj at `tn` = 32 is the worst case measured —
+    but `tn` is confounded with per-item tile count in this sample, so the magnitude needs a controlled
+    sweep (same matrix, padded `tn`) before it is used as a design input.
 * The concurrency table below inherits the same caveat: its `rate` column is the byte-stream rate, so its
-  tok/s figures are ceilings conditional on E4.
+  tok/s figures are ceilings; re-derive them from the measured per-layer times above (and note that the
+  292 GB/s row of the table two lines up is a *bandwidth ceiling*, never achievable by this GEMV).
+  The modelled rows/MiB table above is superseded for the B70 compute term by the measured composition;
+  it remains the reference for how much of the layer is bandwidth-limited in the parent and link tiers.
 * **Batch is the variable that the per-token view hides, and it cuts against offloading.** Distinct
   experts per layer grow almost linearly with rows (72.7 of 512 at b=8 for Qwen3.8) until routing's
   effective support saturates, so B70 work per layer grows ~9× from b=1 to b=8 while the parent's window
@@ -1070,7 +1102,7 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | three disjoint homes, two cut points, no replication | **weakened**: holds where capacity is scarce, not where it is surplus | the old 1.5× rate premise was spec-to-spec; footprint-matched the homes are 3.2× (Qwen3.8) to 7× (GLM) apart. Disjointness now rests on the CPU residue costing `bytes/47.4`, which still holds for GLM. `plan_parent_budget.py` also shows Qwen3.8 running `h` = 100 % with ~12 GiB spare **[M]** | E20: replicating the hottest experts and steering per pick, if surplus survives real context lengths (E14) |
 | native tile layout on the B70, no repack | **decided on engineering grounds, not closed by measurement** | banded/native 0.96–1.05× over 2 geometries × 6 footprints: no consistent sign, and the probe's configuration variance exceeds the effect **[M]** | E4c: a *consistent* win in the real GEMV at decode footprints, large enough to pay for a load-time repack and for losing byte-interchangeability with the 3090 kernels |
 | locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | clustered/native 1.08–1.99×, never below 1.08 **[M]** | E4 measuring the real GEMV below 200 GB/s |
-| decode is bandwidth-bound, instruction count second-order | **RETRACTED** — a real GEMV is instruction-bound | `probe_gemv`: 17 ops/weight → 27.9 GB/s, 8 ops → 61.4 GB/s, both within 10 % of the issue-rate model, against 292 GB/s for the bare byte stream **[M]**; Intel's own XPU MoE GEMV comments say "ALU bound, not bandwidth bound" and report ~180 GB/s as their fixed-point figure **[M, source]** | — (new baseline); planning rate reset to 150–180 GB/s, §2a/§2b name the fixes |
+| decode is bandwidth-bound, instruction count second-order | **RETRACTED** — a real GEMV is instruction-bound, now measured on an exact kernel | rev A 17 ops/weight → 27.9 GB/s, rev B 8 ops → 61.4, rev C (register prod, one dot per weight-row) → **116.4 GB/s at E=512/R=1 and 76.6 at the b=1 shape** **[M]**, bit-exact in 88/88 gate configs; Intel's XPU kernels say "ALU bound, not bandwidth bound" **[M, source]** | rows cost ~linearly (116 → 60 → 31 GB/s for R=1/4/8), so a rows>1 kernel is a new measurement, not a scaling argument |
 | the byte floor `union(rows) · expert_bytes` holds | **conditional on expert bucketing** | llm-scaler's decode GEMVs are per-route (`grid = (n_routed, n_col)`) and rely on L2 rather than dedupping; only their grouped/prefill kernels bucket by expert (`chunks = {eid, t0, nt}`) **[source]** | if the real kernel does not bucket, b=8 reads ~5× the modelled bytes and every concurrency figure here is optimistic — E23 must report bytes actually read, not bytes touched |
 | dot-availability does not gate decode | **RETRACTED**, reopened behind E4 | the closure rested on a proxy that computed no weights; `dot_acc` in the byte sum alone measured 2.2× **[M]** | E4 with the register-resident `prod` + one `dot_acc` per (weight, row) |
 | streamed/staged prefill dead for `S_b`, live for `S_c` | closed on the byte/rate crossover, but see the row below — that crossover's rate side is now in question | ~200-row crossover from measured bytes/rates | E7′ on a model with more skewed routing, or the corrected per-row cost below |

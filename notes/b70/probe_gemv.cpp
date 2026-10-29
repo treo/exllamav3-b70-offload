@@ -341,18 +341,33 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
             }
             const int q0 = l & 7;                   // column pair (q0, q0+8)
             const int sub = l >> 3;                 // 4 tile subsets per slice
-            // Zero the reduce scratch before use. On Xe2 uninitialized local_memory_window reads
-            // return leftover patterns rather than faulting, so a hole here shows up as a
-            // near-constant offset in every output - indistinguishable from an arithmetic bug.
-            for (int i = l; i < 4 * 16 * M; i += 32) red[i] = 0;
-            sycl::group_barrier(it.get_group());
-
+            // NOTE: a cooperative zero of `red` plus a second barrier was here while chasing the splat
+            // bug. It changed the result by exactly nothing (the reduce is all-or-nothing per slot) and
+            // it is not free at low group counts, so it stays out.
             int32_t a0[M], a1[M];
             for (int i = 0; i < M; ++i) { a0[i] = 0; a1[i] = 0; }
             const int rowb = mt * M;
             const int RB = 256 * K;
 
-            for (int tt = sub; tt < tps; tt += 4)
+            // BISECT KNOBS (see DEBUG STATE above).
+            //   GEMV_ONESUB  : subset 0 walks the whole slice, the other three contribute zeros.
+            //                  Coverage and work are unchanged, so the answer must be identical -
+            //                  this isolates the 4-way split + SLM reduce from the per-tile math.
+            //   GEMV_ONETILE : subset 0 processes tile 0 of its slice and the rest idle, so PART is
+            //                  exactly one tile's contribution and can be diffed against a one-tile
+            //                  oracle. ONESUB alone keeps full coverage in one subset.
+            //   These bounds are compile-time constants on purpose. Making them runtime ints (as the
+            //   debugging version below momentarily did) cost ~2x: the trip count of the tile loop is
+            //   then unknown, so the inner 4x4 nest stops unrolling. Measured: E=10/R=1/ks=4 went
+            //   88.8 -> 37.5 GB/s with nothing else changed.
+#ifdef GEMV_ONETILE
+            const int tt_begin = (sub == 0 ? 0 : 1), tt_end = 1, tt_step = 1;
+#elif defined(GEMV_ONESUB)
+            const int tt_begin = (sub == 0 ? 0 : tps), tt_end = tps, tt_step = 1;
+#else
+            const int tt_begin = sub, tt_end = tps, tt_step = 4;
+#endif
+            for (int tt = tt_begin; tt < tt_end; tt += tt_step)
             {
                 const int kt = ks * tps + tt;
                 const uint32_t *dw = (const uint32_t *)W
@@ -480,7 +495,9 @@ int main(int argc, char **argv)
         if (rows_arg > m.R) { fprintf(stderr, "rows %d > dumped %d\n", rows_arg, m.R); return 2; }
         m.R = rows_arg;
     }
-    if (m.K != 3.0) { fprintf(stderr, "probe covers integer K = 3.0 only (case K = %g)\n", m.K); return 2; }
+    if (m.K != floor(m.K) || m.K < 2.0 || m.K > 6.0)
+    { fprintf(stderr, "probe covers integer trellis K (ring step is constant: verified step_widths(K)==K "
+                      "and ring_ends(i)==i*K for K=2..6), case K = %g\n", m.K); return 2; }
 
     auto wbuf = slurp(dir + "/weights.bin");
     auto xbuf = slurp(dir + "/x8.bin");
@@ -502,10 +519,35 @@ int main(int argc, char **argv)
     int16_t *BSD = (int16_t *) sycl::malloc_device(256 * 2, q);
     // pre-splatted activations for rev C: int32 whose 4 signed bytes are one x8 value, so a single
     // dot_acc(uint32 prod, int32 splat, int32 acc) is byte-sum x activation x accumulate (CUDA dp4a_us)
+    // Diagnostic inputs, applied to xbuf so BOTH impls see them: GEMV_ZERO_X makes the oracle
+    // accumulator exactly zero, so any non-zero PART is a constant the kernel injected rather than a
+    // data-routing error (the deficit's scatter - sd 10.5k, where ONE misplaced weight contributes
+    // ~37k - had already ruled out every weight x activation explanation). GEMV_ONE_X sets every
+    // activation to 1, reducing the oracle to a pure weight-side sum with no cancellation.
+    if (getenv("GEMV_ZERO_X"))
+        for (auto &v : xbuf) v = 0;
+    if (getenv("GEMV_ONE_X"))
+        for (auto &v : xbuf) v = 1;
+    if (getenv("GEMV_ZERO_X") || getenv("GEMV_ONE_X"))
+    {
+        // sx8 is the per-row sum of x8, dumped by the case generator; keep it consistent with the
+        // synthetic activations or the epilogue compares against a stale correction term.
+        int32_t *sv = (int32_t *)sbuf.data();
+        const int32_t per_row = getenv("GEMV_ZERO_X") ? 0 : (int32_t)m.k;
+        for (int r = 0; r < m.R; ++r) sv[r] = per_row;
+    }
     std::vector<int32_t> hspl((size_t)m.R * m.k);
+    // NOTE the (uint8_t) cast: multiplying a SIGNED x by 0x01010101 does not splat the byte. For
+    // x = -m it computes -(0x0m0m0m0m) = 0x(255-m)(255-m)(255-m)(256-m), whose bytes are
+    // (-m, -m-1, -m-1, -m-1): the borrow from the negate charges one to each of the upper three
+    // bytes. Every negative activation then contributes ~0.75 * bytesum too little, which is how a
+    // per-element deficit of ~4.94e5 appeared that was independent of weights AND of row - it equals
+    // 0.75 * (fraction of negative x) * sum_k bytesum, and both factors are near-constant. Mask to
+    // the byte first, then multiply, which is what the CUDA path effectively does with byte ops.
     for (int r = 0; r < m.R; ++r)
         for (int kk = 0; kk < m.k; ++kk)
-            hspl[(size_t)r * m.k + kk] = (int32_t)(int8_t)xbuf[(size_t)r * m.k + kk] * 0x01010101;
+            hspl[(size_t)r * m.k + kk] =
+                (int32_t)((uint32_t)(uint8_t)xbuf[(size_t)r * m.k + kk] * 0x01010101u);
     int32_t *XSPL = (int32_t *) sycl::malloc_device(hspl.size() * 4, q);
     int32_t *PART = (int32_t *) sycl::malloc_device((size_t)ksplit * m.E * m.R * m.n * 4, q);
     q.memcpy(XSPL, hspl.data(), hspl.size() * 4);
@@ -578,6 +620,13 @@ int main(int argc, char **argv)
                           m.R <= 4 ? m.R : 4, m.E * m.tn * ksplit * ((m.R + 3) / 4));
 
     std::vector<float> y((size_t) m.E * m.R * m.n);
+    // Two different quantities, and at decode footprints they are NOT the same number:
+    //   lat = one dispatch + q.wait(): what a caller that needs the result before proceeding pays,
+    //         including driver round trip (~25 us measured for .wait(), LESSONS on notify costs)
+    //   tp  = BURST back-to-back dispatches inside a single wait, per dispatch: what the machine
+    //         sustains, with the launch cost amortised and the queue never drained
+    // Reporting only the first badly overstates small shapes: E=10 measured ~80 us for BOTH 3.9 MiB
+    // and 5.86 MiB, i.e. the interval was the round trip, not the kernel.
     double best = 1e30;
     for (int r = 0; r < reps + 2; ++r)
     {
@@ -586,6 +635,17 @@ int main(int argc, char **argv)
         q.wait();
         double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (r >= 2 && s < best) best = s;          // first two are warm-up (clock ramp, LESSONS 15)
+    }
+    const int BURST = 16;
+    double tpbest = 1e30;
+    for (int w = 0; w < 2; ++w) { for (int i = 0; i < 4; ++i) dispatch(); q.wait(); }
+    for (int r = 0; r < 4; ++r)
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < BURST; ++i) dispatch();
+        q.wait();
+        double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / BURST;
+        if (s < tpbest) tpbest = s;
     }
     q.memcpy(y.data(), Y, y.size() * 4);
     q.wait();
@@ -598,9 +658,12 @@ int main(int argc, char **argv)
         printf("dumped partials %s (%d slices)\n", pp, ksplit);
     }
 
-    const double gw = (double) m.E * m.tk * m.tn * 256.0 / best / 1e9;
-    printf("impl %d order %d (%s): %8.1f us   %6.1f GB/s   %7.1f G-weights/s\n", impl, order,
-           order == 0 ? "clustered" : "scattered ", best * 1e6, wbytes / best / 1e9, gw);
+    const double wcount = (double) m.E * m.tk * m.tn * 256.0;
+    printf("impl %d order %d (%s): %8.1f us   %6.1f GB/s   %7.1f G-weights/s   [burst-of-16 throughput;"
+           " single-launch round trip %7.1f us = %6.1f GB/s, %7.1f G-w/s]\n",
+           impl, order, order == 0 ? "clustered" : "scattered ",
+           tpbest * 1e6, wbytes / tpbest / 1e9, wcount / tpbest / 1e9,
+           best * 1e6, wbytes / best / 1e9, wcount / best / 1e9);
 
     std::vector<float> yy(y);
     char outpath[512];

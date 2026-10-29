@@ -510,3 +510,59 @@ it from two snapshots or per-window counters). The lesson generalises to every s
 someone else's artifact: ask what the *identity* of the compared objects is, and whether the artifact
 has the axis (here, time) the question needs. A decayed cumulative count cannot answer "how fast does
 the set change", no matter how neatly the numbers line up.
+
+## 28. Low variance does not mean input-independent, and synthetic inputs are the cheapest bisect
+
+The rev C numerics bug was one line: `(int8_t)x * 0x01010101` to splat an activation byte, which for
+negative `x` yields bytes `(x, x−1, x−1, x−1)` because the two's-complement negate borrows from the upper
+three bytes. It survived eight rounds of analysis. Two things about how it resisted are worth writing
+ down.
+
+**I made a correct variance argument and drew the wrong conclusion from it.** The deficit had sd 10.5k on
+a mean of 494k (2 %), and I argued — correctly — that a single misplaced weight contributes ~37k of
+scatter, so no weight×activation routing error could produce it, therefore "a constant is being
+injected". But the deficit was Σ_{k : x_k<0} 0.75·bytesum_k: a sum over ~1280 terms of a quantity that
+does not depend on the *activations* at all, only on how many of them are negative. Sums over many terms
+self-average, so a purely data-driven bug can look like a constant. "The scatter is too small for a data
+bug" is only valid for bugs that touch few terms — I should have asked what the *number of terms* was
+before concluding anything.
+
+**Synthetic inputs were available the whole time and I tried them eighth.** Overwriting the activations
+with all-zeros, then all-ones, costs two runs and cleanly separates weight-side from activation-side
+faults: both were bit-exact, which localised the bug to negative `x` immediately — whereas the eight
+analysis rounds I actually ran (fixture store, dot_acc chaining form, SLM zero-init, subset split,
+signed reinterpretation, coverage audit) each consumed a build and produced an exoneration. Any time a
+kernel consumes two input tensors, hold one at a constant and at a trivial value before reading code.
+
+**Related, from the same session: your own scaffolding can be the regression.** Two diagnostics were
+kept alive after they had answered their question — a cooperative zero of the reduce scratch, and bisect
+knobs that turned compile-time loop bounds into runtime variables. Both were numerically inert, and
+between them they moved small-shape timings by enough that I "explained" a 2× slowdown with a story that
+was wrong (the bounds cost 1.00× at E ≥ 96; the jitter at E=10 did the rest). Delete diagnostic code once
+it has reported, and re-measure the headline after deleting it.
+
+**And measure small shapes properly.** At E=10/R=1 the same configuration measured 38.7, 45.7 and 52.5
+GB/s in three back-to-back repeats, and rev B's spread at E=10/R=4 was 94 %. A single median there is not
+evidence of anything — the "split-K recovers 5×" claim in the previous commit was pure noise and had
+already propagated into a design rule. Interleave the configurations within each repetition and compare
+minima, the way `probe_rates` already did; spread then drops to ~1 % and the conclusion inverted.
+
+## 29. Two units-and-instrument traps from the cross-model sweep
+
+**Replacing a binary under a running measurement silently corrupts it.** I rebuilt `probe_gemv` (adding a
+second timing mode) while `sweep_models.py` was still looping. Every line printed before the rebuild was
+latency-mode, every line after it throughput-mode, same column, same units, no error anywhere — a table
+of 108 numbers that looked perfectly self-consistent. The only reason I noticed is that the change was
+mine and I remembered the run was in flight. From now on: build to a new path and point the driver at it
+(`PROBE=/tmp/pg4 …`), or stop the driver first. Related: `pkill -f "sweep_models.py --sweep"` matched the
+shell issuing it and killed my own command instead (exit 143) — match a narrower pattern or kill by PID.
+
+**Rates across quantizations must be compared in weights/s, not bytes/s.** With K bits per weight,
+GB/s = G-weights/s × K/8, so a 6.05 bpw kernel is *expected* to show ~3× the GB/s of a 2.05 bpw one at
+identical efficiency. Pooling all measurements by K, the per-layer times came out flat (229–240 µs over
+a 3.0× byte range) while GB/s climbed 53.6 → 154.6 — read in GB/s that looks like higher quantizations
+running faster, read in weights/s it says the honest thing: the GEMV is instruction-bound, so the
+recipe choice costs VRAM and link bytes and essentially **no decode compute time**, which is a result the
+byte-based planner in `plan_quant_scaling.py` would have got backwards. Whenever a metric's denominator
+is itself a function of the variable you are sweeping, the metric is not comparable; normalize to the
+count of things worked on.

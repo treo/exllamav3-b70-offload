@@ -51,31 +51,62 @@ dp4a_us(prod, splat(a_int8), acc) against activations pre-splatted to 0x01010101
 Per weight that is ~2 + R instructions instead of ~8 + 4R, and the same trick on Xe2 is
 sycl::ext::oneapi::dot_acc(uint32, uint32, int32), which exists in this toolchain
 (sycl/ext/oneapi/dot_product.hpp, plus mixed-sign vec<uint8_t,4>/vec<int8_t,4> overloads).
-Next revision of this probe: drop the bs[] table, keep prod in registers, one dot_acc per (weight, row).
+Next revision of this probe: became rev C below - drop the bs[] table, keep prod in registers, one
+dot_acc per (weight, row).
 
 Ordering is NOT the lever at this instruction count - clustered/scattered ratios sit at 0.98-1.02 for
 R = 1..32 - which is the honest reading of §3a and E4b: the locality win is real for the byte stream
 (probe_rates 1.08-1.99x) but invisible until the arithmetic stops dominating.
 
 ================================================================================
-rev C - PROVISIONAL: structure validated, numerics NOT yet exact. Do not quote as a rate.
+rev C - VALIDATED: bit-exact, and the structure that ships. Supersedes the provisional
+        section this replaced (it had the numerics bug and a wrong causal story about split-K).
 ================================================================================
-Status: window extraction is proven correct IN-KERNEL (the byte-sums rev C computes for expert 0 /
-tile 0 match tests/testlib/trellis.py exactly), and totals are off by a near-constant per-column
-offset of -510 * sum_x8 (measured mean -491,786 vs -510*963 = -491,130), i.e. the mul1 bias term is
-folded in a second time somewhere between the subsets and the combine. Two defects were found and
-fixed on the way: casting the signed activation splat to uint32_t silently selected the
-unsigned x unsigned dot_acc overload, and the cross-subset reduction was a 32-lane butterfly on a
-device that runs 16-lane sub-groups (deterministic, mapping-dependent wrongness).
+The numerics bug (eight rounds to localise, one line to fix): the HOST-SIDE activation splat.
+    hspl = (int32_t)(int8_t)x * 0x01010101        // WRONG for x < 0
+    hspl = (int32_t)((uint32_t)(uint8_t)x * 0x01010101u)   // byte-mask first, then multiply
+Multiplying a SIGNED value by 0x01010101 does not replicate its byte. For x = -m it computes
+-(0x0m0m0m0m) = 0x(255-m)(255-m)(255-m)(256-m), whose four bytes are (-m, -m-1, -m-1, -m-1): the borrow
+from the negate charges one to each of the three upper bytes. Every negative activation therefore
+contributed ~0.75 * bytesum too little, so the per-element deficit was 0.75 * (fraction of negative x) *
+sum_k bytesum ~ -4.94e5 - near-constant in BOTH rows and columns, which is exactly why every "doubled
+bias term" / "injected constant" reading of it was wrong. Two controls pin it beyond argument:
+setting all activations to 0 made rev C exact (0/5120 mismatches), and setting them all to 1 also made
+it exact - both are non-negative, so the buggy path never executed. CUDA builds splats with byte ops
+(prmt / __byte_perm), never a signed multiply, for this reason.
 
-What it already establishes - the parallelism point, which matters more than the rate:
-  R=1, split-K sweep, real decode shapes (E experts touched per layer):
-     E=10 : ks=1 25.4   ks=4 88.8   ks=8 69.1   ks=16 54.1 GB/s
-     E=96 : ks=1 64.7   ks=4 103.6  ks=8 107.3  ks=16 99.9 GB/s
-     E=512: ks=1 111.2  ks=4 111.6  ks=8 109.2  ks=16 101.3 GB/s
-  b=1 decode touches h*topk ~ 10 experts, i.e. ~400 work-groups at tn=40 - the machine is NOT full.
-  rev B measured 17-18 GB/s at E=10 against 61 at E=512 for exactly this reason, and split-K recovers
-  ~5x of it (17 -> 89). moe_shared_q8_GEMV.h names the identical failure ("inter_s=256 work-items
-  cannot fill the machine") and the identical cure. So a decode kernel for this design MUST split K;
-  designing against a rate measured on 512 experts would have hidden that completely.
-  The E=512 number (111 GB/s, 1.8x rev B) is the one to re-measure after the bias bug is fixed.
+Earlier fixes retained: the signed splat must be passed as int32_t to select the unsigned x signed
+dot_acc overload (= CUDA dp4a_us), and the cross-subset reduce goes through SLM with a full
+group_barrier because the device runs 16-lane sub-groups.
+
+GATE: rev C == rev B bit for bit in 88/88 configurations - cases E in {2, 10, 96, 512} x rows in
+{1, 4, 8} x k-split in {1, 4, 8, 16} x both grid orders (gate_gemv.py; rev B is itself bit-exact vs
+tests/testlib/trellis.py, and every rev C partial is an int32 integer sum, so regrouping cannot change
+the value - this is a wider gate than the single case that has y_ref.npy).
+
+MEASURED RATES (min of 7 interleaved repeats, 21 internal reps each - see the methodology note below):
+  E=10,  R=1 : revB 261.2 us | ks=1 80.2 (x3.26)  ks=2 78.2  ks=4 82.2  ks=8 100.7  ks=16 125.0
+  E=10,  R=4 : revB 206.2 us | ks=1 271.6 (x0.76)  ks=2 158.7 (x1.30)  ks=4 119.9 (x1.72)
+                                     ks=8 175.4    ks=16 141.4
+  E=96,  R=1 : revB 990.3 us | ks=1 550.0 (x1.80)  ks=2 549.9  ks=4 552.1  ks=8 572.4  ks=16 638.8
+  E=512, R=1 : revB 5131 us / 61.3 GB/s | ks=1 2702 us / 116.4 GB/s (x1.90)   ks=4 2910 us / 108.1
+  E=512 rows, order 0, best ks: R=1 116.4 GB/s (ks=1), R=4 60.5 (ks=4), R=8 31.1 (ks=4)
+
+WHAT THAT MEANS, correcting the story this section replaces:
+  1. The structural fix alone - prod in registers, one dot per (weight,row), no materialised byte-sums -
+     is worth 1.8-3.3x over rev B at decode shapes. Peak decode rate is now MEASURED, not inherited:
+     116.4 GB/s at E=512/R=1 (was assumed 150-180 from vendor comments).
+  2. SPLIT-K IS NOT THE PARALLELISM CURE IT LOOKED LIKE. At E=10/R=1 - the sparsest realistic decode
+     shape, 400 work-groups - ks=1 was the best configuration (80.2 us, 0.9% spread); raising ks only
+     cost throughput. The E=10 deficit was rev B's per-item structure, not the grid size.
+  3. Split-K pays exactly when row-tiling has already consumed the grid dimension: E=10/R=4 needs ks=4
+     (x1.72) and at ks=1 rev C is actually SLOWER than rev B (x0.76). At E=96+ it never pays.
+     So ks is a joint function of (E, tn, rows, M), not a fixed choice, and ks=1 is the default.
+  4. Rows cost throughput roughly linearly in the accumulator count (116 -> 60 -> 31 GB/s for R=1/4/8 at
+     E=512), consistent with the ~2+M instructions-per-weight model and against a bandwidth bound.
+
+METHODOLOGY NOTE (why this section disagrees with the previous one): single medians at small shapes are
+unusable. Identical E=10/R=1 configs measured 38.7, 45.7 and 52.5 GB/s in three back-to-back repeats,
+and rev B's own spread at E=10/R=4 was 94%. The provisional "split-K recovers 5x at E=10" was drawn from
+exactly that noise. Interleaving configs within each repetition and comparing minima (the estimator
+probe_rates already used) gives 0.9-1% spread and reverses the conclusion.

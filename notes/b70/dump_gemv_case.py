@@ -15,7 +15,7 @@ file's memory of the format:
   * reference bytesums for one tile               -> an EXACT int16 check of the kernel's ring/window
     extractor, so a bit-order mistake is caught before it can hide inside a tolerance on y.
 
-Usage: dump_gemv_case.py OUTDIR EXPERTS ROWS [LAYER] [--with-reference]
+Usage: dump_gemv_case.py OUTDIR EXPERTS ROWS [LAYER] [--with-reference] [--ckpt NAME] [--proj gate_proj]
 """
 import json
 import os
@@ -33,10 +33,10 @@ CKPT = "Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8"
 MUL1_MULT = np.uint32(0x83DCD12D)
 
 
-def read_tensors(layer, experts, proj="gate_proj"):
+def read_tensors(layer, experts, proj="gate_proj", ckpt=None):
     """Real packed trellis bytes, via safetensors (no hand-rolled header parsing)."""
     from safetensors import safe_open
-    d = os.path.join(ROOT, CKPT)
+    d = os.path.join(ROOT, ckpt or CKPT)
     idx = json.load(open(os.path.join(d, "model.safetensors.index.json")))
     name_of = lambda e: f"model.language_model.layers.{layer}.mlp.experts.{e}.{proj}.trellis"
     by_shard = {}
@@ -66,13 +66,25 @@ def k_inv_f32():
     return float(np.frombuffer(np.uint16(0x1EEE).tobytes(), dtype=np.float16)[0])
 
 
+def _flag(name, default):
+    for i, a in enumerate(sys.argv):
+        if a == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return default
+
+
 def main():
     outdir, E, R = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-    layer = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    layer = int(sys.argv[4]) if len(sys.argv) > 4 and not sys.argv[4].startswith("--") else 0
     with_ref = "--with-reference" in sys.argv
+    ckpt = _flag("--ckpt", CKPT)
+    proj = _flag("--proj", "gate_proj")
     os.makedirs(outdir, exist_ok=True)
     experts = list(range(E))
-    arr, tk, tn, K, shape = read_tensors(layer, experts)
+    arr, tk, tn, K, shape = read_tensors(layer, experts, proj, ckpt)
+    assert float(K).is_integer(), f"the probe's ring math assumes integer K, got {K}"
     kdim, ndim = tk * 16, tn * 16
     rng = np.random.default_rng(12345)
     x8 = rng.integers(-127, 128, size=(R, kdim), dtype=np.int8)
@@ -89,11 +101,11 @@ def main():
     with open(os.path.join(outdir, "sx8.bin"), "wb") as f:
         f.write(sum_x8.astype(np.int32).tobytes(order="C"))
     with open(os.path.join(outdir, "meta.json"), "w") as f:
-        json.dump(dict(E=E, R=R, tk=tk, tn=tn, K=K, k=kdim, n=ndim, layer=layer, ckpt=CKPT,
-                       kinv=k_inv_f32(),
+        json.dump(dict(E=E, R=R, tk=tk, tn=tn, K=K, k=kdim, n=ndim, layer=layer, ckpt=ckpt,
+                       proj=proj, kinv=k_inv_f32(),
                        tile_words=int(8 * K), nbytes=int(arr.nbytes)), f, indent=1)
     if with_ref:
-        assert K == 3.0, f"reference path written for the integer-K ring, got K={K}"
+        assert K == int(K), f"reference path needs integer K (ring is 256*K bits), got {K}"
         perm = TR.tile_perm()
         win = TR.unpack(arr.reshape(-1, int(16 * K)), K)           # (E*tk*tn, 256) uint16 windows
         bs = bytesums(win.astype(np.uint32))                       # (T, 256) int32
@@ -111,7 +123,7 @@ def main():
         np.save(os.path.join(outdir, "bs_ref_tile0.npy"), bs[0].astype(np.int16))
         print(f"reference: y {y.shape} max|y| {np.abs(y).max():.3f}; "
               f"tile0 bytesum min {bs[0].min()} max {bs[0].max()}")
-    print(f"dumped E={E} R={R} k={kdim} n={ndim} K={K} tiles=({tk},{tn}) "
+    print(f"dumped E={E} R={R} k={kdim} n={ndim} K={K} tiles=({tk},{tn}) proj={proj} "
           f"weight bytes {arr.nbytes / 2**20:.1f} MiB -> {outdir}")
 
 

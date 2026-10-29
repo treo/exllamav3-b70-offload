@@ -162,9 +162,12 @@ What they say that changes our design:
    → Rev C: `simd`-width tiles (≥32 B per load), accumulate lane-parallel into `simd<int32_t, VL>`,
      one `reduce` per output at the very end. Never reduce inside the k loop.
 2. **~180 GB/s is the realistic ceiling for a mature MoE GEMV on this class of card**, not the
-   292 GB/s bare-stream rate. → recalibrate the decode planning rate to **150–180 GB/s** and treat 292 as
-   the unreachable asymptote; at 165 GB/s Qwen3.8's b=1 layer is 14.3 MiB → **91 µs/layer**, inside the
-   ~250 µs window with ~2.7× margin (real, but far less than the 5× the plan claimed).
+   292 GB/s bare-stream rate. → **Superseded by measurement, and the units were wrong.** Rev C reaches
+   116.4 GB/s at E=512/R=1 and 76.6 GB/s at the b=1 shape (§2b item 9). At 3.0 bpw those are **309.5 and
+   204 G-weights/s**, against Intel's q8_0 GEMV at ~470 G-w/s (1 B/weight) and their narrow K-quant
+   shapes at 120–180 G-w/s — so the trellis kernel already sits above their narrow-shape rates, and
+   GB/s was never comparable across formats with different bytes-per-weight. At 165 GB/s the planning
+   figure had been 91 µs/layer for Qwen3.8 b=1; at the measured 76.6 it is ~195 µs.
 3. **Amortise the activation load across output columns.** `moe_kquant_GEMV.h`: with one column per
    work-item, "every work-item re-reads `inter` in full (N=2048 work-items × 512 B = 1 MB of cache
    traffic per route for a 4 KB tensor)"; handling `ROWS>1` columns per work-item removed it. My rev B
@@ -206,23 +209,65 @@ What they say that changes our design:
    `UR_RESULT_ERROR_DEVICE_LOST`)" — same failure signature as `LESSONS` 4, reached from a different
    direction: on this driver an OOB *read* does not fault verbosely, it kills the device.
 
-9. **Decode is parallelism-starved at the real operating shape; the fix is validated but its gain is
-   not yet measured.** The solid half comes from validated rev B, same kernel and same bytes: 10 experts
-   instead of 512 runs **17–18 GB/s vs 61 GB/s** (R=1). b=1 decode touches `h · topk` ≈ 10 experts →
-   ~400 work-groups at `tn` = 40, which cannot fill 256 EUs, so the decode kernel wants `(expert,
-   n-tile, k-slice)` graining with a combine pass; `moe_shared_q8_GEMV.h` names the identical failure
-   ("inter_s=256 work-items cannot fill the machine") and the identical cure (split-K + SLM/grid combine).
-   The *recovery* figure (rev C: 17 → 89 GB/s at E=10, ~111 at E=512) is **indicative only** — rev C does
-   not pass Gate A, and until it does its timings could in principle be flattered by whatever its bug
-   skips. Two conditions land on E4: (a) quote rates at the **real per-layer expert count**, never at a
-   convenient large one; (b) do not bank the split-K gain until it is re-measured on an exact kernel.
-   Split-K also interacts with `S_g` and the link: a k-slice is an independent job, so it fragments the
-   per-expert contiguity that made `S_g` a quota worth reserving in §4 of the architecture doc.
+9. **Decode rate is now measured on the real kernel, and the grid-size story was wrong.** Rev C passes
+   the gate (bit-exact vs rev B in 88/88 configs: E ∈ {2,10,96,512} × rows {1,4,8} × k-split {1,4,8,16}
+   × both orders) and supersedes the inherited 150–180 GB/s assumption. Min of 7 interleaved repeats:
+
+   | shape (per layer) | rev B | rev C best | rate |
+   |---|---|---|---|
+   | E=10, R=1 — the b=1 decode shape | 261.2 µs | 80.2 µs at ks=1, **×3.26** | **76.6 GB/s** |
+   | E=96, R=1 | 990.3 µs | 550.0 µs at ks=1, ×1.80 | 107 GB/s |
+   | E=512, R=1 | 5131 µs | 2702 µs at ks=1, ×1.90 | 116.4 GB/s |
+   | E=512, R=4 and R=8 | — | 60.5 and 31.1 GB/s at ks=4 | rows cost ~linearly |
+
+   * The gain came from the *structure* — prod in registers, one dot per (weight, row), no materialised
+     byte-sums — **not** from split-K. At E=10/R=1, 400 work-groups and the sparsest realistic decode,
+     ks=1 was the best configuration measured; every increase in ks lost throughput. The claim this
+     entry used to make ("decode MUST split K, which recovers ~5×") was read off noise: identical
+     configs measured 38.7, 45.7 and 52.5 GB/s back-to-back. `out_gemv.txt` carries the methodology note.
+   * Split-K pays only once row-tiling has consumed the grid dimension: at E=10/R=4, ks=4 gives ×1.72
+     while ks=1 is *slower than rev B* (×0.76). At E ≥ 96 it never pays. So `ks` is a joint function of
+     (E, tn, rows, M) chosen at launch time, defaulting to 1; it costs ~10–25 % when unneeded.
+   * Rows cost throughput roughly linearly in accumulator count (116 → 60 → 31 GB/s for R = 1/4/8),
+     consistent with the ~2+M-instructions-per-weight model and not with a bandwidth bound.
+   * **Planning consequence:** the b=1 rate is **~77 GB/s**, about half the 150–180 assumed and a quarter
+     of what the byte-stream proxy gave at the same footprint (132–292). Qwen3.8 b=1 expert work per
+     layer moves from ~91 µs to ~195 µs, and `plan_operating_point.py` plus everything downstream of it
+     must be re-run against the measured curve before any token/s figure is quoted again.
 10. **`dot_acc` overload signedness is silent.** `dot_acc(uint32_t, uint32_t, int32_t)` is
     unsigned×unsigned; the CUDA `dp4a_us` equivalent is `dot_acc(uint32_t, int32_t, int32_t)`
     (unsigned prod × signed activation splat). Casting the splat to `uint32_t` reads negative
     activations as 128…255 and produces plausible-looking garbage — caught only by the bit-exactness
     gate, which is exactly why Gate A is bit-exact rather than tolerance-based.
+11. **Pre-splat activations: mask the byte, never multiply a signed value.** `(int8_t)x * 0x01010101`
+    gives bytes `(x, x−1, x−1, x−1)` for negative `x` — the borrow from the two's-complement negate — so
+    every negative activation under-contributes by ~0.75·bytesum. That presents as a near-constant
+    offset in the output, which is the least suspectable shape a data bug can take. Correct form:
+    `(uint32_t)(uint8_t)x * 0x01010101u`. CUDA avoids the trap structurally by splatting with byte
+    permutes. This one line was the entire rev C numerics bug; `out_gemv.txt` has the autopsy and the
+    two synthetic-input controls (x ≡ 0, x ≡ 1, both exact) that proved it.
+
+12. **Measured on every MoE checkpoint on disk (nine of them; two more are dense).**
+    `sweep_models.py` + `out_gemv_models.txt` cover model × projection × experts × rows, with rev C
+    bit-exact against a NumPy reference at **every trellis recipe K = 2, 3, 4, 5, 6** — relaxing the
+    probe's `K == 3` guard was safe because `step_widths(K) == K` and `ring_ends(i) == i·K` hold for all
+    integer K (checked against `tests/testlib/trellis.py`), and the mul1 magic multiplier 0x83DCD12D is
+    a property of the codebook, not of K.
+    * Per-layer decode time is **recipe-independent**: the six Qwen3.8 recipes span 11.72–35.16 MiB and
+      measure 229.1–239.6 µs (flat within 0.5 % above K=2) at a constant **205–206 G-weights/s**.
+      Weights cost, bytes don't — so GB/s is not comparable across recipes (GB/s = G-w/s × K/8) and
+      `plan_quant_scaling.py`'s byte-driven time model belongs to the transfer tiers only.
+    * rev C over rev B at the operating shapes: median **×1.82** (×2.18 at R=1; range ×0.97–4.22, n=36).
+    * Pooled throughput tracks grid width: 76.5/109/126/135/203 G-w/s for `tn` = 32/40/128/160/256
+      (directional — `tn` is confounded with per-item tile count here).
+13. **Two timing modes, and they are not interchangeable.** The probe now reports burst-of-16 sustained
+   throughput *and* single-launch round trip. The round trip is only ~5 µs above sustained at these
+   shapes (so the ~80 µs measured at E=10 is kernel time, not launch tax — that check mattered, because
+   E=10 took the same 80 µs for 3.9 MiB and 5.86 MiB and looked exactly like an overhead floor).
+   Sustained mode is the *slower* one at large shapes (E=512: 2771 vs 2704 µs) because a 16-launch burst
+   of 2.7 ms kernels loads the card continuously and droops clocks, while single launches ride boost
+   clocks. Decode at b=1 has a few-percent duty cycle, so **plan decode on the single-launch number**
+   (conservative: it also carries the completion tax) and prefill/batched on the sustained number.
 
 ## 3. Decode kernel (`rows ≤ 8`, i.e. the whole of token generation)
 
