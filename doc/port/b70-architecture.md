@@ -126,6 +126,39 @@ both cards and steer each pick to the idle home, which decouples placement from 
 at the cost of capacity. It is not adopted here — E14 measures whether the surplus survives real
 context lengths, and E20 would be the gate for the steering logic.
 
+**Does any of this hold for the bigger recipes?** Yes, and it was checked rather than assumed
+(**[M]** `plan_quant_scaling.py`, `out_quant_scaling.txt`; the K = 4/5/6 tile rates are newly measured
+in `out_rates_footprint_hiq.txt`, not extrapolated). Five Qwen3.8 checkpoints, `S_g` computed per
+recipe, 4k ctx, b=1:
+
+| bpw | expert MiB | slots/layer | `h` / live | CPU ms/tok | dev MiB/layer | matched GB/s | µs/layer | b=8 winner |
+|---|---|---|---|---|---|---|---|---|
+| 2.05 | 1.215 | 335 | 100 % / 356 | 0.00 | 12.1 | 292 | **44** | fair split (+7 %) |
+| 2.68 | 1.563 | 249 | 100 % / 512 | 0.00 | 15.6 | 292 | **56** | fair split (+4 %) |
+| 4.05 | 2.411 | 162 | 94.8 % / 512 | 1.34 | 22.9 | 294 | **81** | fair split (+3 %) |
+| 5.05 | 3.009 | 127 | 100 % / 258 | 0.00 | 30.1 | 290 | **109** | fair split (+9 %) |
+| 6.05 | 3.608 | 104 | 90.4 % / 500 | 3.68 | 32.6 | 243 | **141** | **hottest-first (+43 %)** |
+
+* What scales is `expert_bytes` (2.4× from 2.68 → 6.05), so a decode layer's footprint grows from 12 to
+  33 MiB, the resident *count* per layer falls 512 → 104, and the µs/layer rise is mostly just more bytes
+  at a rate that barely moves (243–294 GB/s across every K). Offload still hides at b=1 for all five
+  recipes (44–141 µs inside a ~250 µs window).
+* What does **not** scale is the parent's byte bill: 69–101 MiB/layer, 31–45 % bandwidth duty, across all
+  five recipes — because the quantisation recipe holds the streamed non-expert tensors near a fixed width
+  instead of scaling them with the experts. §2.1a's "the 3090 is latency-bound with spare bandwidth" is
+  therefore recipe-general on this model, and my initial guess that duty would reach ~83 % at 6.05 bpw
+  was wrong by ~2×.
+* The policy rule predicts its own crossover across the whole range: fair-split wins wherever the residue
+  is zero or dust-small, and at 6.05 bpw — the one recipe where a real 9.6 % of picks land on the CPU —
+  hottest-first wins by 43 %. `EXL3_MOE_B70_BALANCE=auto` selecting on `h` is exactly this boundary, so
+  the same knob covers every recipe, with one condition: `h` must be read against the **live** expert
+  count (the `512L` / `258L` column), since the decayed profiles' dust tail otherwise reports 100 %
+  residency for recipes that are only ~90 % homed.
+* One rate caveat, kept because it is a live E4c lead: fatter tiles make banding slightly *positive* —
+  1.06–1.07× at K = 5/6 and 64–128 MiB, versus 0.96–1.05× at K = 2.5/3.0. Still not consistent in sign
+  across footprints, so §2.2's decision stands, but "repacking buys nothing" was measured on thin tiles
+  and the trend runs the other way as bits rise.
+
 
 Disjointness is the default, not an oversimplification: with a CPU residue to serve, every GiB
 duplicated is a GiB that cannot hold a *different* expert, and on an oversized model that GiB is the
@@ -198,7 +231,11 @@ an expert move between the 3090 and the B70 without translation (§5). So there 
 no un-swizzle interaction, and the bytes stay interchangeable with the 3090's kernels.
 `exl3_b70_tile_layout(K)` still exists as the single place the layout is *reported* (Gate B4's rule
 that no second table may appear), but its answer is `native` for every K, and reversing that needs a
-consistent win in the real GEMV (E4), not an analogy to the CPU tiers.
+consistent win in the real GEMV (E4), not an analogy to the CPU tiers. One qualifier added by the
+higher-quant sweep: banding is not flat in K — at K = 5/6 tiles it measures 1.06–1.07× at 64–128 MiB
+against 0.96–1.05× at K = 2.5/3.0 (`out_rates_footprint_hiq.txt`). The sign is still inconsistent across
+footprints so the decision stands, but the null was established on thin tiles and the mechanism
+(per-item contiguity) should strengthen as tiles fatten — so E4c must run at the deployment's actual K.
 
 The size of the intervention is why the null deserves belief. Banding rewrites the tile index from
 native `kt·tiles_n + nt` to `(nt/8)·tiles_k + kt`, cutting the k-step of a GEMV fragment from
@@ -989,7 +1026,8 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | "the offload hides at decode" | true for Qwen3.8 at b ≤ 4, **not** general | margin 4.9× → 1.3× → 0.5× over b = 1 → 4 → 8, from real selection counts | E9's batch axis; if the measured crossover is below b=4, the decode path is a small-batch optimization and the docs must say so |
 | `S_g` quota = whatever the KV trade leaves (2 GiB assumed) | **replaced by a computed budget** | byte bills from shard headers + config: 4.05/5.67 GiB streamed non-expert, 22–24 KiB KV/token, 108–136 MiB state/sequence, and the 49.91 GiB n-gram tables are host row-gathers, not VRAM → ~16.6 GiB free at 4k ctx **[M]** | E14 at the deployment's ctx/rows; E18 if the traffic half of the bill is wrong |
 | placement objective = minimise summed compute | **replaced: minimise the per-layer maximum**, with `S_g` serial and `S_b`/`S_c` concurrent | 2.1a; `P_order` vs `P_lpt` differ by 0 % (Qwen3.8 b=1) to +20 % (GLM, ordered better) depending on regime **[P, from measured rates]** | E19 |
-| hottest-first within a layer | retained **while a CPU residue exists**, not as a universal rule | spreading hot experts over both VRAM homes leaves colder ones to `bytes/47.4`, the most expensive byte on the box (GLM: `order` wins 9–20 %) | E19 once `h` reaches 100 % and the residue term vanishes |
+| hottest-first within a layer | retained **while a CPU residue exists**, not as a universal rule; the boundary is **recipe-dependent** | spreading hot experts over both VRAM homes leaves colder ones to `bytes/47.4`, the most expensive byte on the box (GLM: `order` wins 9–20 %). Across five Qwen3.8 recipes: `lpt` wins +3…+9 % at 2.05/2.68/4.05/5.05 bpw, `order` wins **+43 % at 6.05 bpw**, the only one with a real residue **[M]** | E19 |
+| §2.1a's premises are recipe-general on Qwen3.8 | checked, not assumed | matched rate band 207–295 GB/s at K = 2.5–6.0; parent duty 31–45 % at every quant; residency falls 512 → 104 slots/layer only through `expert_bytes` **[M]** | a recipe that scaled the streamed non-expert tensors with bits — then the parent's duty would climb with quantisation and the "spare bandwidth on the 3090" premise would break |
 | every knob default except the rate-derived ones | provisional | — | phases 1–4 gates |
 
 Nothing else in this document is a decision: the remaining prose is rationale, and rationale does not

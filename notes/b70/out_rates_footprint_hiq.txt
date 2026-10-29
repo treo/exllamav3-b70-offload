@@ -1,0 +1,362 @@
+# probe_rates: rate vs footprint for the higher-quant Qwen3.8 tiles (K = 4/5/6, the integer bpw of the 4.05/5.05/6.05 recipes)
+# same kernel, same exact-cover self-check; one invocation per (shape, size), best of 4 reps
+Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)
+  81 experts, 518400 tiles of 128 B = 63 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 63 MiB, so it cannot be served from cache
+
+  cover check: 518400/518400 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    294.4 GB/s       588.7 G-weights/s     48.4 % of 608 GB/s
+  R3 banded order    (scatter)      290.2 GB/s       580.4 G-weights/s     47.7 % of 608 GB/s
+  R4 native + mul + int8 dot        292.2 GB/s       584.3 G-weights/s     48.1 % of 608 GB/s
+  R5 native + mul + byte sum        293.9 GB/s       587.9 G-weights/s     48.3 % of 608 GB/s
+  R6 native + density, dot          242.0 GB/s       483.9 G-weights/s     39.8 % of 608 GB/s
+  R7 native + density, sum          244.4 GB/s       488.7 G-weights/s     40.2 % of 608 GB/s
+  R9 density, dot, 8 chains         239.3 GB/s       478.7 G-weights/s     39.4 % of 608 GB/s
+  R8 native tile order (cluster)    495.4 GB/s       990.7 G-weights/s     81.5 % of 608 GB/s
+  layout payoff (banded/native)      0.99 x
+  LOCALITY payoff (clustered / scrambled native)  1.68 x
+  light arithmetic (byte-sum / dot)  1.01 x
+  dot vs byte-sum at density         0.990 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.83 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.819 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 76445022968  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)
+  163 experts, 1043200 tiles of 128 B = 127 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 127 MiB, so it cannot be served from cache
+
+  cover check: 1043200/1043200 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    245.3 GB/s       490.5 G-weights/s     40.3 % of 608 GB/s
+  R3 banded order    (scatter)      251.5 GB/s       503.0 G-weights/s     41.4 % of 608 GB/s
+  R4 native + mul + int8 dot        240.9 GB/s       481.7 G-weights/s     39.6 % of 608 GB/s
+  R5 native + mul + byte sum        238.9 GB/s       477.9 G-weights/s     39.3 % of 608 GB/s
+  R6 native + density, dot          184.9 GB/s       369.8 G-weights/s     30.4 % of 608 GB/s
+  R7 native + density, sum          185.2 GB/s       370.3 G-weights/s     30.5 % of 608 GB/s
+  R9 density, dot, 8 chains         181.6 GB/s       363.2 G-weights/s     29.9 % of 608 GB/s
+  R8 native tile order (cluster)    383.1 GB/s       766.3 G-weights/s     63.0 % of 608 GB/s
+  layout payoff (banded/native)      1.03 x
+  LOCALITY payoff (clustered / scrambled native)  1.56 x
+  light arithmetic (byte-sum / dot)  0.99 x
+  dot vs byte-sum at density         0.999 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.77 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.754 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 44159917878  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)
+  327 experts, 2092800 tiles of 128 B = 255 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 255 MiB, so it cannot be served from cache
+
+  cover check: 2092800/2092800 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    230.9 GB/s       461.8 G-weights/s     38.0 % of 608 GB/s
+  R3 banded order    (scatter)      230.9 GB/s       461.8 G-weights/s     38.0 % of 608 GB/s
+  R4 native + mul + int8 dot        231.8 GB/s       463.6 G-weights/s     38.1 % of 608 GB/s
+  R5 native + mul + byte sum        231.7 GB/s       463.4 G-weights/s     38.1 % of 608 GB/s
+  R6 native + density, dot          228.5 GB/s       457.0 G-weights/s     37.6 % of 608 GB/s
+  R7 native + density, sum          230.0 GB/s       459.9 G-weights/s     37.8 % of 608 GB/s
+  R9 density, dot, 8 chains         227.3 GB/s       454.6 G-weights/s     37.4 % of 608 GB/s
+  R8 native tile order (cluster)    329.4 GB/s       658.9 G-weights/s     54.2 % of 608 GB/s
+  layout payoff (banded/native)      1.00 x
+  LOCALITY payoff (clustered / scrambled native)  1.43 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         0.994 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.99 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.980 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 53203356344  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)
+  655 experts, 4192000 tiles of 128 B = 511 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 511 MiB, so it cannot be served from cache
+
+  cover check: 4192000/4192000 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    284.7 GB/s       569.5 G-weights/s     46.8 % of 608 GB/s
+  R3 banded order    (scatter)      282.1 GB/s       564.1 G-weights/s     46.4 % of 608 GB/s
+  R4 native + mul + int8 dot        282.6 GB/s       565.3 G-weights/s     46.5 % of 608 GB/s
+  R5 native + mul + byte sum        283.5 GB/s       567.1 G-weights/s     46.6 % of 608 GB/s
+  R6 native + density, dot          261.6 GB/s       523.3 G-weights/s     43.0 % of 608 GB/s
+  R7 native + density, sum          263.7 GB/s       527.4 G-weights/s     43.4 % of 608 GB/s
+  R9 density, dot, 8 chains         258.7 GB/s       517.5 G-weights/s     42.6 % of 608 GB/s
+  R8 native tile order (cluster)    391.6 GB/s       783.2 G-weights/s     64.4 % of 608 GB/s
+  layout payoff (banded/native)      0.99 x
+  LOCALITY payoff (clustered / scrambled native)  1.38 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         0.992 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.93 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.915 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 73717813358  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)
+  1310 experts, 8384000 tiles of 128 B = 1023 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 1023 MiB, so it cannot be served from cache
+
+  cover check: 8384000/8384000 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    254.9 GB/s       509.8 G-weights/s     41.9 % of 608 GB/s
+  R3 banded order    (scatter)      254.3 GB/s       508.6 G-weights/s     41.8 % of 608 GB/s
+  R4 native + mul + int8 dot        254.4 GB/s       508.7 G-weights/s     41.8 % of 608 GB/s
+  R5 native + mul + byte sum        253.8 GB/s       507.5 G-weights/s     41.7 % of 608 GB/s
+  R6 native + density, dot          253.5 GB/s       506.9 G-weights/s     41.7 % of 608 GB/s
+  R7 native + density, sum          251.0 GB/s       502.1 G-weights/s     41.3 % of 608 GB/s
+  R9 density, dot, 8 chains         253.6 GB/s       507.3 G-weights/s     41.7 % of 608 GB/s
+  R8 native tile order (cluster)    324.8 GB/s       649.7 G-weights/s     53.4 % of 608 GB/s
+  layout payoff (banded/native)      1.00 x
+  LOCALITY payoff (clustered / scrambled native)  1.27 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.010 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 1.00 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.997 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 69165362296  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)
+  2621 experts, 16774400 tiles of 128 B = 2047 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 2047 MiB, so it cannot be served from cache
+
+  cover check: 16774400/16774400 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    289.5 GB/s       578.9 G-weights/s     47.6 % of 608 GB/s
+  R3 banded order    (scatter)      286.4 GB/s       572.7 G-weights/s     47.1 % of 608 GB/s
+  R4 native + mul + int8 dot        288.6 GB/s       577.2 G-weights/s     47.5 % of 608 GB/s
+  R5 native + mul + byte sum        289.0 GB/s       578.0 G-weights/s     47.5 % of 608 GB/s
+  R6 native + density, dot          279.1 GB/s       558.3 G-weights/s     45.9 % of 608 GB/s
+  R7 native + density, sum          273.7 GB/s       547.5 G-weights/s     45.0 % of 608 GB/s
+  R9 density, dot, 8 chains         269.8 GB/s       539.5 G-weights/s     44.4 % of 608 GB/s
+  R8 native tile order (cluster)    373.1 GB/s       746.1 G-weights/s     61.4 % of 608 GB/s
+  layout payoff (banded/native)      0.99 x
+  LOCALITY payoff (clustered / scrambled native)  1.29 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.020 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.97 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.935 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 77562731372  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)
+  65 experts, 416000 tiles of 160 B = 63 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 63 MiB, so it cannot be served from cache
+
+  cover check: 416000/416000 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    289.8 GB/s       463.6 G-weights/s     47.7 % of 608 GB/s
+  R3 banded order    (scatter)      310.2 GB/s       496.3 G-weights/s     51.0 % of 608 GB/s
+  R4 native + mul + int8 dot        280.0 GB/s       448.0 G-weights/s     46.1 % of 608 GB/s
+  R5 native + mul + byte sum        285.4 GB/s       456.6 G-weights/s     46.9 % of 608 GB/s
+  R6 native + density, dot          234.2 GB/s       374.7 G-weights/s     38.5 % of 608 GB/s
+  R7 native + density, sum          236.3 GB/s       378.0 G-weights/s     38.9 % of 608 GB/s
+  R9 density, dot, 8 chains         233.8 GB/s       374.2 G-weights/s     38.5 % of 608 GB/s
+  R8 native tile order (cluster)    522.5 GB/s       836.0 G-weights/s     85.9 % of 608 GB/s
+  layout payoff (banded/native)      1.07 x
+  LOCALITY payoff (clustered / scrambled native)  1.80 x
+  light arithmetic (byte-sum / dot)  1.02 x
+  dot vs byte-sum at density         0.991 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.84 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.835 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 74577484416  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)
+  131 experts, 838400 tiles of 160 B = 127 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 127 MiB, so it cannot be served from cache
+
+  cover check: 838400/838400 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    214.2 GB/s       342.8 G-weights/s     35.2 % of 608 GB/s
+  R3 banded order    (scatter)      228.0 GB/s       364.8 G-weights/s     37.5 % of 608 GB/s
+  R4 native + mul + int8 dot        210.2 GB/s       336.4 G-weights/s     34.6 % of 608 GB/s
+  R5 native + mul + byte sum        210.7 GB/s       337.2 G-weights/s     34.7 % of 608 GB/s
+  R6 native + density, dot          191.7 GB/s       306.7 G-weights/s     31.5 % of 608 GB/s
+  R7 native + density, sum          194.4 GB/s       311.1 G-weights/s     32.0 % of 608 GB/s
+  R9 density, dot, 8 chains         190.4 GB/s       304.6 G-weights/s     31.3 % of 608 GB/s
+  R8 native tile order (cluster)    341.3 GB/s       546.1 G-weights/s     56.1 % of 608 GB/s
+  layout payoff (banded/native)      1.06 x
+  LOCALITY payoff (clustered / scrambled native)  1.59 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         0.986 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.91 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.905 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 53238637636  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)
+  262 experts, 1676800 tiles of 160 B = 255 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 255 MiB, so it cannot be served from cache
+
+  cover check: 1676800/1676800 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    212.7 GB/s       340.3 G-weights/s     35.0 % of 608 GB/s
+  R3 banded order    (scatter)      209.4 GB/s       335.1 G-weights/s     34.4 % of 608 GB/s
+  R4 native + mul + int8 dot        213.4 GB/s       341.5 G-weights/s     35.1 % of 608 GB/s
+  R5 native + mul + byte sum        212.5 GB/s       340.0 G-weights/s     35.0 % of 608 GB/s
+  R6 native + density, dot          207.9 GB/s       332.6 G-weights/s     34.2 % of 608 GB/s
+  R7 native + density, sum          211.4 GB/s       338.2 G-weights/s     34.8 % of 608 GB/s
+  R9 density, dot, 8 chains         211.1 GB/s       337.7 G-weights/s     34.7 % of 608 GB/s
+  R8 native tile order (cluster)    265.0 GB/s       423.9 G-weights/s     43.6 % of 608 GB/s
+  layout payoff (banded/native)      0.98 x
+  LOCALITY payoff (clustered / scrambled native)  1.25 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         0.983 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.97 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.989 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 82201981164  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)
+  524 experts, 3353600 tiles of 160 B = 511 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 511 MiB, so it cannot be served from cache
+
+  cover check: 3353600/3353600 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    240.5 GB/s       384.9 G-weights/s     39.6 % of 608 GB/s
+  R3 banded order    (scatter)      239.3 GB/s       382.8 G-weights/s     39.4 % of 608 GB/s
+  R4 native + mul + int8 dot        240.3 GB/s       384.5 G-weights/s     39.5 % of 608 GB/s
+  R5 native + mul + byte sum        240.3 GB/s       384.5 G-weights/s     39.5 % of 608 GB/s
+  R6 native + density, dot          238.7 GB/s       381.9 G-weights/s     39.3 % of 608 GB/s
+  R7 native + density, sum          238.7 GB/s       381.9 G-weights/s     39.3 % of 608 GB/s
+  R9 density, dot, 8 chains         238.7 GB/s       381.9 G-weights/s     39.3 % of 608 GB/s
+  R8 native tile order (cluster)    279.9 GB/s       447.8 G-weights/s     46.0 % of 608 GB/s
+  layout payoff (banded/native)      0.99 x
+  LOCALITY payoff (clustered / scrambled native)  1.16 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.000 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.99 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.993 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 63963828932  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)
+  1048 experts, 6707200 tiles of 160 B = 1023 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 1023 MiB, so it cannot be served from cache
+
+  cover check: 6707200/6707200 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    249.7 GB/s       399.5 G-weights/s     41.1 % of 608 GB/s
+  R3 banded order    (scatter)      248.9 GB/s       398.3 G-weights/s     40.9 % of 608 GB/s
+  R4 native + mul + int8 dot        249.7 GB/s       399.5 G-weights/s     41.1 % of 608 GB/s
+  R5 native + mul + byte sum        249.4 GB/s       399.1 G-weights/s     41.0 % of 608 GB/s
+  R6 native + density, dot          248.3 GB/s       397.3 G-weights/s     40.8 % of 608 GB/s
+  R7 native + density, sum          247.0 GB/s       395.3 G-weights/s     40.6 % of 608 GB/s
+  R9 density, dot, 8 chains         246.1 GB/s       393.7 G-weights/s     40.5 % of 608 GB/s
+  R8 native tile order (cluster)    307.2 GB/s       491.5 G-weights/s     50.5 % of 608 GB/s
+  layout payoff (banded/native)      1.00 x
+  LOCALITY payoff (clustered / scrambled native)  1.23 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.005 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.99 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.986 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 52944695978  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)
+  2097 experts, 13420800 tiles of 160 B = 2047 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 2047 MiB, so it cannot be served from cache
+
+  cover check: 13420800/13420800 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    283.0 GB/s       452.8 G-weights/s     46.5 % of 608 GB/s
+  R3 banded order    (scatter)      283.9 GB/s       454.2 G-weights/s     46.7 % of 608 GB/s
+  R4 native + mul + int8 dot        284.1 GB/s       454.6 G-weights/s     46.7 % of 608 GB/s
+  R5 native + mul + byte sum        284.5 GB/s       455.1 G-weights/s     46.8 % of 608 GB/s
+  R6 native + density, dot          272.0 GB/s       435.2 G-weights/s     44.7 % of 608 GB/s
+  R7 native + density, sum          269.2 GB/s       430.7 G-weights/s     44.3 % of 608 GB/s
+  R9 density, dot, 8 chains         267.2 GB/s       427.5 G-weights/s     43.9 % of 608 GB/s
+  R8 native tile order (cluster)    357.4 GB/s       571.8 G-weights/s     58.8 % of 608 GB/s
+  layout payoff (banded/native)      1.00 x
+  LOCALITY payoff (clustered / scrambled native)  1.26 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.010 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.96 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.940 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 66240772730  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)
+  54 experts, 345600 tiles of 192 B = 63 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 63 MiB, so it cannot be served from cache
+
+  cover check: 345600/345600 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    754.1 GB/s      1005.4 G-weights/s    124.0 % of 608 GB/s
+  R3 banded order    (scatter)      657.3 GB/s       876.3 G-weights/s    108.1 % of 608 GB/s
+  R4 native + mul + int8 dot        623.4 GB/s       831.2 G-weights/s    102.5 % of 608 GB/s
+  R5 native + mul + byte sum        651.7 GB/s       868.9 G-weights/s    107.2 % of 608 GB/s
+  R6 native + density, dot          273.4 GB/s       364.6 G-weights/s     45.0 % of 608 GB/s
+  R7 native + density, sum          291.9 GB/s       389.2 G-weights/s     48.0 % of 608 GB/s
+  R9 density, dot, 8 chains         268.3 GB/s       357.7 G-weights/s     44.1 % of 608 GB/s
+  R8 native tile order (cluster)    628.9 GB/s       838.5 G-weights/s    103.4 % of 608 GB/s
+  layout payoff (banded/native)      0.87 x
+  LOCALITY payoff (clustered / scrambled native)  0.83 x
+  light arithmetic (byte-sum / dot)  1.05 x
+  dot vs byte-sum at density         0.937 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.44 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.430 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 26926617820  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)
+  109 experts, 697600 tiles of 192 B = 127 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 127 MiB, so it cannot be served from cache
+
+  cover check: 697600/697600 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    243.2 GB/s       324.2 G-weights/s     40.0 % of 608 GB/s
+  R3 banded order    (scatter)      257.9 GB/s       343.9 G-weights/s     42.4 % of 608 GB/s
+  R4 native + mul + int8 dot        242.5 GB/s       323.3 G-weights/s     39.9 % of 608 GB/s
+  R5 native + mul + byte sum        242.2 GB/s       322.9 G-weights/s     39.8 % of 608 GB/s
+  R6 native + density, dot          215.4 GB/s       287.2 G-weights/s     35.4 % of 608 GB/s
+  R7 native + density, sum          216.7 GB/s       289.0 G-weights/s     35.6 % of 608 GB/s
+  R9 density, dot, 8 chains         213.5 GB/s       284.7 G-weights/s     35.1 % of 608 GB/s
+  R8 native tile order (cluster)    336.6 GB/s       448.9 G-weights/s     55.4 % of 608 GB/s
+  layout payoff (banded/native)      1.06 x
+  LOCALITY payoff (clustered / scrambled native)  1.38 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         0.994 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.89 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.881 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 92575780400  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)
+  218 experts, 1395200 tiles of 192 B = 255 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 255 MiB, so it cannot be served from cache
+
+  cover check: 1395200/1395200 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    206.9 GB/s       275.8 G-weights/s     34.0 % of 608 GB/s
+  R3 banded order    (scatter)      202.2 GB/s       269.6 G-weights/s     33.3 % of 608 GB/s
+  R4 native + mul + int8 dot        207.2 GB/s       276.3 G-weights/s     34.1 % of 608 GB/s
+  R5 native + mul + byte sum        207.1 GB/s       276.1 G-weights/s     34.1 % of 608 GB/s
+  R6 native + density, dot          205.6 GB/s       274.2 G-weights/s     33.8 % of 608 GB/s
+  R7 native + density, sum          205.0 GB/s       273.3 G-weights/s     33.7 % of 608 GB/s
+  R9 density, dot, 8 chains         205.6 GB/s       274.1 G-weights/s     33.8 % of 608 GB/s
+  R8 native tile order (cluster)    224.5 GB/s       299.3 G-weights/s     36.9 % of 608 GB/s
+  layout payoff (banded/native)      0.98 x
+  LOCALITY payoff (clustered / scrambled native)  1.09 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.003 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.99 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.992 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 83084618156  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)
+  436 experts, 2790400 tiles of 192 B = 510 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 510 MiB, so it cannot be served from cache
+
+  cover check: 2790400/2790400 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    247.9 GB/s       330.6 G-weights/s     40.8 % of 608 GB/s
+  R3 banded order    (scatter)      253.0 GB/s       337.4 G-weights/s     41.6 % of 608 GB/s
+  R4 native + mul + int8 dot        249.3 GB/s       332.5 G-weights/s     41.0 % of 608 GB/s
+  R5 native + mul + byte sum        251.9 GB/s       335.9 G-weights/s     41.4 % of 608 GB/s
+  R6 native + density, dot          246.0 GB/s       328.0 G-weights/s     40.5 % of 608 GB/s
+  R7 native + density, sum          245.2 GB/s       327.0 G-weights/s     40.3 % of 608 GB/s
+  R9 density, dot, 8 chains         247.1 GB/s       329.5 G-weights/s     40.6 % of 608 GB/s
+  R8 native tile order (cluster)    296.1 GB/s       394.8 G-weights/s     48.7 % of 608 GB/s
+  layout payoff (banded/native)      1.02 x
+  LOCALITY payoff (clustered / scrambled native)  1.19 x
+  light arithmetic (byte-sum / dot)  1.01 x
+  dot vs byte-sum at density         1.003 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.99 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.991 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 46814616896  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)
+  873 experts, 5587200 tiles of 192 B = 1023 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 1023 MiB, so it cannot be served from cache
+
+  cover check: 5587200/5587200 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    279.8 GB/s       373.1 G-weights/s     46.0 % of 608 GB/s
+  R3 banded order    (scatter)      279.7 GB/s       373.0 G-weights/s     46.0 % of 608 GB/s
+  R4 native + mul + int8 dot        282.5 GB/s       376.7 G-weights/s     46.5 % of 608 GB/s
+  R5 native + mul + byte sum        284.7 GB/s       379.6 G-weights/s     46.8 % of 608 GB/s
+  R6 native + density, dot          264.3 GB/s       352.4 G-weights/s     43.5 % of 608 GB/s
+  R7 native + density, sum          264.9 GB/s       353.2 G-weights/s     43.6 % of 608 GB/s
+  R9 density, dot, 8 chains         262.9 GB/s       350.5 G-weights/s     43.2 % of 608 GB/s
+  R8 native tile order (cluster)    339.7 GB/s       452.9 G-weights/s     55.9 % of 608 GB/s
+  layout payoff (banded/native)      1.00 x
+  LOCALITY payoff (clustered / scrambled native)  1.21 x
+  light arithmetic (byte-sum / dot)  1.01 x
+  dot vs byte-sum at density         0.998 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.94 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.930 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 67458430324  (non-zero: loads executed)
+Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)
+  1747 experts, 11180800 tiles of 192 B = 2047 MiB, tiles_n 40 tiles_k 160 bands 5
+  L2 is 18 MiB: the pass reads 2047 MiB, so it cannot be served from cache
+
+  cover check: 11180800/11180800 tiles touched, 0 out of range  [exact cover]
+  R2 native tile order (scatter)    286.0 GB/s       381.3 G-weights/s     47.0 % of 608 GB/s
+  R3 banded order    (scatter)      289.4 GB/s       385.9 G-weights/s     47.6 % of 608 GB/s
+  R4 native + mul + int8 dot        286.4 GB/s       381.8 G-weights/s     47.1 % of 608 GB/s
+  R5 native + mul + byte sum        285.7 GB/s       380.9 G-weights/s     47.0 % of 608 GB/s
+  R6 native + density, dot          274.9 GB/s       366.5 G-weights/s     45.2 % of 608 GB/s
+  R7 native + density, sum          269.8 GB/s       359.7 G-weights/s     44.4 % of 608 GB/s
+  R9 density, dot, 8 chains         265.0 GB/s       353.3 G-weights/s     43.6 % of 608 GB/s
+  R8 native tile order (cluster)    357.5 GB/s       476.7 G-weights/s     58.8 % of 608 GB/s
+  layout payoff (banded/native)      1.01 x
+  LOCALITY payoff (clustered / scrambled native)  1.25 x
+  light arithmetic (byte-sum / dot)  1.00 x
+  dot vs byte-sum at density         1.019 x  ( >1 = hardware dot is FASTER )
+  ALU pressure  (dot at density / light) 0.96 x  (<1 = arithmetic costs bandwidth)
+  CHAIN test: density-with-8-accumulators / light-dot  0.925 x   (1.000 = the density cost was accumulator latency)
+  sink checksum 76958549272  (non-zero: loads executed)

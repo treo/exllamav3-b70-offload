@@ -64,6 +64,13 @@ static const Shape SHAPES[] = {
     {"Qwen3.8 gate/up  k=2560 n=640  K=2.5 (80 B tiles)", 2560, 640, 2.5f},
     {"Qwen3.8 gate/up  k=2560 n=640  K=3.0 (96 B tiles)", 2560, 640, 3.0f},
     {"GLM      gate/up  k=4096 n=2048 K=3.0 (96 B tiles)", 4096, 2048, 3.0f},
+    // Higher-quant Qwen3.8 checkpoints (4.05 / 5.05 / 6.05 bpw) present the same geometry with fatter
+    // tiles. The K values are the integer part of the recipe, which is what the tile word count sees;
+    // measuring them matters because the decode footprint scales with expert_bytes, so a bigger quant
+    // moves along the rate curve as well as up in bytes.
+    {"Qwen3.8 gate/up  k=2560 n=640  K=4.0 (128 B tiles)", 2560, 640, 4.0f},
+    {"Qwen3.8 gate/up  k=2560 n=640  K=5.0 (160 B tiles)", 2560, 640, 5.0f},
+    {"Qwen3.8 gate/up  k=2560 n=640  K=6.0 (192 B tiles)", 2560, 640, 6.0f},
 };
 
 #define SINK_WORDS 16384          // 64 KiB accumulator area; index is masked to this
@@ -213,9 +220,10 @@ int main(int argc, char **argv)
     // measure one geometry while the reader believed it had measured three. Unknown arguments die.
     if (argc > 1 && (argv[1][0] == '-' || atoi(argv[1]) < 0 || atoi(argv[1]) >= int(sizeof(SHAPES)/sizeof(SHAPES[0]))))
     {
-        fprintf(stderr, "usage: %s [shape 0..%zu] [MiB]\n  0 %s\n  1 %s\n  2 %s\n",
-                argv[0], sizeof(SHAPES)/sizeof(SHAPES[0]) - 1,
-                SHAPES[0].name, SHAPES[1].name, SHAPES[2].name);
+        fprintf(stderr, "usage: %s [shape 0..%zu] [MiB]\n", argv[0],
+                sizeof(SHAPES)/sizeof(SHAPES[0]) - 1);
+        for (size_t s = 0; s < sizeof(SHAPES)/sizeof(SHAPES[0]); ++s)
+            fprintf(stderr, "  %zu %s\n", s, SHAPES[s].name);
         return 2;
     }
     const int shape_ix = argc > 1 ? atoi(argv[1]) : 0;

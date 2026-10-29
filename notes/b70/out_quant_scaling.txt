@@ -1,0 +1,33 @@
+scale selftest ok (MiB/GB/s -> us)
+
+quant  exp MiB  resid GiB  S_g GiB  slots  h/live  CPU ms/tok  dev MiB/L  GB/s  us/layer  order  lpt   b=8: order  lpt
+====================================================================================================================================
+ 2.05   1.215     29.16    19.06  334.6  100.0%/356L    0.00       12.1    292        44     264   260        338   315  lpt
+ 2.68   1.563     37.51    18.25  249.1  100.0%/512L    0.00       15.6    292        56     263   261        343   330  lpt
+ 4.05   2.411     57.87    18.26  161.5   94.8%/512L    1.34       22.9    294        81     265   263        358   347  lpt
+ 5.05   3.009     72.23    17.91  126.9  100.0%/258L    0.00       30.1    290       109     281   275        434   398  lpt
+ 6.05   3.608     86.58    17.56  103.8   90.4%/500L    3.68       32.6    243       141     269   268        547   782  order/tie
+What changes with bits, and what does not
+* expert_bytes drives everything. From 2.68 to 6.05 bpw it grows 2.4x, so with the same two slices the
+  resident COUNT per layer falls 512 -> ~104, h falls, and the CPU residue - the term that makes the
+  fair split harmful - becomes the binding one.
+* The matched rate does not collapse: K=4/5/6 tiles measure 207-295 GB/s scattered, the same band as
+  K=2.5/3.0, so the B70's per-byte cost grows only because there are more bytes per expert. (One K=6
+  point read 754 GB/s, above the 674 GB/s copy peak, and is discarded rather than believed.)
+* The parent's duty cycle stays 31-45% across all five quants because the recipe does not quantise the
+  streamed non-expert weights in proportion to the experts. That is why §2.1a's "3090 is latency-bound,
+  with spare bandwidth" holds at every recipe on this model, not just at 2.68.
+* h/live column: h is the pick-mass upper bound from the decayed cumulative profile, `NNNL` is how many
+  experts have a non-dust count. Where slots exceed the live set the 100.0 % readings are honest (every
+  expert that ever fires is homed); where slots fall below it (4.05, 6.05) the residue is real, and the
+  CPU term that follows is what decides the policy contest below.
+* Banding gets mildly more attractive as tiles fatten: banded/native reaches 1.06-1.07x at 64-128 MiB
+  for K=5/6 versus 0.96-1.05x at K=2.5/3.0. Still inconsistent in sign across footprints, so it stays
+  an E4c question rather than a decision - but "repacking buys nothing" was measured on thin tiles, and
+  the fatter the tile, the more per-item contiguity should matter. That trend is now on the record.
+* The §2.1a policy rule survives and predicts itself: the fair split (lpt) wins at b=8 for every quant
+  whose residue is zero or dust-small (2.05/2.68/5.05, and 4.05 by a narrow 3%), and loses at 6.05
+  (order 547 vs lpt 782 us/layer) exactly where a real 9.6% CPU residue has to be protected. So one
+  sentence covers all recipes: pick the rule by whether the residue term binds, which is what
+  EXL3_MOE_B70_BALANCE=auto does, and its input h should be read against the LIVE expert count, not the
+  dust-inflated upper bound.

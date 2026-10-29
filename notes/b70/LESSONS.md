@@ -290,7 +290,28 @@ Three siblings of the same mistake, all found only after writing the first versi
 The general rule these probes should have enforced on themselves: before multiplying a measured rate by a
 quantity, verify that the measurement was taken *at that quantity*.
 
-## 20. "The device is busy" is two different claims; conflating them gave the 3090 an 8× too small expert slice
+## 20. A rate above the card's copy peak is a bug report, and a 100 % hit rate can be dust
+
+Two catches from scaling the analysis to the higher-quant Qwen3.8 recipes, both of which would have
+passed silently into the design:
+
+* The K = 6 shape at a 64 MiB working set reported **754 GB/s** — above the 674 GB/s measured device-copy
+  peak and above the 608 GB/s spec. Nothing else was wrong: the cover check passed, the sink moved. It is
+  simply an impossible number, so the row is dropped from `BANDS["K6.0"]` with the reason written down
+  rather than averaged in. Every bandwidth table should carry its physical ceiling next to it, because the
+  failure mode of a cache/TLB artifact is a *better* result, which nobody questions.
+* `h` came out exactly **100.0 %** for the 5.05 bpw recipe, which cannot be true when the two device
+  slices hold 353 of 512 experts. The profiles are decayed cumulatives, and the ~250 experts that never
+  fire carry counts around 1e-27, so pick mass rounds to 1.0 — the same dust already documented as "`h`
+  is an upper bound", but here it silently flipped a *policy* conclusion (no residue ⇒ balance; real
+  residue ⇒ hottest-first). The tool now prints the count of live experts next to every `h`
+  (`100 %/258L`), which makes the two cases distinguishable at a glance.
+
+The general shape of both: a metric that saturates at a bound (peak bandwidth, probability 1) is not
+informative near that bound, and the fix is to print the underlying count alongside it, not to trust the
+normalised value.
+
+## 21. "The device is busy" is two different claims; conflating them gave the 3090 an 8× too small expert slice
 
 Asked how the 3090's non-expert work affects placement, the intuitive answer is "little VRAM and little
 bandwidth left, so few experts, and they had better be cheap to reach". Neither half survived the byte
@@ -312,7 +333,7 @@ must be resident and whether it is read per token. Big lookup tables (n-gram, em
 MoE router caches) break the intuition that resident bytes ≈ streamed bytes, and either equality assumed
 as the other produces confident, wrong capacity plans.
 
-## 21. If an analysis tool reports "no difference" everywhere, debug the tool before believing the finding
+## 22. If an analysis tool reports "no difference" everywhere, debug the tool before believing the finding
 
 The first version of `plan_parent_budget.py` printed `tie` for all 54 placement comparisons. The
 plausible reading was "placement order does not matter", which is the kind of conclusion that gets
@@ -327,7 +348,7 @@ the first run — and any sweep where a varied parameter has zero effect is trea
 script, not as a finding about the system. After the fix the same code shows 13 % gaps in one direction
 and 20 % in the other, which is a far more interesting and far more believable answer.
 
-## 22. When a model and a measurement disagree by 30×, check the model's units first
+## 23. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed
