@@ -181,6 +181,39 @@ WHAT THIS SETTLES
   including GLM's n=4096/tn=256 and Qwen3.5/3.6's tn=32, are unmeasured, and rows=1 losing means the
   engine carries two code paths that both need Gate A in CI.
 
+## Was "prepare the operands once at load time" measured? Yes - it is rev D, and it loses
+
+rev D *is* the prepare-once design: A pre-expanded in DRAM so the kernel's operand-assembly cost is
+literally zero. Swept to its best split-K (min of 3, burst mode) against rev E's best and rev C:
+
+    rows | revD best (assembly FREE, bytes 10.7x) | revE best (assembly on the fly) | rev C
+       1 |                     135.8 us (ks=1)    |      95.5 us                    |  76.8 us
+       4 |                     137.2 us (ks=1)    |      99.8 us                    | 112.5 us
+       8 |                     138.5 us (ks=1)    |     108.8 us                    | 251.8 us
+      16 |                     141.8 us (ks=1)    |     122.2 us                    | 483.7 us
+
+rev E beats the free-assembly version at every row count (x1.16 to x1.42), because rev D is entirely
+byte-bound: 62.5 MiB of A at rev D's own measured 484 GB/s marginal is 135.4 us, versus 135.8 us
+degistered at rows=1 - the math is completely hidden under the streaming. Even at the 674 GB/s copy
+peak the floor is 97.2 us, which still loses to rev E everywhere and to rev C at rows=1.
+
+Note also what rev E already is: the unpack runs ONCE per weight per launch regardless of rows - that is
+precisely why its curve is flat. So preparing at load time buys no extra amortization; it removes only
+the ~5.8-slot unpack and charges 10.7x bytes for it. Capacity makes that unaffordable: 4 B/weight turns
+Qwen3.8@2.68 from 36.33 GiB into ~388 GiB against 32,656 MiB of VRAM, collapsing the resident expert
+share from h ~ 0.98 to ~ 0.08 and inverting the whole placement plan; a decoded *cache* is no better,
+since L2 is 24.0 MiB (measured) and holds ~3.8 experts of expanded bytes. Cheaper prepared forms exist
+(10-bit decoded values need >= 1.25 B/weight, e.g. a u4+u8 plane split at 1.5 B/weight with two mads,
+still exact) but 3.3-4x bytes still cuts h to ~0.25.
+
+The idea that survives is not expansion but a **same-size repack**: the trellis packs 8 windows into
+3K bits, so a lane's windows straddle dword boundaries and cost 3 strided loads plus shifts. Reordering
+the ring within a tile - still K bits per weight, zero extra bytes, zero extra DRAM - so one wide load
+covers a lane's windows attacks the ~5.8 fixed slots instead of the ~2.7 assembly slots. If the fixed
+cost fell to ~3, rev E would cost ~5.5 slots/weight and beat rev C at rows=1 too, collapsing the engine
+to one decode schedule. Price: the B70's bytes stop being interchangeable with the 3090/CPU trellis
+kernels, plus a load-time pass - the E4c trade-off, so it must clear that bar. Gate E28.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -189,5 +222,8 @@ WHAT THIS SETTLES
 
     # rev E: A assembled from trellis bytes; the sourcing flags are the 2x2 experiment above
     DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas2 /tmp/gemv_dpE10 21 <rows> <ks>
+    # devinfo: cache hierarchy measured (global 32656 MiB, SLM 128 KiB/group, L2 24 MiB, 256 CUs)
+    icpx -fsycl -O2 -o /tmp/devinfo devinfo.cpp && /tmp/devinfo
     DPAS_NO_MAD=1 ./probe_dpas2 ...       # unpack + assembly only (prices the assembly)
+    DPAS_NO_UNPACK=1 ./probe_dpas2 ...    # matrix path only
     DPAS_NO_UNPACK=1 ./probe_dpas2 ...    # matrix path only
