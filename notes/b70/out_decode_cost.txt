@@ -2,8 +2,9 @@ plan_decode_cost.py - the measured B70 decode cost model that replaces "bytes / 
 
 Why this module exists. plan_operating_point.py and plan_concurrency.py computed B70 decode time as
 `expert_bytes / rate(matched footprint)`, sampling a rate curve measured with memcpy-shaped launches. That
-model was retired by measurement: the real GEMV is instruction-bound, not bandwidth-bound, and its time is
-independent of the quantization recipe (Qwen3.8 across K=2..6: 73.6-74.8 us for identical weight counts,
+model was retired by measurement: the real GEMV was instruction-bound for every kernel up to rev H, and its
+time is independent of the quantization recipe (Qwen3.8 across K=2..6: 73.6-74.8 us for identical weight
+counts,
 b70-kernels.md 2b/2c). Two kernel families now exist, both bit-exact against a Python reference:
 
   dp4a   probe_gemv.cpp rev C with -DGEMV_KCONST  (compile-time trellis K)
@@ -16,20 +17,31 @@ projection time divided by E, warm (>=15 s sustained load) and interleaved min-o
 configuration. Two windows were kept where they disagree, because they sometimes disagree by 20 %:
 see `SPREAD`. Cost is per weight, not per byte: these are the same weights at any trellis K.
 
-Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X).
+Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X, rev H, and
+rev I = probe_dpas6.cpp, the current fastest at every measured point). Dispatch is by recipe as well as rows:
+the DPAS families require K <= 5, so denser recipes fall back to dp4a.
 
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 
- rows  dp4a us/expert-layer  dpas us/expert-layer   dispatch  dpas/dp4a
-    1                 11.76                 12.57       dp4a      1.07x   dpas_reg  12.12
-    2                 16.23                 11.69       dpas      0.72x   dpas_reg  12.47
-    4                 30.99                 11.71       dpas      0.38x   dpas_reg  12.53
-    8                 69.27                 13.40       dpas      0.19x   dpas_reg  13.65
-   16                134.97                 18.53   dpas_reg      0.14x   dpas_reg  15.29
+ rows      dp4a   rev G+X   rev H+X     rev I      dispatch
+    1     11.76     12.57     12.12      6.13         rev I
+    2     16.23     11.69     12.47      6.47         rev I
+    4     30.99     11.71     12.53      6.71         rev I
+    8     69.27     13.40     13.65      7.53         rev I
+   16    134.97     18.53     15.29      9.43         rev I
 
-Crossover: dp4a wins at rows=1 by ~5 %; the DPAS path wins from rows=2. Per-expert-layer cost is
-flat in rows for the DPAS path (11.2 -> 17.8 us from 1 to 16 tokens) and grows ~11x for dp4a,
-which is the whole reason the schedule exists.
+One kernel now wins at every measured batch: rev I (gather routing) is faster than dp4a even at
+rows=1, so the b=1 dp4a exception and the rows>=16 rev H exception are both deleted. The
+exception that survives is the recipe: K > 5 has no DPAS path at all (the unpack
+reads four windows from one funnel-shifted 32-bit word, needing 3K + 16 <= 32), so the 6.05 bpw
+recipe dispatches to dp4a and pays ~2x. Rows=2 is interpolated for the DPAS families; the
+measured rows set is (1, 2, 4, 8, 16) and nothing here extrapolates past 16.
+
+Binding constraint now: rev I runs the gate projection at 318 GB/s effective (5.86 MiB in 19.4 us)
+against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - the first kernel in
+this line within ~1.5x of the memory wall. Doubling its arithmetic still costs more (+42 %) than
+doubling its gathers (+17 %), and extra split-K now hurts, so the next lever is instructions per
+window, not routing and not parallelism.
 
 rows > 16 is outside the measured set; the DPAS path uses two M=8 fragments above 8 rows and its
 cost slope is still rising at 16, so quoting a 64- or 256-token decode number from this table

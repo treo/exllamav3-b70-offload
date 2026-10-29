@@ -620,12 +620,18 @@ measured rate curve at the matched footprint:
   42.5) → ×2.1 of the 250 µs parent window at 4× batch; b=1 ≈ 113–139 µs, parity with dp4a from one kernel
   family. All 27 new configurations bit-exact; the K ≤ 5 limit still excludes the 6.05 bpw recipe, and
   absolute times in this line carry ±15–20 % between warm windows (ratios are within-window).
-* **Schedule, updated for rev H (§2c 13r): three-way, not two.** The sentence above ("dp4a at b=1 and one
-  DPAS kernel at b ≥ 2") held for rev G alone and is now superseded: with the expert grid ported onto rev H —
-  ESIMD `xmx::dpas` fed from registers, no SLM, no barriers, no B loads — the DPAS-with-SLM path is 4–9 %
-  ahead at rows 1–8 and rev H wins ×1.28/×1.43 at rows=16 (gate 44.2 vs 56.4 µs, down 64.7 vs 92.7), so
-  dispatch is **dp4a at b=1 · rev G+X at rows 2–8 · rev H+X from rows ≈ 16**, and b=16 layer time falls to
-  173.1 µs from 205.5. The ISA census behind it (once `NEO_CACHE_PERSISTENT=0` let the dumps happen):
+* **Schedule, final as of rev I (§2c 13u): one kernel, with a recipe exception rather than a batch one.**
+  Successive revisions had produced a three-way dispatch (dp4a at b=1 · rev G+X at rows 2–8 · rev H+X from
+  rows ≈ 16); rev I — rev H's structure with the ring words pulled by `esimd::gather` instead of register
+  `iselect` — is ~2× faster than both predecessors at every measured point (gate rows 1/4/8/16: 19.4 / 20.4 /
+  21.7 / 25.7 µs vs rev H 40.5 / 42.4 / 43.7 / 45.5 and rev G 36.6 / 40.0 / 41.8 / 61.9; down 22.6 / 26.3 /
+  31.9 / 43.0), so the batch exceptions are deleted, not re-tuned. Per expert-layer the model now carries
+  6.13 → 9.43 µs across rows 1→16, giving **layer time 61.6 µs at b=1** (from 114.6 with rev G+X, 117.1 with
+  rev H+X, 173.1 at rows 16) — ~4× inside the 250 µs measured parent window, and 318 GB/s effective against
+  the 484–674 GB/s ceilings, i.e. the first kernel here within ~1.5× of the memory wall. **The surviving
+  exception is the recipe:** the DPAS families' unpack needs 3K + 16 ≤ 32, so K > 5 (the 6.05 bpw recipe) has
+  no DPAS path and falls back to dp4a at roughly 2× the cost. The ISA census that anchored the path here (once
+  `NEO_CACHE_PERSISTENT=0` let the dumps happen):
   rev G+X 906 static instructions, 48 `store.slm.d32`, 108 syncs, 11 spill references; rev H+X 591, **0 SLM
   stores, 20 syncs, 0 spills**. Rev H's largest opcode class is `mov` (141), i.e. moving products into the DPAS
   operand image, and the XMX arithmetic itself is only 0.8–1.8 µs of a ~39 µs kernel. The tempting inference —

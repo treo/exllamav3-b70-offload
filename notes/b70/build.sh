@@ -28,5 +28,8 @@ echo "built probe_dpas4"
 # JIT-compiling all of them.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas5 probe_dpas5.cpp
 echo "built probe_dpas5"
+# rev I (probe_dpas6): rev H with esimd::gather ring routing - the current fastest decode kernel.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas6 probe_dpas6.cpp
+echo "built probe_dpas6"
 icpx -fsycl -O2 -shared -fPIC -o libb70shim.so b70_shim.cpp
 echo "built libb70shim.so"
