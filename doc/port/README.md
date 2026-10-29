@@ -1,5 +1,10 @@
 # Porting the MoE offload to the Intel Arc Pro B70
 
+**Status: v1.0 — final for building against.** [`b70-architecture.md`](b70-architecture.md) §12 lists
+every decision as either *closed on evidence* (do not re-litigate during the build) or *open behind a
+named gate* (do not assume it). Two of the three things that could have reshaped the design were
+measured away in this directory; the third (locality) reshaped the kernel rules, not the architecture.
+
 Design and architecture for running the offloaded MoE expert computation on an **Arc Pro B70**
 (Xe2-HPG / BMG-G31, 32 Xe cores, 31.9 GiB @ 608 GB/s) instead of, or alongside, the x86 worker.
 
@@ -26,17 +31,19 @@ material for the card is symlinked at [`doc/b70/`](../b70/) (cheat sheets, the L
 
 | | CPU offload today (RTX 3090 + Ryzen 9 5950X) | B70 offload (measured or projected) |
 |---|---|---|
-| one cold expert read at decode | 403 µs/layer (Qwen3.8, 15 threads) | **~35 µs/layer** (projected from 608 GB/s and the ALU budget) |
+| one cold expert read at decode | 403 µs/layer (Qwen3.8, 15 threads) | **54–63 µs/layer** at the measured read rate, 31–49 µs if the kernel obeys the locality rules (**[M]**, `probe_rates`) |
 | handshake floor, job with nothing to do | 20 µs/layer | **5.0–6.3 µs** (submit + flag) / **3.2 µs** (resident doorbell) |
 | expert bytes must cross the link for prefill | yes — 28.6 % of device time is that DMA | **no** for experts homed on the B70; yes for the residue, priced per use (§4a) |
 | pinned ↔ device bandwidth | 13.3 GB/s (Gen4 ×8) | **14.4 GB/s** |
 | activation payload per decode layer | 5.1 KiB down, 10 KiB up | same, and it hides entirely |
-| GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — and now 4–7× the offload cost |
+| GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — and now 3–8× the offload cost on Qwen, **not** on GLM (241 µs/layer of expert reads) |
+| what the trellis tile walk actually sustains | — (the CPU is DRAM-bound at 45 GB/s) | **287–313 GB/s scattered, 321–492 GB/s clustered**; tile repacking buys **0.95–1.00×**, work-item ordering buys **1.03–1.71×** |
+| is the decode arithmetic affordable? | 7-op VNNI fallback costs ~20 % on x86 | yes, and cheaply: realistic density costs 1–4 % of bandwidth, hardware dot vs manual byte-sum ≤1 % |
 
 Oversized models are covered too, and they are a different problem: at 108.8 GiB of routed-expert
 trellis (GLM-5.3-Flash@3.05, present on this box) only 29 % of the experts fit the B70, so the B70
 tier becomes a **cache** and the port's problem becomes hit-rate engineering — a 655 µs admission
-against a 199 µs CPU compute makes "admit on the third use" roughly size-independent, and the
+against a 199 µs CPU compute makes "admit on the fourth use" roughly size-independent, and the
 prefetchable link bandwidth sets a hard floor (`h_min`, 92 % there) below which no policy converges.
 See [`b70-architecture.md` §4a](b70-architecture.md).
 
@@ -74,24 +81,29 @@ them:
 
 ## Start here, next session
 
-Phase 0 is nearly done (the probes in [`notes/b70/`](../../notes/b70/README.md) answer the
-transport and sharing questions). What is left before any of the design is exercised end to end:
+Phase 0 and phase 0b are done: the probes in [`notes/b70/`](../../notes/b70/README.md) answer the
+transport, sharing, store-discipline, bandwidth, layout and arithmetic questions, and
+`plan_placement.py` answers the placement questions from real routing counts (`out_placement.txt`).
+What remains before the design is exercised end to end:
 
-1. `notes/b70/probe_gemv.cpp`: the `Recipe A` trellis decode for one 16×16 tile, diffed against
+1. `notes/b70/probe_gemv.cpp` — the `Recipe A` trellis decode for one 16×16 tile diffed against
    `tests/testlib/trellis.py` on the device, plus the K=4 vector table from
-   `doc/b70/EXL3 mul1 Trellis Unpacking…` — this is Gate B′6 and it needs no engine, so it is the
-   cheapest place to find out whether the ALU budget (`~9 ops/weight`) is real on this compiler.
-2. Same file, second kernel: does `dot_acc` / `dot_4x8packed_us_int` become **one** instruction
-   (`IGC_ShaderDumpEnable=1`)? Open question 2, and it gates the decode-vs-XMX tier boundary.
-3. `exllamav3/exllamav3_ext/b70/` + `ext_b70.py`: the torch-free C-ABI engine library, with a
-   `b70_engine_submit(job_desc)` that does nothing but DMA the slot message back and forth and
-   publish `done`. Wire it to `MoeB70Host` in the child process and run the Level-D liveness tests
-   with a *null* kernel: if an all-zero output folded into the routed sum still passes the protocol
-   tests, the plumbing is right and only the arithmetic is missing.
-4. Then the real GEMV (Gate B′1/B′2), and only then `-mb`.
+   `doc/b70/EXL3 mul1 Trellis Unpacking…` (Gate B′6), and then the *fragment* kernel measured in both
+   orderings from b70-kernels.md §3a. That single file settles Gates B′6, E4 and E4b, and it is the
+   last measurement that can invalidate the decode cost model.
+2. `exllamav3/exllamav3_ext/b70/` + `ext_b70.py` — the torch-free C-ABI engine library, with a
+   `b70_engine_submit(job_desc)` that does nothing but DMA the slot message in, wait, and publish
+   `done` from the pinned slot. Wire it to `MoeB70Host` in the child process and run the Level-D
+   liveness tests with a *null* kernel: if an all-zero output folded into the routed sum still passes
+   the protocol tests, the plumbing is right and only the arithmetic is missing.
+3. The real GEMV (Gates B′1/B′2), then `-mb`, then the row/home partition (which today is only
+   validated against decayed profiles — E14 needs a fresh trace, ideally dumped from an existing
+   `-mcs` run before any B70 code exists at all).
 
 Rules to keep while doing it (`notes/b70/LESSONS.md` is the reason for each):
-no `.wait()` on a job path; DMA in, fenced stores out; no `sycl::atomic_ref` on the shared region;
-explicit `i[0]` indexing; assert on every payload word, never on a return code or a flag alone;
-pin the placement profile before timing anything; sample board power with the engine parked as the
-baseline.
+no `.wait()` on a job path; DMA in, fenced stores out; no `sycl::atomic_ref` on the shared region at
+any scope; explicit `i[0]` indexing; assert on every payload word, never on a return code or a flag
+alone; grid order = memory order and one contiguous VRAM block per layer; pin the placement profile
+before timing anything; sample board power with the engine parked as the baseline; and for any
+microbenchmark, prove the bytes were read and the result was consumed before believing the rate
+(`LESSONS` 15).

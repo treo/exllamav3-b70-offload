@@ -31,18 +31,21 @@ same inputs).
 
 | resource | figure | consequence |
 |---|---|---|
-| VRAM read | 608 GB/s peak; ≥420 GB/s is the target for a decode GEMV **[P]** | at K=2.5 that is 2.4·10¹¹ weights/s |
-| lanes × clock | 4096 × 2.8 GHz = 1.15·10¹³ lane-ops/s | **≈ 9 simple ops per weight** before decode is the bottleneck |
+| VRAM read, measured on this exact access pattern | **287–313 GB/s scattered, 321–492 GB/s clustered** (608 GB/s spec; `probe_rates`, **[M]**) | 779–919 G-weights/s scattered, 855–1574 clustered; the spread is *ordering*, not layout — §3a |
+| lanes × clock | 4096 × 2.8 GHz = 1.15·10¹³ lane-ops/s | ≈ 9 simple ops per weight before decode turns ALU-bound; **[M]** dense arithmetic costs only 1–4 % of bandwidth, so decode sits on the bandwidth side of that line |
 | XMX | 183 TFLOP/s fp16, 367 TOPS int8 **[M]** (`b70-bench`) | prefill is XMX-bound only above ~64 rows/expert |
-| SLM / L1 | 128 KiB per Xe core (driver-reported **[M]**), 18 MiB L2 | a K=4 tile is 128 B; a 16×16-tile band fits with room |
+| SLM / L1 | 128 KiB per Xe core (driver-reported **[M]**), 18 MiB L2 | a Qwen3.8 decode job reads ~12 MiB, comparable to L2 — see §3a item 4 |
 | subgroup | 16 and 32; DPAS wants 16 | lane = output column = exactly the trellis permutation (§2.3) |
 
-So: the decode kernel lives or dies on **ops per weight**, and the extraction recipe is where those
-ops are spent. `dot_4x8packed_us_int` (one op per weight) versus a manual byte-sum (7 ops) is the
-difference between ALU-idle and ALU-bound. Verifying that the compiler emits one instruction for it
-is a Phase-1 gate, not an assumption: `sycl::ext::oneapi::dot_acc` exists in the installed headers
-and `sycl::ext::intel::esimd` has its own form; the ISA dump (`IGC_ShaderDumpEnable=1`) decides
-which is used, with the manual byte-sum as the correctness-preserving fallback.
+The earlier draft of this table said the decode kernel "lives or dies on ops per weight" and made
+verifying the int8 dot's instruction count a phase-1 gate. Measurement overturned that: at realistic
+density (extract + multiply + accumulate, ~10 weights per u32) the loop loses only **1–4 %** of
+bandwidth versus the same reads with no arithmetic, and `dot_acc` versus a manual 3-mask/3-shift/3-add
+byte sum differ by **≤1 %** (**[M]**, `probe_rates` R6/R7). Decode on this card is bandwidth-bound, so
+the dot earns its place on instruction count and energy, not on throughput, and it is no longer a
+design risk. Op count still matters where arithmetic is heavy against bytes: the XMX routes (§4), and
+Recipe A (~6 ops/weight) versus Recipe B (~4) on the half-rate layers, where 3.2 weights per byte
+leave less headroom — re-measure at real density in phase 2 rather than assuming either.
 
 Three rules from the probes, because all three fail silently: index with `i[0]` and cast
 explicitly (`p[i] = seed + i` on a `sycl::id<1>` compiles, runs, reports success and stores nothing —
@@ -107,6 +110,35 @@ for 256 vector engines even at 4 slots.
   measurement, not by analogy.
 * Traffic model to check against: `experts × expert_bytes / 420 GB/s [P]` + `~10 µs` handshake, i.e.
   ~38 µs for 8 experts at 1.465 MiB. Gate E4 sets the floor on the measured read rate.
+
+## 3a. Locality: the one lever the measurements actually found
+
+`probe_rates` compared, on identical bytes and identical tile geometry, a work-item→tile mapping that
+spreads consecutive items across the tier against one that keeps them adjacent: **1.03–1.71×**
+(287→492 GB/s on Qwen3.8's gate/up geometry; 313→321 on GLM's, whose wider `tiles_n` scatters even
+the "adjacent" mapping). Nothing about the trellis layout changed. So the kernel and the allocator,
+not a swizzle, carry this:
+
+1. **Grid order = memory order.** Schedule so that concurrently running work-items are consecutive
+   fragments of the *same* expert (item id innermost in `kt`, then band, then expert). The reverse —
+   expert innermost, the natural shape for a work-stealing queue — is precisely the scattered case the
+   probe measured.
+2. **A layer's experts are one contiguous block in B70 VRAM**, laid out in expert order at upload, not
+   allocated per expert (which scatters a job's 8 experts across a 32 GiB heap and forfeits the win
+   even when the kernel orders itself perfectly). A loader constraint, and a free one.
+3. **One work-group per (expert, band range)** so its items walk a contiguous k-major run: groups,
+   not lanes, are the locality unit.
+4. **Hot-set reuse is plausible and unmeasured.** A Qwen3.8 decode job reads ~12 MiB against an 18 MiB
+   L2, so a token reusing much of the previous token's expert set could be served partly from cache,
+   putting the achieved rate *above* the clustered figure. E4 therefore reports the real GEMV under
+   both first-touch and repeated-expert conditions.
+5. Cache-control hints (`annotated_ptr`, evict-first weight reads, `sycl::prefetch`) are
+   **second-order** to 1–3 and are measured as an increment on top of them, never instead of them.
+
+The failure mode this section exists to prevent: writing the GEMV first, measuring 290 GB/s in phase
+2, and finding the cause was one line of grid ordering. E4 is judged against both regimes — below
+300 GB/s is treated as an ordering bug, 300–420 acceptable, above 420 evidence that locality *and*
+probably L2 reuse are working.
 
 ## 4. Prefill kernels (`rows ≥ 32`): feeding XMX
 

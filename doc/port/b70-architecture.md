@@ -114,17 +114,21 @@ it also means eviction from `S_b` has nowhere to go, so the tier is then a stati
 
 ### 2.2 Weight layout on the B70
 
-Native tile order first (the format's own order, `doc/prep/mul1-trellis.md` §2). It has three
-advantages: no repack pass at load, no un-swizzle anywhere, and the bytes are interchangeable with
-the GPU's kernels, so an expert can be streamed B70→3090 (or the reverse) with no translation.
+**Settled by measurement (`notes/b70/probe_rates.cpp`, `out_rates.txt`): the B70 stores experts in
+native tile order, full stop.** Banded repacking (the GPU analogue of the CPU's band-8, k-major along
+`n`) was measured against native on three geometries and gained **0.95–1.00×** — nothing, and
+slightly negative where `tiles_n` is large. So there is no repack pass at load, no un-swizzle
+interaction, and the bytes stay interchangeable with the 3090's kernels, which is what lets an expert
+move between homes without translation. `exl3_b70_tile_layout(K)` still exists as the single place
+the layout is *reported* (Gate B4's rule that no second table may appear), but its answer is `native`
+for every K, and a future change must come with a measured win, not an analogy to the CPU tiers.
 
-A B70-specific repack (k-major banding along `n`, the GPU analogue of the CPU's band-8) is a
-*measured optimisation*, not a prerequisite: Xe2's 128-byte cache lines and 18 MB L2 make a
-128–256 B strided tile read much less costly than it is on x86, and `annotated_ptr`/evict-first
-cache controls recover most of the difference. If it is adopted, the rule must live in exactly one
-place — `exl3_b70_tile_layout(K)` — be *reported* to every consumer (upload, spill read, streamed
-transfer), and never be conflated with `exl3_moe_cpu_swizzle_group(K)`: the arena and the B70 copy
-of the same expert may legitimately differ. Acceptance Gate B4 applies verbatim.
+What *does* move the number by 1.03–1.71× is **locality**, not permutation: the same tile reads run
+at 287–313 GB/s when consecutive work-items land on scattered tiles and 321–492 GB/s when they land
+consecutively. That is a kernel-scheduling and allocation property, so it is specified in
+[b70-kernels.md](b70-kernels.md) §3a (keep a layer's experts contiguous in B70 VRAM; give one
+work-group one expert's fragment range; never interleave experts across the items of a wave) and it
+is what gate E4 is written against.
 
 ### 2.3 Activations
 
@@ -323,20 +327,36 @@ already crossing to that home costs the marginal weight-read only. Re-deciding p
 the CPU path's promote hook cost 2-3 ms/token.
 ```
 
-Constants on this box: `link_rate` 14.4 GB/s **[M]**, `notify` 3.2 µs resident / 5–8 µs per
-submission **[M]**, `vram_rate` ≤608 GB/s (target ≥70 % for the GEMV, i.e. ≥420 GB/s, to be
-measured), `xmx_rate` 183 TFLOP/s fp16 / 367 TOPS int8 **[M]** via `b70-bench`, `parent_gpu_work`
-165 µs/layer (Qwen3.5) and ~250 µs/layer (Qwen3.8) **[M, doc/prep]**.
+Constants on this box, as measured (see `notes/b70/out_rates.txt` and `notes/b70/README.md`):
+`link_rate` 14.4 GB/s **[M]**; `notify` 3.2 µs resident / 5–8 µs per submission **[M]**;
+`vram_rate` for the decode read pattern **287–313 GB/s scattered, 321–492 GB/s clustered** **[M]**
+(47–81 % of the 608 GB/s spec; 779–919 G-weights/s scattered, 855–1574 clustered) — which replaces the earlier
+"target ≥420 GB/s" projection, and the *clustered* end is only reachable if the kernel keeps one
+expert's tiles together (b70-kernels.md §3a); `xmx_rate` 183 TFLOP/s fp16 / 367 TOPS int8 **[M]**
+(`b70-bench`); `parent_gpu_work` 165 µs/layer (Qwen3.5) and ~250 µs/layer (Qwen3.8) **[M, doc/prep]**,
+GLM unmeasured (E10 measures it first).
+
+The read-rate measurement also settles the arithmetic question for decode: at realistic density
+(window extract + multiply + accumulate, ~10 weights per word) the loop loses only **1–4 %** of
+bandwidth versus the same reads with no arithmetic, and the hardware int8 dot and the manual
+byte-sum differ by **≤1 %**. Decode on this card is bandwidth-bound, so neither the dot's availability
+nor Recipe A-versus-Recipe B decides decode throughput — locality and job composition do. (The dot
+still matters for the XMX prefill routes and for power, and `spillMemSize`/ISA checks stay in the
+harness; what no longer gates the design is "what if `dot_acc` becomes seven ops".)
 
 What the model says at a glance:
 
-* Decode: with 8 experts × 1.465 MiB read at 420 GB/s (28 µs) plus a ~10 µs handshake, the B70 job
-  is 4–7× shorter than the window the parent gives it. The knob that matters is therefore *how many
-  experts land on the B70*, not how the handshake is built — until the handshake stops being hidden.
+* Decode, at the **measured** read rates, per layer: Qwen3.8's 49.2 M weights (10 picks × 4.92 M)
+  take **54–63 µs** scattered, ~31–49 µs if the kernel achieves the clustered end — against a parent
+  window of ~250 µs/layer, so the offload is hidden with a 4–8× margin. Qwen3.5 is proportionally
+  cheaper. **GLM is the hard case: 201 M weights per layer is ~241 µs**, and its geometry shows almost
+  no locality gain (1.03×), so whether GLM's offload is hidden depends entirely on GLM's own
+  per-layer parent work (45 layers at H=4096, 64 heads) — which E10 must measure before anyone
+  promises "free at decode" for it. The claim is therefore conditional per model, not universal.
 * Prefill is link-bound at ~2048 rows unless `sz_out` drops to fp16 or the row split keeps more work
   on the 3090; the model gives the crossover for both, and the harness measures which the box lands on.
-* Adding a *second* B70 (32 GiB each) would make Qwen3.8 fully `S_b`-resident; the ring/protocol
-  already supports several workers because each gets its own `MoeCpuHost`-shaped object.
+* Adding a *second* B70 (32 GiB each) would make Qwen3.8 fully resident and GLM 59 % resident; the
+  ring/protocol already supports several workers because each gets its own `MoeCpuHost`-shaped object.
 
 ---
 
@@ -350,89 +370,116 @@ only, since an MTP/draft head is a separate capacity consumer with its own rate 
 experts are 4 bpw against the text model's 3 bpw, 0.38 GiB of them, and every verify step touches
 them):
 
-| checkpoint | MoE layers × E | expert block | routed-expert trellis | fits one B70 | per-layer quota | `h_min` |
-|---|---|---|---|---|---|---|
-| Qwen3.5-35B @3 bpw | 40 × 256 | 1.125 MiB | 11.25 GiB | 100 % | — (surplus) | n/a |
-| Qwen3.6-35B-A3B @2.49 | 40 × 256 | 1.125 MiB | 9.09 GiB | 100 % | — (surplus) | n/a |
-| Qwen3.8-FN @2.05 | 48 × 512 | 1.17 MiB | 28.12 GiB | 100 % | — (surplus) | n/a |
-| Qwen3.8-FN @2.68 | 48 × 512 | 1.465 / 1.758 MiB | 36.33 GiB | **87.8 %** | 387 of 512 | 68.8 % |
-| Qwen3.8-FN @4.05 | 48 × 512 | 2.34 MiB | 56.25 GiB | 56.7 % | 290 of 512 | 76.6 % |
-| Qwen3.8-FN @5.05 | 48 × 512 | 2.93 MiB | 70.31 GiB | 45.4 % | 232 of 512 | 81.2 % |
-| Qwen3.8-FN @6.05 | 48 × 512 | 3.52 MiB | 84.38 GiB | 37.8 % | 194 of 512 | 84.4 % |
-| GLM-5.3-Flash @3.05 | 43 × 288 | 9.00 MiB | **108.84 GiB** | 29.3 % | 84 of 288 | **92.4 %** |
+| checkpoint | MoE layers × E | expert block | routed-expert trellis | fits one B70 | experts per layer resident¹ |
+|---|---|---|---|---|---|
+| Qwen3.5-35B @3 bpw | 40 × 256 | 1.125 MiB | 11.25 GiB | 100 % | all 256 (surplus) |
+| Qwen3.6-35B-A3B @2.49 | 40 × 256 | 1.125 MiB | 9.09 GiB | 100 % | all 256 (surplus) |
+| Qwen3.8-FN @2.05 | 48 × 512 | 1.17 MiB | 28.12 GiB | 100 % | all 512 (surplus) |
+| Qwen3.8-FN @2.68 | 48 × 512 | 1.465 / 1.758 MiB | 36.33 GiB | **87.8 %** | 411 of 512 |
+| Qwen3.8-FN @4.05 | 48 × 512 | 2.34 MiB | 56.25 GiB | 56.7 % | 308 of 512 |
+| Qwen3.8-FN @5.05 | 48 × 512 | 2.93 MiB | 70.31 GiB | 45.4 % | 246 of 512 |
+| Qwen3.8-FN @6.05 | 48 × 512 | 3.52 MiB | 84.38 GiB | 37.8 % | 205 of 512 |
+| GLM-5.3-Flash @3.05 | 43 × 288 | 9.00 MiB | **108.84 GiB** | 29.3 % | 91 of 288 |
 
-(`h_min` is blank where the set fits: with nothing left to migrate there is nothing to sustain. The
-quota column is per-layer experts affordable by an even **byte** split of one 31.9 GiB tier.)
+¹ from `plan_placement.py --b70-gib 31.9 --gpu-gib 2`, i.e. the B70 slice plus a 2 GiB slice on the
+3090, divided evenly in bytes across the model's MoE layers.
 
-Two readings. The **cache regime starts at ~32 GiB of expert trellis**, which the local reference
-model (Qwen3.8 @2.68) already crosses — so this section is not an exotic corner, it is what the
-second reference model runs on, just gently (12.2 % spilled). And `h_min` — the device-resident pick
-share that migration traffic must sustain, derived below — climbs from 69 % to a hard **92.4 %** on
-GLM: past ~90 % the tier cannot be kept warm by migration over the link alone, and the residue must
-be *computed where it lives* (the CPU) rather than fetched, which is where a second B70 or a smaller
-quantisation is the honest answer.
+Byte residency alone says almost nothing useful — what matters is how much *pick mass* the resident
+experts carry, and that is the `h` column of the planner block below. The pair that proves it: Qwen3.8
+@6.05 (37.8 % of bytes resident, **h = 96.6 %**) and GLM-5.3-Flash @3.05 (29.3 % resident,
+**h = 70.8 %**) — similar capacity, 26 points of difference, because GLM's routing is nearly flat.
 
-`h` below means **device-resident pick share**: the fraction of a step's `topk` picks whose expert
-has a device home. Because placement is frequency-ordered, `h` is much larger than the byte-residency
-fraction — routing skew means the last 71 % of experts by size carry far less than 71 % of the picks —
-and `h` is *predictable offline* from the saved expert-stats profile, before a single forward pass
-(gate E14 checks that prediction against measurement). When `bytes(experts) > VRAM_3090 + VRAM_b70`
-the residue is not an accident but a designed share of the work handed to the CPU, and the port's
-central problem stops being handshake latency (which is hidden anyway) and becomes that share.
-Three numbers frame it, derived from measured rates for GLM-5.3-Flash (9.00 MiB expert, K=3, topk 8,
-43 MoE layers): `link` 14.4 GB/s and `disk` 5.0–5.2 GB/s are **[M]** (`dd iflag=direct`), the CPU
-rate 47.4 GB/s is the K=3 figure from `doc/prep/measured-costs.md` §5, and 420 GB/s is the *target*
-B70 read rate (gate E4) — so the break-even moves with that target, but only weakly:
+Two readings. The **cache regime starts at ~32 GiB of expert trellis**, which the local reference model
+(Qwen3.8 @2.68) already crosses — so this section is not an exotic corner, it is what the second
+reference model runs on, just gently (12.2 % of its bytes spilled). And whether that spill matters at
+all depends on the *shape* of the routing distribution, not on the spilled fraction: the same 12 % is
+nearly free on a peaked model and crippling on a flat one, which is exactly the difference between
+Qwen3.8 @2.68 (97.6 % of picks resident) and GLM-5.3-Flash (70.8 %) below.
+
+`h` below means **device-resident pick share**: the fraction of a step's `topk` picks whose expert has
+a device home. It is no longer a projection: `notes/b70/plan_placement.py` joins the safetensors census
+to the **real per-layer selection counts** that dynamic placement already persists
+(`~/.cache/exllamav3/expert_stats/…json`) and returns `h` exactly for any pair of home sizes
+(`out_placement.txt`). Two properties of that data bound how far to trust it:
+
+* the counts are **decayed cumulative** statistics from runs whose placement was already adaptive, so
+  cold experts linger as near-zero dust (individual counts of 1e-27 in the local profiles). `h` from a
+  profile is an **upper bound** and `|res|` a lower bound; E14 measures both from a fresh trace and
+  must find `h_live ≤ h_profile`;
+* pick *breadth* differs enormously between models, and that — not the spilled byte fraction — decides
+  the design. Qwen3.8@2.68 concentrates 97.6 % of picks in 411 of 512 experts per layer; GLM-5.3-Flash
+  is nearly flat (effective support 213–231 of 288, its top expert only 2–4 % of a layer's picks), so
+  91 resident experts capture just 70.8 %.
 
 ```
-admit(expert -> S_b)   = expert_bytes / link_rate            = 655 us   (from S_c)
-                         + expert_bytes / disk_rate (~5 GB/s) = 2.5 ms   (from S_d)
-CPU compute / use      = expert_bytes / 47.4 GB/s            = 199 us
-B70  compute / use     = expert_bytes / 420 GB/s             =  22 us
-break-even uses        = 655 / (199 - 22)                    = 3.7      (scale-invariant: the ratio
-                                                                  of three byte-proportional rates)
+GLM-5.3-Flash @3.05, per-layer byte budget from N cards (plus 2 GiB on the 3090):
+  1 card   91 of 288 resident   h = 70.8 %   CPU-served residue 19.6 ms/token  sigma 99.2 %  |res| 197
+  2 card  177 of 288            h = 89.7 %   CPU                 6.9 ms/token  sigma 92.4 %
+  3 card  264 of 288            h = 98.6 %   CPU                 0.9 ms/token  sigma 79.4 %
+
+Qwen3.8 @2.68, 1 card: 411 of 512 resident, h = 97.6 %, CPU residue 0.42 ms/token, |res| 33, fill 0.2 s
+Qwen3.8 @6.05, 1 card: 205 of 512 resident, h = 96.6 %, CPU residue 1.29 ms/token, |res| 307, fill 3.8 s
 ```
 
-so *admit on the third use* is roughly optimal, independent of model size, bitrate and expert shape.
-And because the miss path is only paid once per expert while the hit path is paid per use, the whole
-decode cost curve is steep in the hit rate `h` (misses/token = `topk·(1−h)`, ×43 layers):
+The economics, for GLM's geometry (9.00 MiB expert = 9.44e6 B, K=3, topk 8; 43 MoE layers of which the
+local profile covers 42, so the per-token figures below are ~2 % light) at measured rates — `link`
+14.4 GB/s and `disk` 5.0–5.2 GB/s **[M]**, CPU 47.4 GB/s **[M, doc/prep §5]**, B70
+300 GB/s **[M planning figure; 420 is the clustered goal]**:
 
-| `h` | CPU-served picks/token | CPU cost of them | link cost if they were admitted instead, per token |
-|---|---|---|---|
-| 0.70 | 2.40 | 20.6 ms/token | 68 ms/token |
-| 0.80 | 1.60 | 13.7 ms/token | 45 ms/token |
-| 0.90 | 0.80 | 6.9 ms/token | 23 ms/token |
-| 0.95 | 0.40 | 3.4 ms/token | 11 ms/token |
-| 0.99 | 0.08 | 0.7 ms/token | 2 ms/token |
+```
+admit one expert to S_b  = expert_bytes / link_rate              =  655 us   (from S_c)
+                           + expert_bytes / disk_rate            = 2.5 ms    (from S_d, 1.8 ms of it disk)
+CPU compute per use      = expert_bytes / 47.4 GB/s              =  199 us
+B70  compute per use     = expert_bytes / 300 GB/s               =   31 us   (22 us at the 420 goal)
+break-even uses          = 655 / (199 - 31)                      =  3.8      (4.3 at 420 GB/s: the
+                                                                     answer is rate-insensitive)
+```
 
-Read the last column as the trap: below `h ≈ 0.97`, *admitting*
-every miss costs more link time than the CPU spends computing it, so the CPU is the cheaper tier and
-migration must be selective (admit on the ~4th predicted use, and prefer evicting toward `S_c` over
-`S_d`). Above it, admission is a small investment that removes a large recurring cost. The two
-columns are not alternatives to choose per token — they are the constraint set for the offline
-placement, and `EXL3_MOE_B70_MISS_POLICY=cost` makes the per-window decision with exactly this
-arithmetic rather than with a fixed threshold.
+**The distinction that decides the policy: CPU cost accrues per pick and never stops; admission cost
+is paid once per newly resident expert.** An earlier draft of this section compared the two per token
+by charging an upload per pick, which made migration look ~50x more expensive than it is and produced
+the wrong verdict ("do not migrate, let the CPU serve the residue"). Charged correctly:
+
+```
+steady state, per token:   CPU      = topk*(1-h) * layers * 199 us
+                           migrate  = |res| * layers * churn_fraction * 655 us
+                           migrate wins  iff  churn_fraction < topk*(1-h)*199 / (|res|*655)
+GLM, 1 card:  topk*(1-h) = 2.33 picks/token  ->  break-even churn_fraction ~= 0.7 % of the migration
+              set per token; turnover of the hot set measured across the profile's own layers is a
+              few percent per 1000 tokens, i.e. two orders of magnitude below the break-even.
+```
+
+So for an oversized model, migrating the residue is cheap and the CPU should serve almost nothing —
+the reverse of that draft's conclusion. Churn from a cumulative profile is only a proxy (it has no
+time axis between snapshots); `ADMIT_T` stays as the first implementation's heuristic until E11
+produces a real per-token churn number, and if that lands above the break-even the CPU-share verdict
+flips back — which is what a gate is for.
 
 Two structural consequences for the design:
 
-**1. Prefetch sets a hard floor on the achievable hit rate.** The link is shared with activations,
-and the only window available at decode is the parent's own per-layer work `T_layer`:
+**1. Keeping the tier warm is a link-budget question, and the unit is churn, not picks.** The link is
+shared with activations, and the only window available at decode is the parent's own per-layer work
+`T_layer`:
 
 ```
-prefetch budget per layer = link_rate * T_layer            (5.8 MB at T_layer = 400 us -> 0.61 experts)
-feasible steady state     : topk*(1-h)*expert_bytes <= link_rate * T_layer
-                         => h_min = 1 - link_rate*T_layer / (topk*expert_bytes)   = 92.4 % here
+link budget per layer   = link_rate * T_layer                     (5.8 MB at T_layer = 400 us)
+maintenance demand      = |res| * churn_fraction * expert_bytes   (distinct new experts per token)
+GLM, 1 card             = 197 * (0.07/1000) * 9.44e6 B = 130 KB/token/layer  = 2 % of the budget
 ```
-(with `expert_bytes` the per-layer mean, and `T_layer` the *measured* parent GPU work per layer — for
-GLM it is assumed 400 µs here and is the first thing E10 has to establish, since `h_min` is linear in
-it: at 250 µs the floor becomes 95.2 %, at 800 µs 84.7 %.)
 
-Below `h_min` the cache cannot converge no matter how good the policy is, and the misses must be
-*served* rather than hidden — which means the CPU worker stops being a deferred extra and
-becomes **required** in oversized mode (§6), because a job that needs a non-resident expert must
-either be delegated or stall, and stalling is never acceptable on the parent's stream. `h_min` is
-printed by the planner at load (with the measured `T_layer` and `link_rate` it used) so a user is told
-up front whether the model is oversized on this box instead of discovering it at 8 tok/s.
+which is comfortable, and the reason the earlier per-pick version of this test —
+`h_min = 1 − link_rate·T_layer / (topk·expert_bytes)`, 92.4 % for GLM — was the wrong instrument: it
+charged a fresh upload for every pick, i.e. it assumed `churn_fraction = 1` (the migration set turns
+over completely every token). Kept as the pathological bound it is: if a model's residue were both
+flat *and* fully mobile per token, no placement could keep up and the CPU would have to serve it.
+What the planner can therefore state at load, from measured quantities only:
+`|res|`, the one-time `fill` cost, and the break-even `churn_fraction` above. Whether the real churn
+sits below it is E11's measurement, and until then the CPU worker stays **required** in oversized
+mode (§6) — a job that needs a non-resident expert must be delegated, never waited for, because
+stalling the parent's stream is not an option whatever the arithmetic says.
+
+Two things `T_layer`-depend and must be measured rather than assumed: GLM's parent work per layer is
+unknown (400 µs used here; the budget scales linearly), which E10 establishes first.
 
 **2. Capacity must be split per layer, in bytes, by marginal gain — not globally.** A global
 frequency sort leaves some layers fully resident and others not at all, and a layer with zero
@@ -443,10 +490,20 @@ largest `∂h/∂bytes`. In the common case (similar routing entropy everywhere)
 *expert count*, and Qwen3.8's 2.5- and 3-bpw layers have different `expert_bytes`. Budget in bytes;
 let the per-layer count follow.
 
-Per-layer budgets are also what set `σ`, because spanning is a per-layer property: a layer with no
-`S_b` experts splits nothing (every row of that layer goes to one home), while a layer whose cut point
-sits mid-cluster splits nearly every row. So the cut points trade rate against spanning layer by layer, and E13's
-per-layer `σ` breakdown — not just the global number — is what the placement is tuned on.
+Per-layer budgets are also what set `σ`, and **spanning is the normal case, not an edge case**: the
+planner puts `σ` at 92–99 % for every model that retains a CPU residue, because with 8–10 picks per
+row across three homes a row with any chance of a residue pick almost always has one. Three
+consequences, all corrections to earlier drafts of this document:
+
+* the prefill link model must use `Σ_D rows_touched(D) = rows·(1+σ)` — **roughly double** the
+  activation bytes whenever a residue exists (P2's figures are the single-home case);
+* the 3-way combine is a first-class path, not a corner: up to three partials per row in a fixed
+  order, two extra handshakes (~12 µs/layer/token, hidden behind the parent's window) and one extra
+  `x` copy per participating home;
+* `…_COLICATE` cannot remove the spanning, because with capacity-driven residues the homes are not
+  separable by co-occurrence — the sweep at the head of this section shows `σ` falling only as
+capacity *rises* (99 % → 79 % from one card to three), not as the ordering changes. It ships as an
+  experiment behind a knob rather than a default, and E13 is what promotes or deletes it.
 
 Supporting decisions for this regime:
 
@@ -486,12 +543,14 @@ Supporting decisions for this regime:
   records the *home* per expert (`S_g` / `S_b` / `S_c` / `S_d`), which gives migration two prices —
   655 µs from `S_c`, ~2.5 ms from `S_d` — and makes "evict the victim that is still in `S_c`" a rule
   rather than an accident.
-* **Scaling out is the real fix for this class.** `h_min` disappears once `bytes(experts) ≤ VRAM_b70`:
-  two B70s make GLM 59 % resident (quota 168 of 288 per layer), four make it fully resident. The
-  protocol already supports it — one engine child, ring and slot region per device, and the row-split
-  predicate extended from "on the B70 or not" to "which of the N" (the `dev_count`-per-device
-  mechanism the multi-GPU CUDA path already has). A capacity–device curve belongs in the same sweep
-  as E9.
+* **Scaling out is the fix for this class, and the curve is measured rather than argued** (the sweep
+  at the head of this section): for GLM each card buys a nonlinear fall in the CPU-served residue,
+  19.6 → 6.9 → 0.9 ms/token, and `σ` falls with it as rows stop spanning. The useful question for a
+  model this large is "how many cards until the CPU share stops dominating", which
+  `plan_placement.py` answers offline from real routing counts before any hardware work. The protocol
+  already supports N cards — one engine child, ring and slot region per device, home index in the
+  placement table (the `dev_count`-per-device mechanism the multi-GPU CUDA path already has). A
+  capacity-vs-cards curve belongs in the same sweep as E9.
 * **`S_d` (DRAM exhausted)** reuses the loader's deferred/paged reads into a *bounded pinned ring*
   (`EXL3_MOE_B70_DISK_RING_MB`), never an unbounded arena: read → DMA → recycle. Keep the expert's
   *presence* metadata (tier + byte offset) in the placement table so a miss knows whether to pay
@@ -687,14 +746,19 @@ answer goes the wrong way:
    (`probe_crossproc.py`, 10/10, `out_crossproc.txt`). Closed 2026-10-28; §6 keeps the child-process
    design. The residual risk is that this is driver-version-specific, so the test belongs in the
    per-commit set rather than in the archive.
-2. **Does `dot_4x8packed_us_int` / `sycl::ext::oneapi::dot_acc` compile to one Xe2 instruction?**
-   Seven ops per weight instead of one pushes decode past the ALU budget (§1 of
-   `b70-kernels.md`) and the answer becomes "decode on the B70 is XMX-only", which changes the tier
-   boundary at 4–16 rows.
-3. **How much of the 608 GB/s does the decode GEMV actually reach** with native tile order, with
-   banding, and with evict-first cache controls? Below ~250 GB/s the decode job stops being hidden
-   behind the parent's window and the *placement* (how many experts go to the B70 at all) becomes a
-   throughput decision instead of a capacity one.
+2. ~~Does `dot_4x8packed_us_int` / `sycl::ext::oneapi::dot_acc` compile to one Xe2 instruction?~~
+   **Answered behaviourally** (`probe_rates`, R6 vs R7): at realistic decode density the hardware dot
+   and a manual byte-sum differ by ≤1 %, and dense arithmetic costs only 1–4 % of bandwidth against
+   the same reads with no arithmetic. Decode is bandwidth-bound, so the ISA question no longer gates
+   the design; it stays relevant to the XMX prefill routes and to J/token. (Direct ISA inspection is
+   unavailable on this driver: `IGC_ShaderDumpEnable` emitted nothing, `SYCL_SAVE_TEMPS` left no files.)
+3. ~~How much of the 608 GB/s does the decode GEMV actually reach?~~ **Measured** 287–313 GB/s
+   scattered, 321–492 GB/s clustered, native order. The surprise is that the *arrangement* is worth
+   1.03–1.71× while the tile permutation is worth nothing (0.95–1.00×), so the lever moved from
+   layout (§2.2, closed) to kernel scheduling and VRAM allocation (b70-kernels.md §3a, and gate E4
+   restated against both regimes). Qwen3.8's decode layer stays hidden at 4–8× margin; **GLM's does
+   not clear comfortably** (~241 µs/layer of expert reads), which is now a measured concern rather
+   than a projection, and it compounds with its flat routing distribution.
 4. **Is a resident engine survivable in production** (device-loss semantics, a second B70 client,
    `power1_cap` behaviour while spinning)? Measured: 3.2 µs round trip and a 21–371 µs drain, so it
    is worth ~2–5 µs/layer and nothing more.
@@ -703,6 +767,41 @@ answer goes the wrong way:
    operand (confirm with the vectors first).
 6. **Where the input transform belongs** (3090 in the issue kernel vs B70): the payload argument is
    only real if E5 shows the link as the prefill bottleneck; B′5 has to pass either way.
-7. **What serves `S_c` best on a machine with a B70 at all** — the CPU GEMV at ~45 GB/s, streaming
-   the expert to the 3090 at 14.4 GB/s, or streaming it to the B70 (two crossings, then 608 GB/s)?
-   Recalibrate `stream_t` for all three rather than inheriting the CPU value.
+7. **What serves `S_c` best on a machine with a B70 at all** — the CPU GEMV at 47.4 GB/s, streaming
+   the expert to the 3090 at 14.4 GB/s, or migrating it into `S_b`? §4's migration table ranks them
+   per (expert, window), and the answer for a *resident-elsewhere* expert at decode is settled; what
+   is not settled is the per-chunk streamed case, where `stream_t`'s inherited value (8, scaled by
+   measured link rate) has never been calibrated against a B70-era configuration. Recalibrate it in
+   phase 3 rather than trusting it.
+
+## 12. What is final, and how each item would be reopened
+
+This is the plan's contract with the implementation phase: every row is either *closed on evidence*
+(the build must not re-litigate it) or *open behind a named gate* (the build must not assume it).
+Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` sits behind a gate.
+
+| decision | status | evidence | reopened by |
+|---|---|---|---|
+| B70 is a worker, not a second torch device; parent protocol unchanged | closed | `probe_cross.py` 8/9, `probe_crossproc.py` 10/10 | a driver that refuses cross-process `register_host_memory` (§6 Plan B: parent-side thread) |
+| engine in a child process | closed | `out_crossproc.txt` | same as above |
+| completion by pinned flag, never `.wait()` | closed | 24 µs vs 5–8 µs **[M]** | nothing; the harness asserts it (D-level test) |
+| payload: DMA in, fenced kernel stores out | closed | 258–283 µs vs ~2 µs for the same bytes **[M]** | nothing |
+| no `sycl::atomic_ref` on the shared region, at any scope | closed | `UR_RESULT_ERROR_DEVICE_LOST` repro (`probe_stores.cpp` case 7) | nothing |
+| explicit `i[0]` indexing + every-word assertions in kernel tests | closed | silent zero-store bug, `LESSONS` 4a | nothing |
+| three disjoint homes, two cut points, no replication | closed by argument + measurement | 1.5× rate ratio; `plan_placement.py` shows replication would cost residency it cannot pay | a model whose routing is so peaked that duplicate hot experts beat the capacity loss (E14 would show it) |
+| native tile layout on the B70, no repack | closed | banded/native 0.95–1.00× **[M]** | a measured win >1.15× in the real GEMV (E4) |
+| locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | 1.03–1.71× scatter-vs-cluster **[M]** | E4 measuring the real GEMV below 300 GB/s |
+| streamed/staged prefill dead for `S_b`, live for `S_c` | closed | ~200-row crossover from measured bytes/rates | a model with far more skewed routing (E7′ measures) |
+| admission economics: β ≈ 655 µs, μ_cpu ≈ 199 µs, break-even ≈ 4 uses | closed as arithmetic | measured rates | only new rate measurements |
+| migration policy = cost-based, break-even on **churn**, not picks | adopted, churn unmeasured | `\|res\|`, `fill`, break-even from real counts **[M]** | E11 measuring per-token churn above the break-even |
+| `h`/`σ` values quoted for the reference models | upper bounds, not promises | decayed cumulative profiles (dust counts of 1e-27) | E14 (fresh trace) — expect `h_live < h_profile` |
+| spanning ≈ 1 whenever a residue exists; prefill bytes ≈ 2× | adopted | planner with real counts, independence approximation | E13 with a real co-occurrence trace |
+| T1 (graph/command-list per job) as the shipping engine tier | adopted | 5–8 µs vs 24 µs vs 3.2 µs **[M]** | E1/E8 if the engine thread, not the card, becomes critical |
+| T2 resident engine | open, gated | 3.2 µs round trip, 21–371 µs drain **[M]** | only a ≥ 20 µs/token measured win |
+| DPAS route R1 (fp16 B) vs R2 (u8 product bytes) | open, gated | unmeasured; undocumented DPAS operand byte order | E4/E7 prefill sweep at 32/128/512 rows |
+| quantise `x` on the 3090 (int8 payload) | adopted, cheap to flip | halves payload; B′5 makes either side verifiable | E5 showing the link is not the prefill bottleneck |
+| GLM-class oversized verdict (cards needed, CPU share) | measured for the local profile | 19.6 → 6.9 → 0.9 ms/token at 1/2/3 cards | E14/E11 with live traces |
+| every knob default except the rate-derived ones | provisional | — | phases 1–4 gates |
+
+Nothing else in this document is a decision: the remaining prose is rationale, and rationale does not
+need to be final — only the rows above do.
