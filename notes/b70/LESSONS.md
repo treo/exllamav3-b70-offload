@@ -906,6 +906,25 @@ And the companion mistake, which turned a recoverable annoyance into lost data: 
 into the artifact *first*, and if the instrument is finicky, archive the dump itself alongside it; delete
 nothing that is the sole instance of a measurement.
 
+43. **On this device, synchronization primitives repeatedly cost more than the memory traffic they avoid, so
+    "fuse it into one kernel with atomics" is not a free optimization here.** Three independent measured
+    instances: a compute child spin-polling the host doorbell adds +24 to +54 ms/layer on top of the traffic
+    (E16); posting a Doorbell where a pinned flag works costs 4–17 µs/launch (E19); and fusing the DPAS
+    combine into the producer with per-expert atomic adds, a fence and an arrival counter costs +6.4…+8.4 µs
+    on gate and +13.6…+15.8 µs on down, where the round trip it removes was worth 1.9 µs (13w). Method
+    corollary: when a proposal removes a launch, price the synchronization before believing the saved bytes,
+    and use a *floor* mode (same grid, no per-tile work) to separate fixed cost from work — that is how the
+    8.7 µs protocol cost fell out, and it also showed that ~24 µs of a 43.6 µs b=1 layer is fixed overhead
+    rather than streaming.
+
+44. **FP contraction is on by default in icpx and nothing in this repo sets it**, so an epilogue of the form
+    `a*b - c` may fuse into an FMA and change results depending on which kernel built it — a bit-exactness
+    claim is only as stable as the expression that produced it. Either write epilogues so no multiply feeds
+    an add (rev K's `CQ * ((float)s - DR)`, with the scalar differences rounded on the host) or compile device
+    code with `-ffp-contract=off`. And when adopting such a rule, re-check that already-certified kernels are
+    unaffected instead of assuming they were lucky: rebuilding revs I/J with the flag off gave byte-identical
+    output, which is what makes the earlier verification durable rather than accidental.
+
 
 
 

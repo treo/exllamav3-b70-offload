@@ -1254,6 +1254,57 @@ copy on the parent (risks slowing the ~9 GB/s transfer), or (b) straight copy pl
 permute kernel (2 x bytes at ~674 GB/s internal: ~1.5 ms for a 512 MB resident set, once). Neither is measured
 yet; (b) is the recommendation and the permute-throughput measurement is the open item.
 
+================================================================================
+REV K (probe_dpas8.cpp, external): rev J's body plus a fused combine, activation prefetch, two accumulators,
+and a FLOOR diagnostic. The fused combine is refuted - by 4.5x - and the floor number reframes what to
+optimize next.
+================================================================================
+Outputs are bit-identical to rev J as claimed: verified at rows 1/4/8/16 on both projections by comparing rev
+K's bytes against rev J's, not just against y_ref (8/8 identical). Its header calls itself "rev I plus..."
+and its DPAS_COMBINE=switch help text says "rev I's partials"; it is in fact built on rev J's transposed tiles
+(the banner prints "rev K (ESIMD, transposed tiles)"), so it carries rev J's permuted-layout requirement.
+
+Warm interleaved min of 4-5, us, rev J at its best ks (2 gate / 1 down):
+
+  gate tn=40     rows=1   rows=4   rows=8  rows=16   |  down tn=160   rows=1  rows=4  rows=8  rows=16
+  rev K fused     21.1    21.0    24.7    28.7      |  rev K fused     31.3   33.5   38.3   44.1
+  rev K split     14.3    14.6    16.6    20.4      |  rev K split     15.9   18.3   23.9   30.3
+  rev J           14.0    14.6    16.9    20.3      |  rev J           15.5   18.6   23.2   30.5
+
+rev K's split path matches rev J within +-3 % at all eight points, so the other three changes (activation
+tiles riding in the ring at 1-4 rows, a second accumulator below 9 rows, the trimmed prefetch budget) are a
+null on this machine. The fused path costs +6.4 to +8.4 us on gate and +13.6 to +15.8 us on down.
+
+Why, from rev K's own DPAS_FLOOR switch (no per-tile work: launches, thread setup, ring bookkeeping, combine):
+
+    gate rows=1:   FLOOR fused 16.5   FLOOR split  7.8   -> the atomic protocol alone costs ~8.7 us
+    full fused 21.1 - floor 16.5 =  4.6 us of per-tile work
+    full split 14.3 - floor  7.8 =  6.5 us of per-tile work
+
+so fusion removed 1.9 us of per-tile work, exactly as designed (no partial stores, no round trip), and paid
+8.7 us for the per-expert global atomics, fences and arrival counters. The synchronization costs about 4.5x
+what the memory round trip cost. That answers E16's open question ("does the combine fuse into the producer
+via an atomic?") in the negative for this design, and it is the same lesson as E16's spin-poll result and
+E19's flag-over-Doorbell result: on this device, synchronization primitives are more expensive than the
+traffic they avoid. Keep rev J's two-launch structure.
+
+THE MORE USEFUL NUMBER: fixed cost per projection is ~7.8 us (gate) and ~8.4 us (down) at rows=1, so the
+b=1 layer pays 2 x 7.8 + 8.4 = ~24 us of fixed overhead against 43.6 us of total layer time - **more than half
+the layer is not streaming weights at all.** E16 puts a busy-queue launch at 1.0-1.4 us, so ~2.5 us of that
+per projection is the two launches and the remaining ~5 us is per-thread setup plus the combine kernel; the
+split is not measured precisely and it scales with the grid, which is the caveat. Either way, now that the
+streaming path sits at 437 of 484 GB/s, the remaining leverage is in fixed cost and bytes, not in the unpack:
+fusing gate and up into one launch (E25), one combine for the whole layer rather than one per projection, and
+trimming per-thread setup.
+
+Bit-exactness under the compiler's default FP contraction, which rev K's header raises as a risk: checked on
+the kernels we already certified. Rebuilding rev I and rev J with -ffp-contract=off produces byte-identical
+output on both projections (4 configs), so the accumulated verification stands. Rev K's epilogue form -
+device computes only CQ * ((float)s - DR), with CQ = kinv*q and DR = 510 * sx8 rounded on the host, so no
+multiply feeds an add - is the right pattern for the engine, and the port should either adopt it or compile
+device code with -ffp-contract=off; neither exllamav3's setup.py nor CMakeLists.txt sets any contraction flag,
+so today we rely on the expressions happening to be contraction-safe.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -1289,6 +1340,9 @@ yet; (b) is the recommendation and the permute-throughput measurement is the ope
                                            #   Diagnostics: DPAS_FETCH_ONLY / DPAS_ALU_ONLY / DPAS_NO_MAD /
                                            #   DPAS_NO_UNPACK; DPAS_EPT=n. Its own checker: DPAS_CHECK=file,
                                            #   which SKIPS silently if the reference size mismatches the run.
+    ./probe_dpas8 CASE 1 <rows> <ks>       # rev K (rev J + fused combine, activation prefetch, 2 accumulators)
+                                           #   DPAS_COMBINE=split reproduces rev J's structure; DPAS_FLOOR=1
+                                           #   measures launch + setup + combine with no per-tile work.
     PF_DIST_OVERRIDE=n: prefetch depth sweep - measured null (2/3/4 within noise), keep 2
     K-sweep for the byte question: ./probe_dpas5 /tmp/rc_K2_gate|/tmp/gemv_dpE10|/tmp/rc_K5_gate 5 1 2
     # ISA dumps: NEO_CACHE_PERSISTENT=0 is required (LESSONS 41); archived dumps in notes/b70/isa/
