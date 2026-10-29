@@ -215,3 +215,22 @@ the design in a different direction:
 Then, and only then, the numbers stabilised across modes and repetitions - and the surviving result
 (locality worth 1.03–1.71×, layout worth nothing, arithmetic worth 1–4 %) reversed two conclusions
 the earlier, smoother-looking numbers had supported.
+
+## 16. A proxy metric must be the same *kind* of quantity as the thing it proxies
+
+Needing a churn number for the migration policy and having only cumulative expert-count profiles, I
+tried two proxies and both produced confident, useless figures:
+
+* comparing the top-N **sets of counts** between groups of layers reported "92 % overlap". The sets
+  were of *values*, and decayed counts repeat (many experts share 16.046875), so the intersection
+  measured value collisions, not whether the same experts were hot.
+* splitting one layer's array in half reported "100 % overlap". That partitions experts by index: a
+  spatial split of a static snapshot, with no time in it at all, and the same value-collision artifact
+  on top.
+
+Both were rejected before reaching the plan, and the honest state is now written where the number is
+used (`doc/port/b70-architecture.md` §4a: churn unmeasured, break-even ~0.7 %/token, E11 must produce
+it from two snapshots or per-window counters). The lesson generalises to every statistic scraped from
+someone else's artifact: ask what the *identity* of the compared objects is, and whether the artifact
+has the axis (here, time) the question needs. A decayed cumulative count cannot answer "how fast does
+the set change", no matter how neatly the numbers line up.

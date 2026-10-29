@@ -444,16 +444,25 @@ the wrong verdict ("do not migrate, let the CPU serve the residue"). Charged cor
 steady state, per token:   CPU      = topk*(1-h) * layers * 199 us
                            migrate  = |res| * layers * churn_fraction * 655 us
                            migrate wins  iff  churn_fraction < topk*(1-h)*199 / (|res|*655)
-GLM, 1 card:  topk*(1-h) = 2.33 picks/token  ->  break-even churn_fraction ~= 0.7 % of the migration
-              set per token; turnover of the hot set measured across the profile's own layers is a
-              few percent per 1000 tokens, i.e. two orders of magnitude below the break-even.
 ```
 
-So for an oversized model, migrating the residue is cheap and the CPU should serve almost nothing —
-the reverse of that draft's conclusion. Churn from a cumulative profile is only a proxy (it has no
-time axis between snapshots); `ADMIT_T` stays as the first implementation's heuristic until E11
-produces a real per-token churn number, and if that lands above the break-even the CPU-share verdict
-flips back — which is what a gate is for.
+`churn_fraction` is **not measured and is not derivable from what exists**: the profiles are single
+cumulative snapshots with no time axis. Two proxies I tried and rejected, recorded so nobody reuses
+them — comparing the top-N *sets of counts* between layer groups (gives ~92 % "overlap", because
+repeated count values collide, so it measures value coincidences and not expert identity), and
+splitting one layer's array in half (which partitions the experts by index, so it is spatial, not
+temporal, and reports ~100 % by the same artifact). Getting a real number needs either two profile
+snapshots taken minutes apart in one run, or per-window counters in the engine — that is E11, and
+until it reports, this whole policy branch is a hypothesis with a stated break-even.
+
+So the verdict for an oversized model turns on one unmeasured number. `churn_fraction` is **not
+derivable from what exists**: the persisted profiles are single cumulative snapshots with no time
+axis. Two proxies were tried here and both are invalid, recorded so nobody reuses them — comparing
+top-N **sets of counts** between groups of layers reports "92 % overlap" because decayed counts repeat
+across experts, so it measures value collisions rather than identity; and splitting one layer's array
+in half is a *spatial* partition of a static snapshot, with no time in it. Getting a real figure needs
+two dated snapshots of the placement table within one run, or per-window counters in the engine —
+E11. Until then this is a hypothesis with a clean decision rule, not a conclusion.
 
 Two structural consequences for the design:
 
@@ -462,21 +471,32 @@ shared with activations, and the only window available at decode is the parent's
 `T_layer`:
 
 ```
-link budget per layer   = link_rate * T_layer                     (5.8 MB at T_layer = 400 us)
-maintenance demand      = |res| * churn_fraction * expert_bytes   (distinct new experts per token)
-GLM, 1 card             = 197 * (0.07/1000) * 9.44e6 B = 130 KB/token/layer  = 2 % of the budget
+link budget per layer   = link_rate * T_layer                        (5.8 MB at T_layer = 400 us)
+maintenance demand      = |res| * churn_fraction * expert_bytes      (distinct new experts/token)
+GLM, 1 card             = 197 * churn * 9.44e6 B, so
+   saturates the budget at churn = 5.8e6 / (197*9.44e6) = 0.31 %/token
+   stops beating the CPU     at churn = 2.33*199us / (197*655us)     = 0.36 %/token
 ```
 
-which is comfortable, and the reason the earlier per-pick version of this test —
-`h_min = 1 − link_rate·T_layer / (topk·expert_bytes)`, 92.4 % for GLM — was the wrong instrument: it
-charged a fresh upload for every pick, i.e. it assumed `churn_fraction = 1` (the migration set turns
-over completely every token). Kept as the pathological bound it is: if a model's residue were both
-flat *and* fully mobile per token, no placement could keep up and the CPU would have to serve it.
-What the planner can therefore state at load, from measured quantities only:
-`|res|`, the one-time `fill` cost, and the break-even `churn_fraction` above. Whether the real churn
-sits below it is E11's measurement, and until then the CPU worker stays **required** in oversized
-mode (§6) — a job that needs a non-resident expert must be delegated, never waited for, because
-stalling the parent's stream is not an option whatever the arithmetic says.
+The two thresholds **coincide**, which is the cleanest result in this section: there is no regime in
+which migration is affordable-but-unattractive. Below ~0.3 %/token it is both (at 0.03 %/token it
+costs 1.6 ms/token of link and 0.56 MB/layer against the CPU's 19.5 ms/token — 12× better); above it,
+migration is simultaneously uneconomical *and* stealing the window activations need. So the policy
+question collapses to a single measurement with a clean decision rule: **E11 measures churn; if it is
+under ~0.3 %/token, migrate with a per-step budget sized to the link window; if it is over, the CPU
+serves the residue and `S_b` is static apart from priming.**
+
+The earlier per-pick version of this test — `h_min = 1 − link_rate·T_layer / (topk·expert_bytes)`,
+92.4 % for GLM — was the wrong instrument for the same reason: it charged a fresh upload for every
+pick, i.e. it silently assumed `churn_fraction = 1`, which is past the saturation point of any
+geometry and produced a verdict (“the cache cannot converge; the CPU must serve the residue”) that the
+correct accounting does not support. Retained only as that pathological bound.
+
+What the planner states at load, entirely from measured quantities, is `|res|`, the one-time `fill`
+cost, and these two thresholds. Where real churn sits relative to them is E11's measurement, and until
+it reports the CPU worker stays **required** in oversized mode (§6) — a job that needs a non-resident
+expert must be delegated, never waited for, because stalling the parent's stream is not an option
+whatever the arithmetic says.
 
 Two things `T_layer`-depend and must be measured rather than assumed: GLM's parent work per layer is
 unknown (400 µs used here; the budget scales linearly), which E10 establishes first.
@@ -793,7 +813,7 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | 1.03–1.71× scatter-vs-cluster **[M]** | E4 measuring the real GEMV below 300 GB/s |
 | streamed/staged prefill dead for `S_b`, live for `S_c` | closed | ~200-row crossover from measured bytes/rates | a model with far more skewed routing (E7′ measures) |
 | admission economics: β ≈ 655 µs, μ_cpu ≈ 199 µs, break-even ≈ 4 uses | closed as arithmetic | measured rates | only new rate measurements |
-| migration policy = cost-based, break-even on **churn**, not picks | adopted, churn unmeasured | `\|res\|`, `fill`, break-even from real counts **[M]** | E11 measuring per-token churn above the break-even |
+| migration policy = cost-based, break-even on **churn**, not picks | adopted as arithmetic; **churn itself unmeasured and unmeasurable offline** | `\|res\|`, `fill`, and the two thresholds, which coincide at ~0.3 %/token (link saturation 0.31 %, economic 0.36 %) from measured quantities | E11: under ~0.3 %/token migrate with a link-budgeted per-step cap; over it, `S_b` is static apart from priming and the CPU serves the residue |
 | `h`/`σ` values quoted for the reference models | upper bounds, not promises | decayed cumulative profiles (dust counts of 1e-27) | E14 (fresh trace) — expect `h_live < h_profile` |
 | spanning ≈ 1 whenever a residue exists; prefill bytes ≈ 2× | adopted | planner with real counts, independence approximation | E13 with a real co-occurrence trace |
 | T1 (graph/command-list per job) as the shipping engine tier | adopted | 5–8 µs vs 24 µs vs 3.2 µs **[M]** | E1/E8 if the engine thread, not the card, becomes critical |
