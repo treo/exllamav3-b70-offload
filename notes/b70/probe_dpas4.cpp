@@ -41,6 +41,7 @@
 // Switches (env):
 //   DPAS_M=1|2|4|8      force the rows per A fragment (default: smallest that covers rows; rows > 8
 //                       always use two M = 8 fragments). DPAS_M=8 at rows = 1 measures what M buys.
+//   DPAS_X=1              experts in the grid too (grid = tn*KS*E); PART drops its E multiplier
 //   DPAS_REG=1          experimental in-register B (above)
 //   DPAS_NO_MAD         unpack + assembly only;  DPAS_NO_UNPACK  matrix path only (stale B)
 //   DPAS_CHECK=<file>   bitwise comparison of y against a reference file
@@ -169,6 +170,11 @@ struct Launch
     int32_t *PART = nullptr;       // [ks][sub][e][rpad][n]
     Meta m;
     int KS = 8;
+    // 'X' (DPAS_X=1): put the experts in the grid as well as the k-slice. A group then covers one expert and
+    // one k-slice, so PART holds 2*KS partials per output instead of 2*KS*E - the item-5 reduction, on top
+    // of rev G's rows-scaled partial layout. KS stays usable (grid = tn*KS*E), which is what makes the trade
+    // smooth: high KS no longer has to be paid for in partial traffic.
+    bool structx = false;
     bool skip_mad = false, skip_unpack = false;
 };
 
@@ -188,7 +194,7 @@ static void submit(const Launch &L)
     const int K = (int)m.K;
     const int tps = tk / KS;                  // trellis tiles per k-slice
     const int per_sg = tps / 2;               // tiles per sub-group (main() enforces even halves)
-    const size_t groups = (size_t)tn * KS;
+    const size_t groups = (size_t)tn * KS * (L.structx ? (size_t)E : 1u);
     const uint32_t nw = (uint32_t)(8 * K);    // dwords per trellis tile
     const int RB = 256 * K;                   // ring bits per tile
     const size_t slmSub = REG ? 0 : 2 * (size_t)B_TILE;   // double-buffered B tile per sub-group
@@ -197,6 +203,7 @@ static void submit(const Launch &L)
     const uint32_t *W = L.W;
     const int8_t *X4 = L.X4;
     int32_t *PART = L.PART;
+    const bool structx = L.structx;
 
     L.q->submit([&](sycl::handler &cgh)
     {
@@ -210,10 +217,11 @@ static void submit(const Launch &L)
             const int lane = l % SGSZ;                      // = output column within the tile
             const int grp = (int)it.get_group(0);
             const int nt = grp % tn;
-            const int ks = grp / tn;
+            const int ks = structx ? (grp / tn) % KS : grp / tn;
+            const int eg = structx ? grp / (tn * KS) : 0;      // expert owned by this group under 'X'
             const int kt0 = ks * tps + sub * per_sg;
             const int ntile = per_sg;
-            const int total = E * ntile;
+            const int total = (structx ? 1 : E) * ntile;
 
             uint8_t *Bbase =
                 SLM.template get_multi_ptr<sycl::access::decorated::no>().get() + (size_t)sub * slmSub;
@@ -228,10 +236,14 @@ static void submit(const Launch &L)
             // Register ring of NSET tiles (tile g in set g % NSET); the loop is unrolled by NSET so set
             // indices are compile-time constants and no move ever waits on an in-flight load.
             uint32_t pf[NSET][8];
-            int fe = 0, fti = 0;                            // next tile to fetch
+            // The fetch ring walks (expert, tile) pairs independently of ce, so under 'X' it has to start at
+            // this group's expert and stop after it - omitting that loads expert 0 everywhere and yields
+            // confidently wrong output for every KS and row count (it did, on the first try here).
+            int fe = structx ? eg : 0, fti = 0;               // next tile to fetch
+            const int elast = structx ? eg + 1 : E;
             auto fetch = [&](uint32_t *d)
             {
-                if (fe >= E) return;
+                if (fe >= elast) return;
                 const uint32_t *p = tile_ptr(fe, fti);
 #pragma unroll
                 for (int i = 0; i < 8; ++i) d[i] = p[cr.ix[i]];
@@ -250,7 +262,7 @@ static void submit(const Launch &L)
             };
 
             uint32_t prod[16] = {};
-            int ce = 0, cti = 0;                            // current tile
+            int ce = eg, cti = 0;                            // current tile
             CMat c[NF];
             for (int g0 = 0; g0 < total; g0 += NSET)
             {
@@ -448,7 +460,8 @@ int main(int argc, char **argv)
 
     const double trellis_mib = wbuf.size() / 1048576.0;
     printf("case %s: E %d R %d k %d n %d K %d  trellis %.2f MiB  KS %d  work-groups %d  sub-groups %d\n",
-           dir.c_str(), m.E, m.R, m.k, m.n, K, trellis_mib, KS, m.tn * KS, m.tn * KS * 2);
+           dir.c_str(), m.E, m.R, m.k, m.n, K, trellis_mib, KS,
+           m.tn * KS * (getenv("DPAS_X") ? m.E : 1), m.tn * KS * (getenv("DPAS_X") ? m.E : 1) * 2);
     printf("rev G: M %d x %d fragment%s (rows padded to %d), B %s, SLM per work-group %d KiB\n",
            MR, NF, NF > 1 ? "s" : "", RPAD, REG ? "in registers (experimental)" : "via SLM",
            REG ? 0 : 4);
@@ -473,6 +486,7 @@ int main(int argc, char **argv)
     L.q = &q; L.W = W; L.X4 = X4; L.PART = PART; L.m = m; L.KS = KS;
     L.skip_mad = getenv("DPAS_NO_MAD") != nullptr;
     L.skip_unpack = getenv("DPAS_NO_UNPACK") != nullptr;
+    L.structx = getenv("DPAS_X") != nullptr;
 
     auto dispatch = [&]
     {

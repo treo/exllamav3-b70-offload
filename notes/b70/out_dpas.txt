@@ -801,6 +801,61 @@ slower, degrading with M. That is the answer to the question he flagged as unkno
 coordinate loop does not lower to register moves, it lowers to per-element work. If B is ever to be fed from
 registers it has to be ESIMD `xmx::dpas`, which is the rewrite, not this one-liner.
 
+================================================================================
+ITEM 5 PORTED ONTO REV G: DPAS_X=1, experts in the grid on top of tokens-on-M
+================================================================================
+The follow-up rev G's author left for us: a group covers one expert and one k-slice, so PART holds 2*KS
+partials per output instead of 2*KS*E, and because partials stopped scaling with E they also stopped
+constraining KS - grid = tn*KS*E with KS free. Four sites: group decomposition (nt, ks, eg), total tile
+count, ce initialization, and PART size unchanged (the layout still reserves E slots, only 2*KS are written).
+
+Got it wrong first, in the way worth writing down: the fetch ring walks (expert, tile) pairs independently of
+the store counter, so it kept loading expert 0 while PART was indexed by the correct expert. Result: 27 of
+27 configurations WRONG, every KS, every row count, at the first exactness run - which is the good outcome,
+since a partially-wrong version of that bug would have looked plausible. Fix is `fe = structx ? eg : 0` with
+the ring stopping at eg+1.
+
+After the fix: **bit-exact for all 27 DPAS_X configurations** (gate KS 1/2/4/8/16 and down KS 1/2/4/10, rows
+1/4/16), with the non-X path re-verified unchanged.
+
+Warm interleaved min of 3, us (X = DPAS_X, no-X = rev G as authored):
+
+  gate k=2560 tn=40      X ks1  X ks2  X ks4  X ks8  X ks16 | best no-X | rev F psux
+    rows=1               50.5   36.1   44.1   52.5   54.0  |    44.5   |    74.5     X x1.23 vs no-X, x2.06 vs rev F
+    rows=4               50.2   37.3   50.9   51.2   53.2  |    44.4   |    75.0     X x1.19, x2.01
+    rows=8               63.3   41.1   50.6   53.7   58.6  |    54.5   |    75.6     X x1.33, x1.84
+   rows=16               93.0   56.5   66.9   92.9   96.6  |    94.2   |    82.5     X x1.67, x1.46
+
+  down k=640 tn=160      X ks1  X ks2  X ks4  X ks10 | best no-X | rev F psux
+    rows=1               41.5   47.8   45.6   58.2  |    37.5   |    79.8     no-X x1.10 here
+    rows=4               42.5   47.5   50.1   67.9  |    42.6   |    82.6     X x1.00, x1.94
+    rows=8               51.7   57.0   60.0   87.5  |    55.0   |    87.8     X x1.06, x1.70
+   rows=16               72.6   79.8   89.7  178.7  |    86.8   |   115.5     X x1.20, x1.59
+
+Two structural wins, not just numbers. The KS optimum collapses to one setting per projection (ks2 gate,
+ks1 down) instead of swinging from 16 at rows=1 to 2 at rows=16, which was rev G's failure mode and the
+reason it lost x1.50 to rev F at rows=16/down_proj - that loss is gone (56.5 vs 82.5). And the pathological
+high-KS cells (down ks10 rows16: 178.7 without X) disappear because partials no longer multiply by E.
+
+## Against dp4a, in one window: the crossover is exactly rows = 2
+
+  gate  rows=1: rev G+X 43.7   rev C+KCONST 39.2   -> rev C x1.07
+        rows=2:            37.0              54.1   -> G+X x1.72
+        rows=4:            37.3             103.3   -> G+X x3.22
+  down  rows=1:            50.9              38.7   -> rev C x1.13
+        rows=2:            41.1              51.0   -> G+X x1.22
+        rows=4:            42.5             103.6   -> G+X x2.44
+
+So the schedule keeps two kernels but the dp4a path is now a b=1 special case rather than a low-batch
+regime: rows=1 -> rev C+KCONST, rows >= 2 -> rev G+DPAS_X. Layer times, best measured configuration:
+  b=1   2 x 36-44 (gate/up) + 41-51 (down) = 113-139 us   vs rev C+KCONST 117.9 us  -> effectively tied
+  b=4   2 x 37.3 + 42.5 = 117.1 us   (was 141.2 on rev G, 232.5 on rev F+x, 310.2 on rev C)  -> x2.1 of the
+        250 us parent window at four times the batch
+  b=8   2 x 41.1 + 51.7 = 133.9 us;  b=16  2 x 56.5 + 72.6 = 185.6 us
+Spread note, in fairness to the reader: the same configuration measured 41.5 us in one warm window and
+50.9 us in another (down_proj, X, ks1, rows=1), about +/-20 %. Within-window comparisons are what these
+ratios rest on; treat absolute microseconds as +-15 %, which does not change any of the rankings above.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -828,7 +883,7 @@ registers it has to be ESIMD `xmx::dpas`, which is the rewrite, not this one-lin
     # rev G: tokens on M. Fresh output file per verification run (stale-artifact globs cost me a scare).
     for ks in 4 8 16; do DPAS_M=1 ./probe_dpas4 /tmp/gemv_dpE10 5 1 $ks; done   # M-scaling diagnostic
     DPAS_REG=1 ./probe_dpas4 CASE 5 1 16                                       # in-register B: refuted
-    ./probe_dpas4 CASE 5 <rows> <ks>     # ks must divide tk with an even quotient; K <= 5 only
+    DPAS_X=1 ./probe_dpas4 CASE 5 <rows> <ks>      # experts in the grid too; best ks 2 (gate) / 1 (down)
     for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
       env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8

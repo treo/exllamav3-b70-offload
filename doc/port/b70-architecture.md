@@ -611,6 +611,15 @@ measured rate curve at the matched footprint:
   the `'x'` grid. Its author's own prediction that matrix work scales with M did not survive measurement
   (M=8/M=1 matrix cost 1.19×, not 8×), which is worth stating plainly: the gain came from operand layout and
   partial-sum scaling, and the mechanism attribution in §2c 13p is mine, not his.
+* **With the expert grid ported onto rev G (`DPAS_X=1`, §2c 13q), the schedule is dp4a at b=1 and one DPAS
+  kernel at b ≥ 2.** PART drops its E multiplier (2·KS partials per output, not 2·KS·E), which frees KS from
+  being the constrained knob it had been: best measured is gate **36.1 µs** (ks2) and down 41.5–50.9 µs (ks1),
+  ×2.06 and ×1.94 better than rev F+`'x'`, and the rows=16/down_proj case where rev G lost ×1.50 to rev F now
+  wins ×1.46. Same-window head-to-head with rev C+KCONST: dp4a still ahead at rows=1 (×1.07 gate, ×1.13 down),
+  DPAS ahead from rows=2 (×1.22–×1.72) and by rows=4 (×2.4–×3.2). **Layer time b=4 = 117.1 µs** (2×37.3 +
+  42.5) → ×2.1 of the 250 µs parent window at 4× batch; b=1 ≈ 113–139 µs, parity with dp4a from one kernel
+  family. All 27 new configurations bit-exact; the K ≤ 5 limit still excludes the 6.05 bpw recipe, and
+  absolute times in this line carry ±15–20 % between warm windows (ratios are within-window).
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is
