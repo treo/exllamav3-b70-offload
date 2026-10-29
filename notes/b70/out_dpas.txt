@@ -1,0 +1,107 @@
+# E24 step 1 - integer XMX DPAS with byte-replicated operands: does the matrix path remove the
+# per-row instruction slot?  (probe_dpas.cpp, notes/b70; measured 2026-10-29)
+
+## What is being claimed and by what method
+
+rev C costs `slots/weight ~= 5.8 + 1.15 * rows` (fitted from its own measured 205.5 -> 136.4
+G-weights/s for rows 1 -> 4 against the 1.43e12 slot/s issue budget). The DPAS formulation under
+test (b70-kernels.md 2c item 13b) replaces the byte-SUM with the four BYTES of
+`window * 0x83DCD12D` as four K-steps, paired with the activation replicated 4x along K:
+
+    sum_kb A[col][kb] * B[kb][t]  =  sum_k bytesum(prod_k) * x_k      exact, in int32
+
+so nothing needs more than 8 bits (A is u8 as produced, B is s8), the accumulator is int32, and the
+epilogue `k_inv * q * (acc - 510 * sum_x8)` is unchanged. Shape M=8, K=32, N=16, sub-groups of 16,
+all proven reachable on this card by doc/b70/b70-bench (366.92 TOPS = 100% of Intel's 367).
+
+STEP 1 DELIBERATELY MAKES OPERAND ASSEMBLY FREE. A comes from abytes.bin written by the same
+authoritative unpacker that writes y_ref (dump_gemv_case.py --with-abytes), NOT from a second C++
+unpacker. That isolates "does the matrix math scale flat with rows?" from the expensive engineering
+question of whether a real kernel can assemble A in registers without paying more than it saves
+(llm-scaler's own warning: "assembling it with strided register moves cost more than the DPAS
+itself saved"). The cost of this choice: A is 4 bytes per weight vs the trellis's K/8 = 0.375, i.e.
+10.7x the bytes at K=3, so GB/s is NOT comparable with rev C and every DPAS number below carries a
+byte-traffic handicap that a shipping kernel would not have.
+
+## Correctness
+
+    DPAS bit-exact vs y_ref: True   max|d| 0.0        (E=10, gate_proj, rows=1, KS=4)
+
+Gate A survives untouched - no float anywhere in the path. Getting there caught one bug worth
+recording: declaring the B operand `uint8_t` compiles, runs at full speed, and turns every negative
+activation into 128..255, inflating the accumulator to ~1.6e8 (the all-same-sign bound) instead of
+~5e5. dpas.hpp allows A and B to have different signedness precisely so this mix is expressible.
+Note that b70-bench's all-ones self-check is structurally BLIND to this class of bug.
+
+## Rows scaling at the b=1 operating expert count (E=10, Qwen3.8 layer 0, k=2560, n=640)
+
+weights = 16.384 M; each cell is min of 3 interleaved runs, burst-of-8 throughput mode.
+G-wt/s = weight-tokens per second = the metric that says "how many tokens' worth of work per second".
+
+ rows |   revC us | revC G-wt/s |   revD us | revD G-wt/s | revD vs revC (same work)
+-----:|----------:|------------:|----------:|------------:|---------------------------
+    1 |      75.5 |         217 |     144.0 |         114 | x0.52
+    2 |      78.7 |         417 |     145.1 |         226 | x0.54
+    4 |     112.5 |         583 |     146.6 |         447 | x0.77
+    8 |     251.7 |         521 |     153.5 |         854 | x1.64
+   16 |     485.5 |         540 |     159.2 |        1648 | x3.05
+
+rev C's weight-token throughput SATURATES at ~520-580 G-wt/s from rows 4 on - that is the issue-rate
+ceiling, and it is the clearest possible statement that decode is instruction-bound. rev D's time grows
+only 144 -> 159 us (+11%) across a 16x row increase, and its weight-token throughput keeps climbing to
+1648 G-wt/s, which is still only 3.6% of the 45.9 T weight-token ceiling the matrix unit allows at
+4 byte-MACs per weight-token - i.e. rev D at E=10 is bound by streaming A, not by math.
+
+## The same experiment with A inside L2, which removes the byte handicap (E=1: A = 6.25 MiB)
+
+ rows |   revC us |   revD us | revD vs revC
+-----:|----------:|----------:|-------------
+    1 |      51.2 |      24.9 | x2.06
+    4 |      70.9 |      18.3 | x3.87
+    8 |      95.2 |      18.7 | x5.09
+   16 |      82.3 |      18.8 | x4.38
+
+Here DPAS wins at EVERY row count, including rows=1, and its rows curve is FLAT to within 3% from
+rows 4 to 16 (18.3 -> 18.8 us) while rev C's rises 51 -> 95 us. That flatness is the direct answer to
+E24: the per-row marginal cost of the matrix path is ~0, exactly as predicted, because the row
+dimension is paid for by the matrix unit's N dimension instead of by instructions.
+rev C's rows=16 point (82.3 us, faster than its own rows=8) is measurement noise at E=1, where there
+are few work-groups and the run-to-run spread is large (LESSONS 28) - the direction of the effect is
+unaffected but do not quote that cell.
+
+Intermediate footprints, same table shape (revD vs revC time ratio):
+  E=2:  x1.38 / x2.66 / x3.54 / x4.40   for rows 1 / 4 / 8 / 16   (revD 20.5 / 27.3 / 25.5 / 22.5 us)
+  E=4:  x0.50 / x1.92 / x1.98 / x5.28   for rows 1 / 4 / 8 / 16   (revD 60.5 / 38.7 / 44.9 / 47.5 us;
+        the rows=1 cell is an unexplained outlier and should be re-measured before being believed)
+
+## What this decides
+
+1. Integer DPAS with byte replication is bit-exact and its rows cost is ~0. The 1.15-slots-per-row
+   term in rev C is real and the matrix path removes it.
+2. Materializing A in DRAM is NOT viable at decode footprints: at E=10 the 62.5 MiB stream costs
+   ~145 us on its own (~360-390 GB/s), which is why rev D loses below rows 6 there. A shipping kernel
+   MUST assemble A from trellis bytes in registers/SLM. This probe deliberately did not test that.
+3. Therefore step 2 is worth building, with a specific prize: at E=10/rows=4 the ceiling implied by
+   combining rev D's flat curve with the trellis's own 5.86 MiB read is roughly 20-30 us against rev
+   C's 112.5 us. The whole of that prize rests on assembly costing less than ~2 slots per weight,
+   which is the number step 2 must report first, before any rate.
+
+## Cross-check: three independent implementations agree bit for bit
+
+Second configuration, different split and row count (E=2, KS=2, rows=4, A = 12.5 MiB):
+
+    revD(dpas, KS=2, rows=4) bit-exact vs y_ref: True
+    revB still bit-exact on the same case:       True
+    revD == revB:                                True
+
+That is the NumPy reference, rev B's scalar dp4a loop, and rev D's XMX integer matrix path producing
+identical float32 output from identical checkpoint bytes. It also exercises a different KS, so the
+partial-sum tree differs by construction and the integer accumulator is confirmed order-independent
+across the two paths - which is what makes the DPAS variant substitutable inside the engine's
+completion protocol rather than a second numerics regime to validate separately.
+
+## Reproduce
+
+    python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
+    ./probe_dpas /tmp/gemv_dpE10 21 <rows> <KS>        # KS in {1,2,4,8}; KS*2*32 must divide 4k
+    ./probe_gemv /tmp/gemv_dpE10 0 21 <rows> 1 4       # rev C on identical bytes for comparison

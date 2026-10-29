@@ -610,3 +610,37 @@ Three rules out of it:
   measurement of the very capability I declared unavailable, sitting in this project's own reference
   directory. Same failure class as the 150–180 GB/s inheritance: an earlier number, kept in a table,
   unconnected to the inference being drawn next to it.
+
+## 31. Make the expensive part free before you build it; and a signedness trap that is now three-for-three
+
+E24 asks whether XMX DPAS removes the per-row instruction slot from the decode GEMV. The kernel that
+would answer it properly needs on-the-fly trellis unpacking *into a matrix operand layout* — the hard
+part, and the part llm-scaler explicitly warns about. Instead `probe_dpas.cpp` sidestepped it: A came
+from a byte-expanded file written by the reference unpacker, so operand assembly was free by
+construction. One file and two dumps later I had the answer (rows curve flat to within 3 % versus rev
+C's 6.5× growth), *plus* a result I had not gone looking for — the materialized-byte form spends ~145 µs
+streaming A at E=10, which forbids that design in a shipping kernel and tells step 2 exactly which
+number to report first. Deliberately idealizing the hard part answers the question *and* bounds what the
+hard part is worth; doing it first is cheaper than doing it properly and finding out later.
+
+The signedness bug I hit on the way is now the third instance of the same shape in this project:
+
+1. `dot_acc(prod, (uint32_t)splat, acc)` selected the unsigned×unsigned overload — negative activations
+   read as 255 (LESSONS 25).
+2. `(int8_t)x * 0x01010101` to splat a byte silently produced `(x, x−1, x−1, x−1)` for x < 0 — the
+   two's-complement borrow (LESSONS 28).
+3. Here: `joint_matrix<…, uint8_t, use::b, …>` for the *activation* operand. Compiles, runs at full
+   speed, and every negative activation becomes 128…255.
+
+The invariant across all three: the API takes the semantics from a **type name I typed**, not from a
+value, so there is nothing for the compiler or the runtime to object to. The tell is also the same —
+**loss of cancellation**. A dot product of byte-sums (always ≥ 0, mean ~510) against signed activations
+is a sum of terms with random signs, so a correct kernel lands around ±5·10^5 while a sign-blind one
+runs to the all-same-sign bound (~1.6·10^8 here, a 300× inflation). If a magnitude-identical-looking
+result is two orders of magnitude too big, suspect signedness before suspecting indexing.
+
+Which exposes a hole in my own controls: the `GEMV_ZERO_X` / `GEMV_ONE_X` synthetic-activation probes
+that nailed bug (2) are **both non-negative**, so they would have passed bug (3) happily. Sign-sensitive
+bugs need a sign-carrying control: add `x ≡ −1` (expected accumulator `−Σbytesum + 510·k`, computable in
+two lines) alongside the zero and one cases. Cheap controls are only good if they cover the axis the bug
+lives on.

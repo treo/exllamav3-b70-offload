@@ -79,6 +79,7 @@ def main():
     outdir, E, R = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     layer = int(sys.argv[4]) if len(sys.argv) > 4 and not sys.argv[4].startswith("--") else 0
     with_ref = "--with-reference" in sys.argv
+    with_abytes = "--with-abytes" in sys.argv
     ckpt = _flag("--ckpt", CKPT)
     proj = _flag("--proj", "gate_proj")
     os.makedirs(outdir, exist_ok=True)
@@ -104,6 +105,28 @@ def main():
         json.dump(dict(E=E, R=R, tk=tk, tn=tn, K=K, k=kdim, n=ndim, layer=layer, ckpt=ckpt,
                        proj=proj, kinv=k_inv_f32(),
                        tile_words=int(8 * K), nbytes=int(arr.nbytes)), f, indent=1)
+    if with_abytes:
+        # Byte-expanded weights for the DPAS probe (E24 step 1): A[e, col, k*4+b] = byte b of
+        # (window * MUL1). Summing A against activations replicated 4x along k reproduces
+        # sum_k bytesum(prod_k) * x_k exactly in int32, so the matrix path can be tested for what it
+        # is supposed to fix (the per-row instruction slot) with operand assembly made free. These
+        # bytes come from the SAME authoritative unpacker as y_ref, never from the probe.
+        assert K == int(K), f"byte expansion needs integer K, got {K}"
+        perm = TR.tile_perm()
+        win = TR.unpack(arr.reshape(-1, int(16 * K)), K).astype(np.uint32)
+        prod = (win * MUL1_MULT) & np.uint32(0xFFFFFFFF)
+        A = np.empty((E, tk, tn, 16, 16, 4), dtype=np.uint8)
+        for b in range(4):
+            bb = ((prod >> np.uint32(8 * b)) & np.uint32(255)).astype(np.uint8)
+            bpp = np.empty_like(bb)
+            bpp[:, perm] = bb
+            A[..., b] = bpp.reshape(E, tk, tn, 16, 16)
+        A = np.ascontiguousarray(A.transpose(0, 2, 4, 1, 3, 5)).reshape(E, tn * 16, tk * 16, 4)
+        assert A.shape == (E, ndim, kdim, 4), A.shape
+        A.tofile(os.path.join(outdir, "abytes.bin"))
+        print(f"abytes: {A.shape} uint8 = {A.nbytes / 2**20:.1f} MiB "
+              f"({A.nbytes / max(1, arr.nbytes):.1f}x the trellis bytes)")
+
     if with_ref:
         assert K == int(K), f"reference path needs integer K (ring is 256*K bits), got {K}"
         perm = TR.tile_perm()
