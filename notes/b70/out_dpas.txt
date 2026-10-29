@@ -992,6 +992,62 @@ What this settles.
   message census needs IGA on the image. Same caveat on "spill references": counted as textual mentions, not
   verified one by one as spill sites - the 11 in rev G deserve that check if anyone reopens this.
 
+================================================================================
+LOW-LEVEL LOOK AT REV H: it is unpack-bound, NOT byte-bound, and not prefetch-bound
+================================================================================
+Three experiments, all warm + interleaved, rev H + DPAS_X at its own optimum (ks2), control runs matching
+the committed binary to 0.1 us so the builds were comparable.
+
+1. **Ablation ladder - the matrix path is nearly free, the unpack is everything.**
+
+     gate rows=1:  full 39.1   unpack-only 38.3   matrix-only 10.7  -> unpack 28.4 us, matrix 0.8 us
+     gate rows=16: full 44.2   unpack-only 42.9   matrix-only 16.3  -> unpack 27.9 us, matrix 1.3 us
+     down rows=1:  full 43.2   unpack-only 41.4   matrix-only 11.7  -> unpack 31.5 us, matrix 1.8 us
+     down rows=16: full 64.4   unpack-only 62.7   matrix-only 29.8  -> unpack 34.6 us, matrix 1.7 us
+
+   Consistent with the ISA census (~104 instructions per tile, 2 `dpas.8x1`, 0 SLM, 20 syncs): XMX costs
+   about a microsecond and a half. Everything worth attacking is in the unpack.
+
+2. **Prefetch depth does nothing.** PF_DIST exposed as -DPF_DIST_OVERRIDE; tiles fetched ahead 2/3/4 at
+   gate rows 1/4/8/16: 39.1/39.7/41.2/44.2, 39.1/39.4/42.5/44.8, 39.4/40.4/41.8/44.1 - all within noise, and
+   PF=5 (built without the per-kernel code split, so its burst absorbed JIT) was uniformly worse. So the
+   trellis load latency is already hidden, and the "deeper prefetch" idea from the original review is
+   measured-dead for this kernel.
+
+3. **It is not byte-bound either - and this refutes what I wrote in item 13r.** Same 16.384M-weight problem,
+   trellis K varied (rev H instantiates K=2..5, so the same kernel, same weight count, different bytes):
+
+     K    MiB   revH rows=1   revH rows=16   effective GB/s
+     2   3.91        39.1          43.0           105
+     3   5.86        39.1          44.2           157
+     5   9.77        39.3          43.7           261
+     ratios 1.00 / 1.00 / 1.01   where byte-proportional predicts 1.00 / 1.50 / 2.50
+
+   A 2.5x byte range changes the time by 1 %. The dp4a path is flat in K the same way (76.3 / 75.5 / 76.5 us
+   runtime-K), which is the recipe-independence result from item 2b still holding. So my sentence in 13r -
+   "at ~0.32 instructions/weight the DRAM floor is close enough that bytes and locality will pay more than
+   further instruction cuts" - was wrong, and it was the *prediction* that justified stopping instruction
+   work. Corrected below.
+
+What the three together leave: the unpack costs ~1 us per tile (40 tiles/thread, ~2000 cycles) while issuing
+only ~104 SIMD instructions for it, it is indifferent to bytes and to load distance. That is a per-tile
+serialization, and the ISA shows two candidates I have not yet tested in isolation:
+* **the same 96-byte tile is read into all 16 lanes** (`load.ugm.d64x8t.a64` x2 per tile, each lane taking 24
+  dwords), i.e. 1536 bytes of LSU/L1 traffic for 96 bytes of data - a 16x amplification of the one resource
+  that the K-sweep says we are not short of otherwise;
+* **`mov` is rev H's largest opcode class (141)**, which is the products being shuffled into the DPAS B
+  operand image plus that lane-duplicated data moving twice.
+
+Next experiment, in order of promise: restructure the tile load so each lane loads a *distinct* slice and the
+windows are exchanged by shuffle/select rather than each lane reading the whole tile - which attacks both
+candidates at once - and only then revisit the A-operand pipeline (note the matrix-only rung shows the A load
+is inside the 10.7 us, so it is a smaller prize than it looked from the ISA alone: `sync.nop {$12.dst}` next
+to the dpas is real but bounded by that 10.7 us, not by the 28 us unpack).
+
+Correction to my own record: the flat-in-K result means the decode kernels here are *neither* bandwidth-bound
+nor issue-bound; they are bound by per-tile data movement inside the thread. "We are near the DRAM floor"
+was a story told from two of the three required measurements (instructions and bytes, without the K sweep).
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -1022,6 +1078,8 @@ What this settles.
     DPAS_X=1 ./probe_dpas4 CASE 5 <rows> <ks>      # experts in the grid too; best ks 2 (gate) / 1 (down)
     ./probe_dpas5 CASE 5 <rows> <ks>        # rev H, ESIMD xmx::dpas from registers; KS matters a lot (best = largest)
     DPAS_X=1 ./probe_dpas5 CASE 5 <rows> <ks>    # rev H with experts in the grid; optimum ks2 everywhere
+    PF_DIST_OVERRIDE=n: prefetch depth sweep - measured null (2/3/4 within noise), keep 2
+    K-sweep for the byte question: ./probe_dpas5 /tmp/rc_K2_gate|/tmp/gemv_dpE10|/tmp/rc_K5_gate 5 1 2
     # ISA dumps: NEO_CACHE_PERSISTENT=0 is required (LESSONS 41); archived dumps in notes/b70/isa/
     for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
       env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done

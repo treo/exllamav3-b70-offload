@@ -57,7 +57,13 @@ using esimd::simd;
 
 static constexpr int NCOL = 16;                 // output columns per trellis tile = DPAS execution size
 static constexpr int XROWS = 16;                // max token rows
-static constexpr int PF_DIST = 2;               // trellis tiles fetched ahead
+#ifndef PF_DIST_OVERRIDE
+#define PF_DIST_OVERRIDE 2
+#endif
+// Trellis tiles fetched ahead. Build-tunable (-DPF_DIST_OVERRIDE=n) because the measured kernel sits ~4x
+// above the DRAM floor and ~6x above its own issue floor, i.e. latency-bound: in-flight load count is the
+// knob that should matter most, and the ISA shows the activation load issued in the same tile it feeds.
+static constexpr int PF_DIST = PF_DIST_OVERRIDE;
 static constexpr uint32_t HASH = 0x83DCD12Du;   // window -> 4 weight bytes
 
 struct Meta
