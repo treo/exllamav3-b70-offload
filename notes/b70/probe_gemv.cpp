@@ -234,6 +234,170 @@ static void submit(sycl::queue &q, const uint16_t *W, const int8_t *X8, const fl
     });
 }
 
+// ---------------------------------------------------------------------------
+// rev C: the structure the vendor kernels and the CUDA path actually use.
+// *** STATUS: PROVISIONAL. Extraction is proven exact in-kernel (the byte-sum fixture matches
+// tests/testlib/trellis.py for expert0/tile0) but the totals carry a near-constant per-column offset
+// of -510*sum_x8, i.e. the mul1 bias is folded in twice somewhere between the subsets and combine.
+// Rates below are therefore NOT quotable until Gate A passes; rev B (submit<>) is the validated path. ***
+//   * no materialised byte-sums: prod = window * MUL1 stays in a register and each
+//     (weight, token row) costs exactly ONE dot_acc(prod, splat_row, acc) - the
+//     unsigned x signed form, i.e. CUDA's dp4a_us. Activations are pre-splatted on the
+//     host to 0x01010101 * int8 x, so no scale or sign work is left in the loop.
+//   * lane = column PAIR (q, q+8): the 8 consecutive ring positions of one t cover rows
+//     {2a4, 2a4+1, 2a4+8, 2a4+9} for column q (j=0..3) and the same four rows for q+8
+//     (j=4..7), so 4 splat values serve 8 windows - exactly the as0.x/as0.y/as8.x/as8.y
+//     grouping in exl3_gemv_int8_kernel.cuh.
+//   * 3 dwords fetched per 8 windows (one boundary crossing at most), and the window
+//     itself is a shift+mask off a 64-bit pair - no per-window address math.
+//   * SPLIT-K (KS): one work-group is 32 lanes = one subgroup over (e, nt, ks, row-tile).
+//     Real decode touches h*topk ~ 10 experts x tn=40 tiles = 400 groups, which cannot
+//     fill 256 EUs - the E=10 cases measured 18 GB/s against 61 at E=512 for that reason,
+//     and moe_shared_q8_GEMV.h names the same failure ("inter_s=256 work-items cannot
+//     fill the machine") with split-K + SLM/grid combine as the cure. Partials are
+//     combined by a second kernel, not atomics, so the result stays order-independent.
+//   * rows are tiled in the GRID (MT), with M <= 4 in-kernel: the m loop must unroll and
+//     each m adds a live accumulator chain (q8_0_GEMV.h: "M=8/VL=256 is what the AOT gen
+//     compiler refuses to lower").
+template <int ORDER, int M, int KS>
+static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, float *Y,
+                     int32_t *PART, const Meta &m, float kinv, int16_t *BSDBG)
+{
+    const int E = m.E, tk = m.tk, tn = m.tn, R = m.R, n = m.n;
+    const int tps = tk / KS;                       // tiles per k-slice
+    const int mtiles = (R + M - 1) / M;
+    const size_t groups = (size_t)E * tn * KS * mtiles;
+    const uint32_t nw = (uint32_t)(8 * m.K);        // dwords per tile
+    const int K = (int)m.K;
+    q.submit([&](sycl::handler &cgh)
+    {
+        sycl::local_accessor<int32_t, 1> red((size_t)4 * 16 * M, cgh);
+        cgh.parallel_for(sycl::nd_range<1>(sycl::range<1>(groups * 32), sycl::range<1>(32)),
+                         [=](sycl::nd_item<1> it)
+        {
+            const int gid = (int)(it.get_global_id(0) >> 5);
+            const int l = (int)(it.get_global_id(0) & 31);
+            int g = gid;
+            int nt, e, mt;
+            const int ks = g % KS; g /= KS;
+            if (ORDER == 0)
+            {
+                // clustered: k-slices innermost (they share a tile block, so the L2 rule the vendor
+                // kernels use), then nt, so neighbouring groups stay inside one expert
+                nt = g % tn; g /= tn;
+                mt = g % mtiles;
+                e = g / mtiles;
+            }
+            else
+            {
+                // scattered: expert innermost -> adjacent groups land expert*1.5 MiB apart
+                e = g % E; g /= E;
+                mt = g % mtiles;
+                nt = g / mtiles;
+            }
+            const int q0 = l & 7;                   // column pair (q0, q0+8)
+            const int sub = l >> 3;                 // 4 tile subsets per slice
+
+            int32_t a0[M], a1[M];
+            for (int i = 0; i < M; ++i) { a0[i] = 0; a1[i] = 0; }
+            const int rowb = mt * M;
+            const int RB = 256 * K;
+
+            for (int tt = sub; tt < tps; tt += 4)
+            {
+                const int kt = ks * tps + tt;
+                const uint32_t *dw = (const uint32_t *)W
+                    + ((size_t)e * tk + kt) * tn * nw + (size_t)nt * nw;
+                for (int a4 = 0; a4 < 4; ++a4)
+                {
+                    const int t = 4 * q0 + a4;
+                    const int o0 = K * (t * 8 + 1) - 16;          // first window bit
+                    const int o = o0 < 0 ? o0 + RB : (o0 >= RB ? o0 - RB : o0);
+                    const uint32_t wi = (uint32_t)o >> 5, of = (uint32_t)o & 31u;
+                    const uint32_t d0 = dw[wi];
+                    const uint32_t d1 = dw[(wi + 1 == nw) ? 0u : wi + 1u];
+                    const uint32_t d2 = dw[(wi + 2 >= nw) ? (wi + 2 - nw) : wi + 2u];
+                    const uint64_t V01 = ((uint64_t)d0 << 32) | d1;
+                    const uint64_t V12 = ((uint64_t)d1 << 32) | d2;
+                    const int rel0 = 2 * a4;
+                    const int kk0 = kt * 16 + rel0;
+                    for (int bq = 0; bq < 4; ++bq)
+                    {
+                        const int j1 = bq, j2 = bq + 4;
+                        const int s1 = (int)of + K * j1, s2 = (int)of + K * j2;
+                        const uint32_t win1 = (uint32_t)((s1 >= 32 ? (V12 >> (48u - (uint32_t)(s1 - 32)))
+                                                                    : (V01 >> (48u - (uint32_t)s1))) & 0xFFFFu);
+                        const uint32_t win2 = (uint32_t)((s2 >= 32 ? (V12 >> (48u - (uint32_t)(s2 - 32)))
+                                                                    : (V01 >> (48u - (uint32_t)s2))) & 0xFFFFu);
+                        const uint32_t p1 = win1 * MUL1_MULT, p2 = win2 * MUL1_MULT;
+                        if (ks == 0 && sub == 0 && kt == 0 && e == 0 && nt == 0)
+                        {
+                            // exact fixture: byte-sums this item computed for expert 0 / tile 0
+                            BSDBG[t * 8 + j1] = (int16_t) sycl::ext::oneapi::dot_acc(p1, 0x01010101u, 0);
+                            BSDBG[t * 8 + j2] = (int16_t) sycl::ext::oneapi::dot_acc(p2, 0x01010101u, 0);
+                        }
+                        const int rel = rel0 + (bq & 1) + ((bq & 2) ? 8 : 0);
+                        const size_t kb = (size_t)(kt * 16 + rel);
+                        for (int i = 0; i < M; ++i)
+                        {
+                            const int row = rowb + i;
+                            if (row >= R) break;
+                            const int32_t sp = XSPL[(size_t)row * m.k + kb];
+                            // (uint32_t, int32_t, int32_t) is the unsigned x signed form = CUDA
+                            // dp4a_us. Casting sp to uint32_t would silently select the unsigned x
+                            // unsigned overload and read negative activations as 128..255.
+                            a0[i] = sycl::ext::oneapi::dot_acc(p1, sp, a0[i]);
+                            a1[i] = sycl::ext::oneapi::dot_acc(p2, sp, a1[i]);
+                        }
+                    }
+                }
+            }
+            // fold the 4 tile subsets through SLM, NOT via sub_group shuffles: this device may run
+            // 16-lane sub-groups (it reports both 16 and 32), and a 32-lane butterfly across two
+            // independent sub-groups is silently wrong - results stayed deterministic and mapping-
+            // dependent, which is what gave it away. group_barrier carries the visibility fence the
+            // vendor notes insist on for cross-subgroup SLM exchange.
+            for (int i = 0; i < M; ++i)
+            {
+                red[((size_t)sub * 16 + q0) * M + i] = a0[i];
+                red[((size_t)sub * 16 + q0 + 8) * M + i] = a1[i];
+            }
+            sycl::group_barrier(it.get_group());
+            if (sub != 0) return;
+            for (int i = 0; i < M; ++i)
+            {
+                const int row = rowb + i;
+                if (row >= R) break;
+                int32_t s0 = 0, s1 = 0;
+                for (int s = 0; s < 4; ++s)
+                {
+                    s0 += red[((size_t)s * 16 + q0) * M + i];
+                    s1 += red[((size_t)s * 16 + q0 + 8) * M + i];
+                }
+                const size_t base = (((size_t)ks * E + e) * R + row) * n + (size_t)nt * 16;
+                PART[base + q0] = s0;
+                PART[base + q0 + 8] = s1;
+            }
+        });
+    });
+}
+
+// combine the KS partials and apply the mul1 epilogue: y = k_inv*q*(acc - 510*sum_x8)
+static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const int32_t *SX8,
+                    float *Y, const Meta &m, float kinv, int KS)
+{
+    const size_t total = (size_t)m.E * m.R * m.n;
+    q.parallel_for(sycl::range<1>(total), [=](sycl::id<1> id)
+    {
+        const size_t i = id[0];
+        const int row = (int)((i / m.n) % m.R);
+        int32_t s = 0;
+        for (int ks = 0; ks < KS; ++ks)
+            s += PART[(size_t)ks * m.E * m.R * m.n + i];
+        Y[i] = kinv * Q[row] * ((float)s - 510.0f * (float)SX8[row]);
+    });
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: %s CASE_DIR [order 0|1] [reps] [rows]\n", argv[0]); return 2; }
@@ -241,6 +405,11 @@ int main(int argc, char **argv)
     const int order = argc > 2 ? atoi(argv[2]) : 0;
     const int reps = argc > 3 ? atoi(argv[3]) : 5;
     const int rows_arg = argc > 4 ? atoi(argv[4]) : 0;
+    const int impl = argc > 5 ? atoi(argv[5]) : 0;          // 0 = rev B, 1 = rev C
+    const int ksplit = argc > 6 ? atoi(argv[6]) : 8;        // rev C only
+    if (impl != 0 && impl != 1) { fprintf(stderr, "impl must be 0 or 1\n"); return 2; }
+    if (ksplit != 1 && ksplit != 2 && ksplit != 4 && ksplit != 8 && ksplit != 16)
+    { fprintf(stderr, "ks must be 1,2,4,8,16\n"); return 2; }
     if (order != 0 && order != 1) { fprintf(stderr, "order must be 0 or 1\n"); return 2; }
 
     std::string meta;
@@ -278,6 +447,15 @@ int main(int argc, char **argv)
     int32_t *SX8 = (int32_t *) sycl::malloc_device(sbuf.size(), q);
     float *Y = (float *) sycl::malloc_device((size_t) m.E * m.R * m.n * 4, q);
     int16_t *BSD = (int16_t *) sycl::malloc_device(256 * 2, q);
+    // pre-splatted activations for rev C: int32 whose 4 signed bytes are one x8 value, so a single
+    // dot_acc(uint32 prod, int32 splat, int32 acc) is byte-sum x activation x accumulate (CUDA dp4a_us)
+    std::vector<int32_t> hspl((size_t)m.R * m.k);
+    for (int r = 0; r < m.R; ++r)
+        for (int kk = 0; kk < m.k; ++kk)
+            hspl[(size_t)r * m.k + kk] = (int32_t)(int8_t)xbuf[(size_t)r * m.k + kk] * 0x01010101;
+    int32_t *XSPL = (int32_t *) sycl::malloc_device(hspl.size() * 4, q);
+    int32_t *PART = (int32_t *) sycl::malloc_device((size_t)ksplit * m.E * m.R * m.n * 4, q);
+    q.memcpy(XSPL, hspl.data(), hspl.size() * 4);
     q.memcpy(W, wbuf.data(), wbytes);
     q.memcpy(X8, xbuf.data(), xbuf.size());
     q.memcpy(Q, qbuf.data(), qbuf.size());
@@ -286,7 +464,12 @@ int main(int argc, char **argv)
     q.wait();
 
     // exact layout check first, before any timing
-    submit<0, true, 1>(q, W, X8, Q, SX8, Y, BSD, m, m.kinv);
+    if (impl == 1)
+    {
+        if (m.R <= 4) submit_c<0, 1, 1>(q, W, XSPL, Y, PART, m, m.kinv, BSD);
+        else submit_c<0, 4, 1>(q, W, XSPL, Y, PART, m, m.kinv, BSD);
+    }
+    else submit<0, true, 1>(q, W, X8, Q, SX8, Y, BSD, m, m.kinv);
     q.wait();
     std::vector<int16_t> hbs(256);
     q.memcpy(hbs.data(), BSD, 256 * 2);
@@ -294,6 +477,13 @@ int main(int argc, char **argv)
     long long cksum = 0;
     for (int i = 0; i < 256; ++i) cksum += hbs[i];
     printf("layout check: expert0/tile0 bytesum checksum %lld (non-zero: ring extractor ran)\n", cksum);
+    {
+        char bp[512];
+        snprintf(bp, sizeof bp, "%s/bs_dev_%s.bin", dir.c_str(), impl ? "c" : "b");
+        FILE *f = fopen(bp, "wb");
+        fwrite(hbs.data(), 2, 256, f);
+        fclose(f);
+    }
 
     // rows per item = ceil(R / 4) rounded up to a supported NB, so 4 row-blocks cover the batch
     auto run = [&](auto nb) {
@@ -305,6 +495,24 @@ int main(int argc, char **argv)
                    m.R <= 64 ? 16 : 64;
     auto dispatch = [&]
     {
+        if (impl == 1)
+        {
+            // M = rows per grid row-tile, kept <= 4 so the unrolled m loop stays in registers
+            const int M = m.R <= 4 ? m.R : 4;
+#define RC(MM, KK) { if (order == 0) submit_c<0, MM, KK>(q, W, XSPL, Y, PART, m, m.kinv, BSD); \
+                     else submit_c<1, MM, KK>(q, W, XSPL, Y, PART, m, m.kinv, BSD); \
+                     combine(q, PART, Q, SX8, Y, m, m.kinv, KK); }
+            if (M == 1) { if (ksplit == 1) RC(1,1) else if (ksplit == 2) RC(1,2)
+                          else if (ksplit == 4) RC(1,4) else if (ksplit == 8) RC(1,8) else RC(1,16) }
+            else if (M == 2) { if (ksplit == 1) RC(2,1) else if (ksplit == 2) RC(2,2)
+                               else if (ksplit == 4) RC(2,4) else if (ksplit == 8) RC(2,8) else RC(2,16) }
+            else if (M == 3) { if (ksplit == 1) RC(3,1) else if (ksplit == 2) RC(3,2)
+                               else if (ksplit == 4) RC(3,4) else if (ksplit == 8) RC(3,8) else RC(3,16) }
+            else { if (ksplit == 1) RC(4,1) else if (ksplit == 2) RC(4,2)
+                   else if (ksplit == 4) RC(4,4) else if (ksplit == 8) RC(4,8) else RC(4,16) }
+#undef RC
+            return;
+        }
         if (nb == 1) run(std::integral_constant<int, 1>{});
         else if (nb == 2) run(std::integral_constant<int, 2>{});
         else if (nb == 4) run(std::integral_constant<int, 4>{});
@@ -313,6 +521,8 @@ int main(int argc, char **argv)
         else run(std::integral_constant<int, 64>{});
     };
     printf("rows per item %d (4 row-blocks cover R = %d)\n", nb, m.R);
+    if (impl == 1) printf("rev C: k-split %d, rows/tile %d, groups %d\n", ksplit,
+                          m.R <= 4 ? m.R : 4, m.E * m.tn * ksplit * ((m.R + 3) / 4));
 
     std::vector<float> y((size_t) m.E * m.R * m.n);
     double best = 1e30;
@@ -326,14 +536,22 @@ int main(int argc, char **argv)
     }
     q.memcpy(y.data(), Y, y.size() * 4);
     q.wait();
+    if (getenv("GEMV_DUMP_PART"))
+    {
+        std::vector<int32_t> hp((size_t)ksplit * m.E * m.R * m.n);
+        q.memcpy(hp.data(), PART, hp.size() * 4); q.wait();
+        char pp[512]; snprintf(pp, sizeof pp, "%s/part_dev.bin", dir.c_str());
+        FILE *fp = fopen(pp, "wb"); fwrite(hp.data(), 4, hp.size(), fp); fclose(fp);
+        printf("dumped partials %s (%d slices)\n", pp, ksplit);
+    }
 
     const double gw = (double) m.E * m.tk * m.tn * 256.0 / best / 1e9;
-    printf("order %d (%s): %8.1f us   %6.1f GB/s   %7.1f G-weights/s\n", order,
+    printf("impl %d order %d (%s): %8.1f us   %6.1f GB/s   %7.1f G-weights/s\n", impl, order,
            order == 0 ? "clustered" : "scattered ", best * 1e6, wbytes / best / 1e9, gw);
 
     std::vector<float> yy(y);
     char outpath[512];
-    snprintf(outpath, sizeof outpath, "%s/y_dev_order%d.bin", dir.c_str(), order);
+    snprintf(outpath, sizeof outpath, "%s/y_dev_order%d_impl%d.bin", dir.c_str(), order, impl);
     FILE *fo = fopen(outpath, "wb");
     fwrite(yy.data(), 4, yy.size(), fo);
     fclose(fo);
@@ -342,6 +560,6 @@ int main(int argc, char **argv)
     printf("wrote %s  (max|y| %.3f, sum %.1f)\n", outpath, ymax,
            [&] { double s = 0; for (float v : yy) s += v; return s; }());
     sycl::free(W, q); sycl::free(X8, q); sycl::free(Q, q); sycl::free(SX8, q);
-    sycl::free(Y, q); sycl::free(BSD, q);
+    sycl::free(Y, q); sycl::free(BSD, q); sycl::free(XSPL, q); sycl::free(PART, q);
     return 0;
 }

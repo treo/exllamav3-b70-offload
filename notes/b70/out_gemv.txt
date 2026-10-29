@@ -56,3 +56,26 @@ Next revision of this probe: drop the bs[] table, keep prod in registers, one do
 Ordering is NOT the lever at this instruction count - clustered/scattered ratios sit at 0.98-1.02 for
 R = 1..32 - which is the honest reading of §3a and E4b: the locality win is real for the byte stream
 (probe_rates 1.08-1.99x) but invisible until the arithmetic stops dominating.
+
+================================================================================
+rev C - PROVISIONAL: structure validated, numerics NOT yet exact. Do not quote as a rate.
+================================================================================
+Status: window extraction is proven correct IN-KERNEL (the byte-sums rev C computes for expert 0 /
+tile 0 match tests/testlib/trellis.py exactly), and totals are off by a near-constant per-column
+offset of -510 * sum_x8 (measured mean -491,786 vs -510*963 = -491,130), i.e. the mul1 bias term is
+folded in a second time somewhere between the subsets and the combine. Two defects were found and
+fixed on the way: casting the signed activation splat to uint32_t silently selected the
+unsigned x unsigned dot_acc overload, and the cross-subset reduction was a 32-lane butterfly on a
+device that runs 16-lane sub-groups (deterministic, mapping-dependent wrongness).
+
+What it already establishes - the parallelism point, which matters more than the rate:
+  R=1, split-K sweep, real decode shapes (E experts touched per layer):
+     E=10 : ks=1 25.4   ks=4 88.8   ks=8 69.1   ks=16 54.1 GB/s
+     E=96 : ks=1 64.7   ks=4 103.6  ks=8 107.3  ks=16 99.9 GB/s
+     E=512: ks=1 111.2  ks=4 111.6  ks=8 109.2  ks=16 101.3 GB/s
+  b=1 decode touches h*topk ~ 10 experts, i.e. ~400 work-groups at tn=40 - the machine is NOT full.
+  rev B measured 17-18 GB/s at E=10 against 61 at E=512 for exactly this reason, and split-K recovers
+  ~5x of it (17 -> 89). moe_shared_q8_GEMV.h names the identical failure ("inter_s=256 work-items
+  cannot fill the machine") and the identical cure. So a decode kernel for this design MUST split K;
+  designing against a rate measured on 512 experts would have hidden that completely.
+  The E=512 number (111 GB/s, 1.8x rev B) is the one to re-measure after the bias bug is fixed.

@@ -414,7 +414,39 @@ The general lesson: before treating a platform question as open, check whether a
 same hardware generation is sitting in the tree. A comment that says "the original reached ~180 GB/s and
 here is why" is worth more than a fresh microbenchmark of my own guess.
 
-## 25. When a model and a measurement disagree by 30×, check the model's units first
+## 25. Silent, deterministic wrongness on Xe2: sub-group width and `dot_acc` signedness
+
+Getting rev C of `probe_gemv` to bit-exactness took three rounds, and each wrong answer looked like a
+result:
+
+* **16-lane sub-groups.** The device reports both 16 and 32 and the compiler picks. A 32-lane butterfly
+  (`shift_group_right` by 8 then 16) across a 32-item work-group is therefore two independent 16-lane
+  exchanges, and each lane happily returns a sum of the wrong set. Deterministic, reproducible,
+  mapping-dependent — it looked like an indexing bug in the tile loop, and nearly got "fixed" there.
+  Rule: if a reduction crosses lanes, either force the sub-group size or do the exchange through SLM
+  with a full `group_barrier`. The SLM form costs nothing here (4 × 16 × M int32) and is width-agnostic.
+* **`dot_acc` overload signedness.** `dot_acc(uint32, uint32, int32)` is unsigned×unsigned; `dp4a_us`'s
+  equivalent is `dot_acc(uint32, int32, int32)`. Writing `(uint32_t)sp` on a signed activation splat
+  compiles, runs, and turns −1 into 255. Only a bit-exact reference catches this, which is the argument
+  for Gate A being bit-exact rather than tolerance-based.
+* **A fixture proves only what it covers.** The byte-sum fixture was wired to expert 0 / tile 0, so it
+  validated window extraction and position mapping but *nothing about tile striding* — and it passed
+  while the kernel was still wrong. After it matched exactly I kept hunting in the mapping, which was
+  already proven, instead of in the parts the fixture had not touched. A fixture must be chosen for the
+  claim it is supporting; "the extractor is right" and "the accumulator sees the right bytes" are
+  different claims needing different probes.
+
+The diagnosis that finally worked was arithmetic on the *shape* of the error: mismatches were non-zero
+in all 640 columns but their difference was near-constant (−491,786 vs the predicted −510·Σx8 =
+−491,130), which says a term independent of the output column is doubled — i.e. the mul1 bias, not the
+unpacking. Constant offsets across a reduction axis are a fingerprint worth checking for before reading
+code.
+
+And the finding that outranks all three: **measure at the operating shape.** Every rev B/C rate quoted
+above E=512 hid the fact that b=1 decode touches ~10 experts and runs 3.5× slower there (17 vs 61 GB/s)
+for reasons unrelated to arithmetic. See `b70-kernels.md` §2b item 9.
+
+## 26. When a model and a measurement disagree by 30×, check the model's units first
 
 Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
 cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed

@@ -206,6 +206,21 @@ What they say that changes our design:
    `UR_RESULT_ERROR_DEVICE_LOST`)" — same failure signature as `LESSONS` 4, reached from a different
    direction: on this driver an OOB *read* does not fault verbosely, it kills the device.
 
+9. **Decode must split K, or the machine is idle.** The b=1 case touches `h · topk` ≈ 10 experts →
+   ~400 work-groups at `tn` = 40, which cannot fill 256 EUs. Measured on the same bytes:
+   rev B gets **17–18 GB/s at E=10** versus **61 GB/s at E=512** — a 3.5× penalty that has nothing to do
+   with arithmetic, and rev C's split-K recovers ~5× of it (17 → 89 GB/s at E=10; see `out_gemv.txt`,
+   PROVISIONAL section — rev C's numerics are not exact yet). `moe_shared_q8_GEMV.h` hits the same wall
+   ("inter_s=256 work-items cannot fill the machine") and fixes it with split-K plus an SLM/grid combine.
+   Design consequence: the §3 decode kernel is `(expert, n-tile, k-slice)`-grained with a separate
+   combine, and any rate quoted for planning must be measured **at the real per-layer expert count**,
+   not at a convenient large one. That is now a condition on E4.
+10. **`dot_acc` overload signedness is silent.** `dot_acc(uint32_t, uint32_t, int32_t)` is
+    unsigned×unsigned; the CUDA `dp4a_us` equivalent is `dot_acc(uint32_t, int32_t, int32_t)`
+    (unsigned prod × signed activation splat). Casting the splat to `uint32_t` reads negative
+    activations as 128…255 and produces plausible-looking garbage — caught only by the bit-exactness
+    gate, which is exactly why Gate A is bit-exact rather than tolerance-based.
+
 ## 3. Decode kernel (`rows ≤ 8`, i.e. the whole of token generation)
 
 Unit of work: `(expert, projection, 128-output-column band, k-slice, chunk of ≤4 tokens)`. At decode
