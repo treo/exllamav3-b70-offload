@@ -149,7 +149,60 @@ means the ordering rules above are not implemented, and exceeding the clustered 
 locality *and* something unmodelled (L2 reuse across a repeated-expert stream, which decode actually
 presents) are working.
 
+## 3b. Batched decode (`8 ≲ rows ≲ 256`): a schedule change, not a new arithmetic path
+
+§3 covers `rows ≤ 8` and §4 covers chunked prefill, which leaves exactly the regime where §7's
+concurrency table says the B70 becomes the binding worker. What a large-`rows` decode kernel can change
+is one factor of `union(rows) · h · expert_bytes / rate`, so it is worth being precise about which:
+
+* **bytes** — irreducible. Every touched expert's block is read once per layer per step, and the model
+  already credits that reuse (it counts the *union* of picks, not `rows × topk`). No kernel goes below
+  `E × expert_bytes` as rows grow.
+* **rate** — addressable, by the measured clustered factor. This is the whole opportunity: with a
+  bucketed grid, consecutive work-items belong to the same expert and read neighbouring tiles, which is
+  the 1.08–1.99× of §3a. A `rows = 1` GEMV structurally *cannot* arrange that (too few tiles to order),
+  which is why the win appears only at large b.
+* **flops** — not an opportunity at decode. Rows per expert peaks near 5–6 even at b=256, against the
+  ~272-row XMX crossover (§1), so a DPAS decode kernel buys nothing.
+
+Measured payoff (**[P]** from **[M]** rates, `plan_kernel_split.py` / `out_kernel_split.txt`), aggregating
+over the parent and the link rather than quoting the card alone:
+
+| rows | B70 µs/layer scattered | clustered | tok/s scattered | clustered | rescue | link share of B70 |
+|---|---|---|---|---|---|---|
+| 1 | 56 | 29 | 83 | 83 | **1.00×** (parent binds) | 7 % |
+| 8 | 543 | 352 | 307 | 474 | **1.54×** | 6 % |
+| 32 | 1530 | 1024 | 436 | 651 | **1.49×** | 8 % |
+| 128 | 2738 | 1669 | 974 | 1597 | **1.64×** | 17 % |
+| 256 | 3068 | 1765 | 1739 | 2531 | **1.46×** | **31 %** |
+
+(2.68 bpw. At 6.05 bpw the same exercise yields 1.15–1.38×, because fatter tiles have less locality to
+recover — 1.08–1.27× clustered in `out_rates_footprint_hiq.txt`.)
+
+Three design rules fall out, and the first is the honest limit:
+
+1. **The parent is the ceiling.** Where clustered time drops below `T_parent`, further locality is worth
+   nothing — visible at b=4 (rescue 1.00×, parent already binds) and partly at b=8 (clustered 352 µs
+   versus a 301 µs window). So this kernel is scored as "reach the clustered rate at large b", with a
+   ~1.5–1.6× ceiling at 2.68 bpw, not as an unbounded optimisation.
+2. **Bucket rows by expert; keep one unpack path.** The split is two *schedules* over the same Recipe
+   A/B unpack kernel — the CPU path already does exactly this with one bucketed `mul1` and different
+   thread counts — so the bit-exactness surface (gates A/B′) does not multiply. A second unpack
+   implementation would, and is not what the numbers ask for.
+3. **The return path becomes a large-`rows` problem.** Activation traffic is `rows·H` int8 down and
+   `rows·topk·H·sz_out` up at 14.4 GB/s, which is 31 % of the B70's own time at b=256 — the point where
+   `EXL3_MOE_B70_OUT_F16` stops being a knob and starts being a requirement, and where letting the B70
+   sum the partials it owns (one partial per row instead of one per pick) is the larger win, since
+   `topk` of 10 partials collapse to one.
+
 ## 4. Prefill kernels (`rows ≥ 32`): feeding XMX
+
+**Eligibility first, because it is narrower than the header suggests.** XMX binds only once ~272 rows hit
+the same expert (§1). Feeding real pick frequencies into chunk sizes: at R = 2048 the hottest Qwen3.8
+expert receives 41–522 rows and **0–13 of 512 experts** cross the line; at R = 8192, 60–115 do
+(**[M]** crossover ratio, **[P]** counts, `plan_concurrency.py`). So the DPAS routes below are an
+opportunistic path for the hot tail of large chunks, selected per expert from a bucket count the planner
+can predict at load — and the chunk-wide-GEMM reading of this section would be wrong for most experts.
 
 Weights must reach DPAS. `mul1` values are not storable int8 (range −510…495 needs 11 bits), so both
 routes carry the value in a wider or split form, and `k_inv·q` stays in the epilogue:

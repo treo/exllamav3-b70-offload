@@ -551,6 +551,18 @@ measured rate curve at the matched footprint:
   not (the bytes are already deduplicated — an expert is read once per layer per step however many rows
   picked it); (c) at b=8 the 6.05 recipe *loses* throughput versus b=4 (146 vs 156 tok/s) because the CPU
   residue term is climbing alongside the B70's — concurrency does not rescue a model with a residue.
+* **Separate kernels for small and large b rescue ~1.5×, and the parent caps them there.** The B70's cost
+  is `union(rows)·h·expert_bytes/rate`; bytes are irreducible (the union already credits reuse) and flops
+  are irrelevant at decode (rows/expert peaks near 5–6 versus a 272-row XMX crossover), so the only
+  kernel-addressable factor is **rate** — and rate is grid order. A bucketed large-`rows` kernel can put
+  neighbouring lanes on neighbouring tiles, which a `rows=1` GEMV structurally cannot; that is worth
+  **1.54× / 1.49× / 1.64× / 1.46×** at b = 8 / 32 / 128 / 256 on 2.68 bpw (307→474, 436→651, 974→1597,
+  1739→2531 tok/s) and only **1.15–1.38×** on 6.05 bpw, whose fatter tiles have less locality to recover.
+  The ceiling is `T_parent` retaking the lead: at b=4 the rescue is exactly 1.00× because the parent
+  already binds, and at b=8 the clustered time (352 µs) is within ~17 % of the window (301 µs). Design
+  consequence in b70-kernels.md §3b: two **schedules** over one unpack path (which is what the CPU side
+  already does), not two arithmetic implementations — and the return path joins the party, reaching 31 %
+  of B70 time at b=256, which is where `…_OUT_F16` and B70-side partial summation stop being optional.
 * Prefill is link-bound at ~2048 rows unless `sz_out` drops to fp16 or the row split keeps more work
   on the 3090; the model gives the crossover for both, and the harness measures which the box lands on.
 
@@ -1058,6 +1070,7 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | hottest-first within a layer | retained **while a CPU residue exists**, not as a universal rule; the boundary is **recipe-dependent** | spreading hot experts over both VRAM homes leaves colder ones to `bytes/47.4`, the most expensive byte on the box (GLM: `order` wins 9–20 %). Across five Qwen3.8 recipes: `lpt` wins +3…+9 % at 2.05/2.68/4.05/5.05 bpw, `order` wins **+43 % at 6.05 bpw**, the only one with a real residue **[M]** | E19 |
 | §2.1a's premises are recipe-general on Qwen3.8 | checked, not assumed | matched rate band 207–295 GB/s at K = 2.5–6.0; parent duty 31–45 % at every quant; residency falls 512 → 104 slots/layer only through `expert_bytes` **[M]** | a recipe that scaled the streamed non-expert tensors with bits — then the parent's duty would climb with quantisation and the "spare bandwidth on the 3090" premise would break |
 | decode figures are b=1 figures | stated, and extended to a rows axis | `plan_concurrency.py`: parent binds at b ≤ 4, B70 binds from b≈4–8 to 256; aggregate 83 → 1739 tok/s (2.68 bpw) **[P, measured rates]** | E21 — flattening earlier or lower than predicted means per-step byte cost is worse than the footprint-matched rate implies |
+| concurrency rescues via a second kernel family | **no — via a second schedule over one arithmetic path** | the only addressable factor is rate (bytes irreducible, flops irrelevant at rows/expert ≤ 6); the rescue is the measured clustered factor, 1.46–1.64× at 2.68 bpw **[P]** on **[M]** rates | E23; if bit-identical outputs between schedules cannot be held cheaply, the two-schedule framing is wrong and it becomes two kernels |
 | prefill is fed to XMX as a chunk-wide GEMM | **rejected**: prefill is memory-bound at realistic chunks | 272 MAC/byte crossover vs 41–522 rows on the hottest expert at R = 2048 → 0–13 of 512 experts qualify **[M]** | E22 measuring the real compute-bound threshold; if it is far below 272 the DPAS path is leaving throughput on the table |
 | concurrency rescues a residue-bearing model | no | 6.05 bpw goes 156 → 146 tok/s from b=4 → 8: the CPU residue climbs with the B70 term **[P]** | E21, or a placement change that removes the residue at those batch sizes |
 | every knob default except the rate-derived ones | provisional | — | phases 1–4 gates |
