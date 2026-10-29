@@ -526,7 +526,7 @@ measured rate curve at the matched footprint:
   | model (E = topk, R = 1) | MiB/layer | µs/layer | vs parent window | tok/s ceiling |
   |---|---|---|---|---|
   | Qwen3.8@2.68 | 17.58 | **239.2** (gate 80.7 ×2 + down 77.8) | ×1.05 of 250 µs | 87 |
-  | **Qwen3.8@2.68, K compiled in** | 17.58 | **126.1** (gate 39.7 ×2 + down 38.0, `probe_gemv -DGEMV_KCONST`, bit-identical output) | **×1.98 of 250 µs** | 165 |
+  | **Qwen3.8@2.68, K compiled in** | 17.58 | **117.5** best-config (gate 39.7 at ks=4 ×2 + down 38.1 at ks=1); 141.7 if one ks serves all | **×2.13 of 250 µs** (×1.77 pessimistic) | 170 |
   | Qwen3.8@2.68, batch 4 | 17.58 | 360.3 | ×0.69 — B70 binds | 58 |
   | GLM-5.3@3.05 | 72.00 | **717.2** (gate 245.7 ×2 + down 225.8) | parent window unmeasured (E10); it is 2.9× Qwen3.8's | 31 |
   | Qwen3.6-35B-A3B@2.49 | 9.00 | **126.6** (gate 45.4 ×2 + down 35.8) | ×1.3 against the ~165 µs Qwen3.5-class window (same geometry) | 198 |
@@ -549,6 +549,19 @@ measured rate curve at the matched footprint:
   per-recipe instantiation, exactly the shape of the vendor's generated policy table (§2c item 14).
   At rows=4 the gain is only ×1.09–1.13 (the fixed cost is a shrinking share), so the parity-at-batch-4
   conclusion stands; the DPAS schedule still wins from rows ≈ 5 once both are compiled this way.
+* **The gain is not specific to one recipe or one projection.** With `-DGEMV_KCONST=<K>` built per rate,
+  rev C improved at rows=1 by ×1.53 (K=2), ×1.43 (K=3), ×1.46 (K=4), ×1.27 (K=5), ×1.23 (K=6) — every one
+  bit-exact against its own reference at two split-K settings — and on `down_proj` (k=640, n=2560,
+  `tn`=160, a transposed geometry) the K=3 gain is ×1.89. Secondary readings: baselines are flat across
+  recipes (73.6–74.8 µs for identical weight counts, independently confirming that decode compute time is
+  recipe-independent), while the compiled-in results are **not** flat (48.8 → 60.6 µs), because once the
+  extraction arithmetic folds away, memory re-enters at K=5–6. And quote a gain with its ks: for K=3 at
+  rows=1 it is ×1.42 at ks=1 but ×1.90 at ks=4.
+* **rev E holds on the second projection**, which is what the two-schedule policy needed. On down_proj:
+  rev C wins ×2.08 at rows=1, they tie at rows=4, and rev E wins ×2.15 / ×3.32 at rows=8 / 16 — crossover
+  at rows ≈ 4 versus rows ≈ 5 on gate_proj, both bit-exact. rev E's best split-K moved with geometry *and*
+  row count (ks=4 at rows 1/8, ks=2 at rows 16, against ks=16 best on gate), so E27's policy fit is
+  mandatory rather than a refinement.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is

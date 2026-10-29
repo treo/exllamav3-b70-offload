@@ -317,6 +317,32 @@ rows=8 and x3.7 at rows=16, and the remaining effort is better spent on the deci
 blocked - down_proj and one GLM geometry on rev E (the two-schedule policy currently rests on gate_proj
 alone), and the per-K instantiations for rev C's other recipes.
 
+## TASK: rev E on down_proj, so the two-schedule policy rests on both projections
+
+down_proj is a different geometry from gate/up - k=640, n=2560, tn=160 (transposed), and tn is the grid
+dimension that drove rev E's throughput. E=10, min of 3 interleaved, burst, A in L2 scratch + B global;
+rev E's valid split-K values differ here because tk=40 must leave each sub-group an even tile count.
+
+  rows |  revC base   ks |  revC KCONST  ks |  revE ks=2   ks=4   ks=10 | best revE | verdict
+     1 |       71.9    1 |        38.1    1 |     100.4   79.1  130.9  |      79.1 | revC wins x2.08
+     4 |      112.8    1 |       103.7    1 |     104.2  124.9  157.8  |     104.2 | tied (x1.00)
+     8 |      244.7    4 |       224.4    4 |     146.4  104.5  186.8  |     104.5 | revE wins x2.15
+    16 |      451.7    4 |       415.5    4 |     125.3  160.9  228.5  |     125.3 | revE wins x3.32
+
+Both paths bit-exact against this geometry's own y_ref (rev E at ks=4, rev C+KCONST at ks=4). So:
+* The crossover is rows ~= 4 on down_proj and rows ~= 5 on gate - the two-schedule policy keyed on rows
+  holds on both projections, not just the one it was derived from.
+* rev E's best split-K moves with geometry AND row count (ks=4 at rows 1/8, ks=2 at rows 16, where on
+  gate_proj ks=16 was best) - E27's launch-policy fit is not optional, and a single constant will do it
+  no favours.
+* KCONST on down_proj reproduces the gate result (x1.89 at rows=1), so the compile-time-K win is not
+  specific to one projection shape either.
+
+Per-layer, best measured configuration at b=1: 2 x 39.7 (gate, ks=4) + 38.1 (down, ks=1) = 117.5 us, i.e
+x2.13 inside the 250 us parent window. Using each projection's single best ks is itself a policy choice -
+see E27 - and the naive same-ks-for-all composition gives 2 x 51.8 + 38.1 = 141.7 us (x1.77). Both are far
+from the 239.2 us that started this chain.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -328,5 +354,4 @@ alone), and the per-K instantiations for rev C's other recipes.
     # devinfo: cache hierarchy measured (global 32656 MiB, SLM 128 KiB/group, L2 24 MiB, 256 CUs)
     icpx -fsycl -O2 -o /tmp/devinfo devinfo.cpp && /tmp/devinfo
     DPAS_NO_MAD=1 ./probe_dpas2 ...       # unpack + assembly only (prices the assembly)
-    DPAS_NO_UNPACK=1 ./probe_dpas2 ...    # matrix path only
     DPAS_NO_UNPACK=1 ./probe_dpas2 ...    # matrix path only

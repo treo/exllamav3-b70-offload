@@ -303,6 +303,9 @@ static void submit(sycl::queue &q, const uint16_t *W, const int8_t *X8, const fl
 #ifndef GEMV_FIXTURE
 #define GEMV_FIXTURE 0        // set to 1 only when re-collecting the byte-sum fixture
 #endif
+#ifndef GEMV_KCONST
+#define GEMV_KCONST 0         // 0 = K at run time; otherwise the trellis rate to compile in (2..6)
+#endif
 template <int ORDER, int M, int KS>
 static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, float *Y,
                      int32_t *PART, const Meta &m, float kinv, int16_t *BSDBG)
@@ -312,13 +315,15 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
     const int mtiles = (R + M - 1) / M;
     const size_t groups = (size_t)E * tn * KS * mtiles;
     const uint32_t nw = (uint32_t)(8 * m.K);        // dwords per tile
-#ifdef GEMV_KCONST
+#if GEMV_KCONST
     // E28's actual finding. The intra-dword offset of a lane's window group is LANE-INVARIANT (checked
     // for K=2..6), so the only thing keeping the shift amounts runtime-variable is that K is a runtime
     // value. Knowing K here makes them compile-time constants with no lane reassignment, no cross-lane
     // reduction and no layout change - the accumulators stay in registers exactly as they are.
-    constexpr int K = 3;
-    if (m.K != 3.0) { fprintf(stderr, "GEMV_KCONST build handles K=3 only\n"); std::exit(2); }
+    // Build with -DGEMV_KCONST=<K> for the trellis rate of a given recipe.
+    constexpr int K = GEMV_KCONST;
+    if ((int)m.K != K)
+    { fprintf(stderr, "this build is K=%d, case K=%g\n", K, m.K); std::exit(2); }
 #else
     const int K = (int)m.K;
 #endif
@@ -386,15 +391,18 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
                     const int t = 4 * q0 + a4;
                     const int o0 = K * (t * 8 + 1) - 16;          // first window bit
                     const int o = o0 < 0 ? o0 + RB : (o0 >= RB ? o0 - RB : o0);
-#ifdef GEMV_KCONST
+#if GEMV_KCONST
                     // (K*(8t+1) - 16) & 31 with t = 4*q0 + a4: K*32*q0 is a multiple of 32 for every
                     // integer K, so this depends on a4 alone. Tabulated, the shifts fold and the
                     // s >= 32 select resolves at compile time for each unrolled j - while producing
                     // bit-identical windows (unlike GEMV_CONSTSHIFT, which fakes the data).
-                    static constexpr uint32_t OFTAB[4] = {(3u * (8u * 0u + 1u) - 16u) & 31u,
-                                                          (3u * (8u * 1u + 1u) - 16u) & 31u,
-                                                          (3u * (8u * 2u + 1u) - 16u) & 31u,
-                                                          (3u * (8u * 3u + 1u) - 16u) & 31u};
+                    // Measured offsets, matching the arithmetic below: K=2 {18,2,18,2},
+                    // K=3 {19,11,3,27}, K=4 {20,20,20,20}, K=5 {21,29,5,13}, K=6 {22,6,22,6}.
+                    static constexpr uint32_t OFTAB[4] = {
+                        (uint32_t)((GEMV_KCONST * (8 * 0 + 1) - 16) & 31),
+                        (uint32_t)((GEMV_KCONST * (8 * 1 + 1) - 16) & 31),
+                        (uint32_t)((GEMV_KCONST * (8 * 2 + 1) - 16) & 31),
+                        (uint32_t)((GEMV_KCONST * (8 * 3 + 1) - 16) & 31)};
                     const uint32_t wi = (uint32_t)o >> 5, of = OFTAB[a4];
 #else
                     const uint32_t wi = (uint32_t)o >> 5, of = (uint32_t)o & 31u;

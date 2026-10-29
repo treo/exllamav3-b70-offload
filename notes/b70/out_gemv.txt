@@ -198,3 +198,31 @@ Reproduce:
     /tmp/pg_kc   /tmp/gemv_dpE10 0 21 1 1 4        # rows=1, ks=4
     ./probe_gemv /tmp/gemv_dpE10 0 21 1 1 4        # default build, same case
     python3 dump_gemv_case.py /tmp/gemv_dpE10down 10 4 0 --proj down_proj
+
+================================================================================
+Does compile-time K generalize past K=3?  Yes - all five shipped recipes, bit-exact.
+================================================================================
+-DGEMV_KCONST now takes the rate as a value (-DGEMV_KCONST=4) and derives OFTAB from it. rev C, E=10
+gate_proj, min of 3 interleaved runs, burst mode. Baseline and compiled-in were each checked bit-exact
+against that recipe's own y_ref, at ks=4 and ks=8 - all ten combinations pass.
+
+  K  recipe |  rows=1 base  KCONST  gain | rows=4 base  KCONST  gain | rows=8 base  KCONST  gain
+  2   2.05  |       74.8     48.8  x1.53 |      113.4     98.3  x1.15 |      252.6    219.9  x1.15
+  3   2.68  |       73.9     51.8  x1.43 |      112.6    103.3  x1.09 |      251.7    230.9  x1.09
+  4   4.05  |       73.6     50.3  x1.46 |      112.4     92.7  x1.21 |      250.9    206.8  x1.21
+  5   4.18  |       74.7     58.9  x1.27 |      113.3    104.4  x1.09 |      252.3    232.7  x1.08
+  6   6.05  |       74.8     60.6  x1.23 |      113.3    104.5  x1.08 |      252.4    233.1  x1.08
+
+Read with care:
+* The rows=1 gain depends on split-K, and the two sessions reconcile exactly: for K=3 at ks=1 it is x1.42
+  (75.2 -> 52.8 then, 73.9 -> 51.8 now); at ks=4 it is x1.90 (75.4 -> 39.7). Quote the gain WITH its ks,
+  same discipline as quoting a rate with its footprint.
+* Baselines are flat across recipes (73.6-74.8 us for identical weight counts), independently confirming
+  that decode compute time is recipe-independent. The compiled-in numbers are NOT flat (48.8 -> 60.6):
+  once the extraction arithmetic folds away, the residual grows with bits per weight, so memory starts to
+  matter at K=5-6. Still x1.2-x1.5 everywhere, and free.
+
+Reproduce: for k in 0 2 3 4 5 6; do icpx -fsycl -O2 -DGEMV_KCONST=$k -o /tmp/pgK$k probe_gemv.cpp; done
+(0 = runtime-K baseline). Cases: dump_gemv_case.py /tmp/rc_K<k>_gate 10 16 0 --with-reference
+--ckpt Qwen3.8-Flash-Next-exl3-<recipe>. argv order for probe_gemv is CASE order reps rows impl ks -
+misordering it produced a spurious column of FAIL results in this very session, so it is worth stating.
