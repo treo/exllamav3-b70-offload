@@ -754,5 +754,32 @@ lanes' stores into the operand scratch can be arranged however I like — SLM de
 fragment mapping — so making them contiguous is a free experiment worth the 25–35% that assembly and
 stores account for. Had I not tried the analogy and watched it fail, I would still be optimizing shifts.
 
+## 36. Count work per element of what you are optimizing, not per loop iteration
+
+The dense-store variant was bit-exact, 1.6× slower, and my first note said "store-bound hypothesis
+refuted." That would have been a false record. The diff showed the same three `dw[]` loads in both
+versions, which is why it looked like a clean single-variable test — but the loads sit *inside* the loop,
+and the loop's unit changed. The committed mapping amortizes 3 dword loads over 8 windows; the dense one
+loads 3 dwords per window, because the loop now iterates over columns instead of over the j-index that
+shares a dword pair:
+
+    committed (t = lane + 16*tt)    6 loads / 16 windows = 0.375 per window
+    pair-map (a4 outer)            12 loads / 32 windows = 0.375 per window
+    dense (c outer, 1 window)      48 loads / 16 windows = 3.000 per window
+
+An 8× change in load count, invisible in the diff, fully explains the slowdown. Store density was never
+measured; the hypothesis is alive, merely untested — and re-examining the geometry suggests it is nearly
+closed for other reasons.
+
+Two habits out of this. First, when a refactor changes a loop's *unit*, normalize every resource to the
+unit that matters for the claim — here, loads and stores **per window**, not per iteration. The invariant
+to check before believing any A/B: for each resource (loads, stores, multiplies, barriers, bytes), does
+the total over the whole kernel stay the same in both versions? If not, you measured their difference and
+not the thing you changed. Second, when an experiment turns out confounded, the honest label is
+"untested," not "refuted" — a wrong negative is worse than a gap, because it closes the line of inquiry.
+I caught this only by writing the per-window tallies down after the fact, which is now the first thing I
+do for any mapping change.
+
+
 
 

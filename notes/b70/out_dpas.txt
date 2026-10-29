@@ -277,6 +277,46 @@ WHAT CHANGES:
   from fragment mapping - and re-measure. Worth up to the ~25-35% that extraction+store accounts for.
 * Unroll pragmas are not a tuning knob on this toolchain for fixed-trip loops; stop budgeting for them.
 
+## Second attempt: dense stores - x0.64, but the experiment was confounded, so the hypothesis survives
+
+Made the 16 lanes of a sub-group write one column's 16 rows per iteration (16 consecutive u32 = 64
+contiguous bytes per store instruction, instead of 4 lanes striding every other slot). Bit-exact, and
+KS=8, min of 4, A sourcing as noted:
+
+    mapping                 rows=1  rows=4  rows=8  rows=16
+    committed (sparse)       106.0   108.8   112.7   122.2
+    dense                    165.3   168.9   175.9   181.6     x0.64 at every row count
+    (identical result with A in SLM: 106.2 -> 165.4)
+
+But the two mappings do not differ only in store density. Moving the loop to one window per iteration
+moved the amortization boundary with it:
+
+    committed (t = lane + 16*tt)   6 dword loads for 16 windows  = 0.375 loads/window
+    pair-map (a4 outer)           12 dword loads for 32 windows  = 0.375 loads/window
+    dense (c outer, 1 window)     48 dword loads for 16 windows  = 3.000 loads/window
+
+So x0.64 is fully explained by an 8x increase in load instructions, and **store density was never actually
+tested** - my "rev E is store-bound" hypothesis is unproven, not refuted. Worth recording because the
+confounder was invisible in the code diff: the loads looked identical per iteration, and only the iteration
+count changed.
+
+Then the arithmetic says the lever is largely closed anyway. Store density per instruction is capped by the
+format's own geometry: an instruction is one j-index across 16 lanes, and (col, r) = (q0 + 8*(j>>2),
+2*a4 + (j&1) + 8*(j&2)). Packing 16 consecutive u32 (one column, r = 0..15) requires lanes to vary a4 and
+the low bits of j - which is exactly what breaks sharing a V01/V12 dword pair, pushing loads to 0.75 per
+window. The committed map sits at the corner of that trade: 0.375 loads/window and 8-byte store runs, and
+the alternatives tried cost 2.3x and 1.6x. Two cheap levers dead, both bit-exact, both reverted.
+
+What is left for rev E is the lever neither experiment touched: the scratch round trip itself. Every
+mapping keeps `unpack -> store 1 KB -> joint_matrix_load` because this toolchain has no
+joint_matrix_construct, so operands must come from memory. Only ESIMD xmx::dpas on register simd operands
+removes it - a real rewrite, and the two failures above lower its expected value rather than raising it.
+
+Recommendation, stated as a recommendation: stop optimizing rev E. It already beats rev C by x2.1 at
+rows=8 and x3.7 at rows=16, and the remaining effort is better spent on the decisions that are actually
+blocked - down_proj and one GLM geometry on rev E (the two-schedule policy currently rests on gate_proj
+alone), and the per-K instantiations for rev C's other recipes.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
