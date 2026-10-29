@@ -23,25 +23,30 @@ the DPAS families require K <= 5, so denser recipes fall back to dp4a.
 
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 
- rows      dp4a   rev G+X   rev H+X     rev I      dispatch
-    1     11.76     12.57     12.12      6.13         rev I
-    2     16.23     11.69     12.47      6.47         rev I
-    4     30.99     11.71     12.53      6.71         rev I
-    8     69.27     13.40     13.65      7.53         rev I
-   16    134.97     18.53     15.29      9.43         rev I
+ rows      dp4a   rev G+X   rev H+X     rev I     rev J      dispatch
+    1     11.76     12.57     12.12      6.13      4.35         rev J
+    2     16.23     11.69     12.47      6.47      4.54         rev J
+    4     30.99     11.71     12.53      6.71      4.77         rev J
+    8     69.27     13.40     13.65      7.53      5.68         rev J
+   16    134.97     18.53     15.29      9.43      7.09         rev J
 
-One kernel now wins at every measured batch: rev I (gather routing) is faster than dp4a even at
-rows=1, so the b=1 dp4a exception and the rows>=16 rev H exception are both deleted. The
-exception that survives is the recipe: K > 5 has no DPAS path at all (the unpack
-reads four windows from one funnel-shifted 32-bit word, needing 3K + 16 <= 32), so the 6.05 bpw
-recipe dispatches to dp4a and pays ~2x. Rows=2 is interpolated for the DPAS families; the
-measured rows set is (1, 2, 4, 8, 16) and nothing here extrapolates past 16.
+One kernel wins at every measured batch now: rev J (transposed tiles) beats rev I by 1.27-1.46x and
+dp4a by ~8x at rows=16. Dispatch is a single family, with one caveat that is a design decision rather
+than a tuning knob: rev J needs the device copy of the weights intra-tile permuted (dword q*K+i ->
+i*8+q). Same bytes, same DRAM traffic, same output bits, ~1.5 ms one-time device permute for a 512 MB
+resident set - but the device tensor stops being byte-identical to the checkpoint, which is the
+property the 'native layout, no repack' constraint was protecting. If that constraint is kept
+literally the fallback is dpas_gather (rev I) at +27-46%, still one kernel; dp4a is the only option
+where no permutation is possible at all. Revs G/H carry no advantage now and remain for provenance.
+Rows=2 is interpolated; nothing here extrapolates past the measured set 1/2/4/8/16.
 
-Binding constraint now: rev I runs the gate projection at 318 GB/s effective (5.86 MiB in 19.4 us)
-against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - the first kernel in
-this line within ~1.5x of the memory wall. Doubling its arithmetic still costs more (+42 %) than
-doubling its gathers (+17 %), and extra split-K now hurts, so the next lever is instructions per
-window, not routing and not parallelism.
+Binding constraint now: rev J runs the gate projection at 437 GB/s effective (5.86 MiB in 14.0 us)
+against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - ~90% of the
+achievable streaming rate, so decode is bandwidth-bound in the sense the earliest design notes
+assumed, which no kernel in this line achieved until now. Its own diagnostics say balanced rather
+than dominated: NO_MAD (12.5) sits above both FETCH_ONLY (8.9) and ALU_ONLY (10.9), and the
+components sum to 21.3 against a full 14.0 (~35% overlap). The remaining levers are bytes and
+locality - placement, ordering, the 18.35 GiB threshold - not instructions.
 
 rows > 16 is outside the measured set; the DPAS path uses two M=8 fragments above 8 rows and its
 cost slope is still rising at 16, so quoting a 64- or 256-token decode number from this table

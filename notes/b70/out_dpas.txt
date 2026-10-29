@@ -1197,6 +1197,63 @@ tag (y_dev_revh_*), K <= 5 limit inherited, and plan_decode_cost.py / b70-archit
 the rows>=16 winner - both need updating to rev I, and the b=1 dp4a exception should be deleted rather than
 re-tuned.
 
+================================================================================
+REV J (probe_dpas7.cpp, external revision, descendant of rev H *without* the expert grid): transposed tiles
+remove the routing entirely, and it is 1.27-1.46x faster than rev I at every measured point.
+================================================================================
+The layout fact it exploits is the one behind rev G's NW = 8*K: inside a tile, column group q (columns q and
+q+8) owns exactly dwords [q*K, q*K+K) - 4 ring positions x 8 windows x K bits = 32K bits - and every funnel's
+bit offset depends only on (K, a4, jl, half), never on q. Storing each tile's 8xK dwords transposed to Kx8
+makes a funnel's two words plain register rows at compile-time positions, and its shift amounts constants: no
+iselect (rev H), no gather (rev I). Plus deeper prefetch (~1 KB/thread vs rev H's 192 B) and experts spread
+across threads (DPAS_EPT) instead of the expert grid.
+
+Exactness: verified here, not just taken on claim - bit-exact against each case's own y_ref at rows 1/4/8/16
+on gate_proj and down_proj (8 checks; rev J's built-in checker silently skips when the reference size does not
+match the run, which it does for rows < 16 against a rows=16 ref, so the low-row cases needed checking by hand).
+
+Warm interleaved min of 4, us (rev J at its best ks: 2 gate / 1 down):
+
+  gate tn=40    revG    revH    revI    revJ   |  down tn=160  revG    revH    revI    revJ
+    rows=1     36.5    40.5    19.4    14.0    |    rows=1     45.3    45.0    22.6    15.5
+    rows=4     40.0    42.5    20.4    14.5    |    rows=4     52.0    49.4    26.3    18.7
+    rows=8     41.9    43.8    21.9    16.8    |    rows=8     58.6    55.3    32.0    23.1
+   rows=16     62.1    45.6    25.7    20.2    |   rows=16     80.8    64.4    43.1    30.4
+
+rev J / rev I: x1.39 / x1.41 / x1.30 / x1.27 gate, x1.46 / x1.41 / x1.39 / x1.42 down. Against rev G, x2.5-3.1.
+Layer time (2 x gate/up + down_proj): **b=1 = 43.5 us** (rev I 61.6, rev H+X 117.1, rev G+X 114.6, dp4a-era
+173.1) and b=16 = 70.8 us. Against the 250 us parent window that is ~5.7x of headroom at b=1.
+
+**This kernel is at the memory wall, not below it.** 5.86 MiB in 14.0 us = **437 GB/s effective**, against the
+measured 484 GB/s stream slope and 674 GB/s copy peak - 90 % of the achievable streaming rate. Every kernel in
+this line before it was 2-6x off that figure, which is why "decode is bandwidth-bound" was true of the model
+and false of the machine until now.
+
+Attribution with rev J's own diagnostic switches (gate rows=1 / rows=16; these remove work, so magnitudes are
+soft, but the pattern is the point):
+
+    rows=1:   full 14.0 | FETCH_ONLY 8.9 | ALU_ONLY 10.9 | NO_MAD 12.5 | NO_UNPACK 11.6
+    rows=16:  full 20.9 | FETCH_ONLY 12.1 | ALU_ONLY 14.5 | NO_MAD 15.3 | NO_UNPACK 17.0
+
+Neither of the author's discriminating tests fires: NO_MAD (12.5) is well above FETCH_ONLY (8.9) so it is not
+latency-bound, and well above ALU_ONLY (10.9) so it is not ALU-bound either. The components sum to 21.3 against
+a full 14.0, i.e. ~35 % overlap - a balanced kernel where removing one resource hides the others. That is a
+different regime from rev H, where doubling the unpack alone cost +86 %.
+
+Independent confirmation of item 5's structural fix, from a design lineage that never used it: sweeping DPAS_EPT
+(experts per thread) gives EPT=1 = 14.0 us, EPT=2 = 21.1, EPT=5 = 39.7. One expert per thread is optimal here
+too, and EPT=1 is exactly what DPAS_X does on revs G/H/I - so "spread experts maximally" was never about the
+partial-sum traffic alone; it is a latency-hiding requirement, and rev J reaches it from the other direction.
+
+The cost rev J introduces, and it is a design decision not a free lunch: **the device copy of the weights must
+be intra-tile permuted** (dword q*K + i -> i*8 + q). Same bytes, same DRAM traffic, no re-quantization and no
+extra capacity, and Gate A's numeric equality still holds output-wise - but the device tensor is no longer
+byte-identical to the checkpoint, which is the property the "native tile layout, no repack" constraint was
+protecting. The staging path already copies expert bytes to VRAM, so the choices are (a) permute during that
+copy on the parent (risks slowing the ~9 GB/s transfer), or (b) straight copy plus a one-time device-side
+permute kernel (2 x bytes at ~674 GB/s internal: ~1.5 ms for a 512 MB resident set, once). Neither is measured
+yet; (b) is the recommendation and the permute-throughput measurement is the open item.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -1228,6 +1285,10 @@ re-tuned.
     ./probe_dpas5 CASE 5 <rows> <ks>        # rev H, ESIMD xmx::dpas from registers; KS matters a lot (best = largest)
     DPAS_X=1 ./probe_dpas5 CASE 5 <rows> <ks>    # rev H with experts in the grid; optimum ks2 everywhere
     ./probe_dpas6 CASE 5 <rows> 2          # rev I (esimd::gather ring routing); DPAS_X=1 required, K<=5
+    ./probe_dpas7 CASE 1 <rows> <ks>       # rev J (transposed tiles, no routing); K_MIN..K_MAX built in.
+                                           #   Diagnostics: DPAS_FETCH_ONLY / DPAS_ALU_ONLY / DPAS_NO_MAD /
+                                           #   DPAS_NO_UNPACK; DPAS_EPT=n. Its own checker: DPAS_CHECK=file,
+                                           #   which SKIPS silently if the reference size mismatches the run.
     PF_DIST_OVERRIDE=n: prefetch depth sweep - measured null (2/3/4 within noise), keep 2
     K-sweep for the byte question: ./probe_dpas5 /tmp/rc_K2_gate|/tmp/gemv_dpE10|/tmp/rc_K5_gate 5 1 2
     # ISA dumps: NEO_CACHE_PERSISTENT=0 is required (LESSONS 41); archived dumps in notes/b70/isa/

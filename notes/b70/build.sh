@@ -31,5 +31,9 @@ echo "built probe_dpas5"
 # rev I (probe_dpas6): rev H with esimd::gather ring routing - the current fastest decode kernel.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas6 probe_dpas6.cpp
 echo "built probe_dpas6"
+# rev J (probe_dpas7): transposed tiles - current fastest, but needs the permuted device layout. Instantiates
+# K_MIN..K_MAX x 5 M configurations, so the binary is ~8.5 MB and the build is slow; keep per_kernel splitting.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas7 probe_dpas7.cpp
+echo "built probe_dpas7"
 icpx -fsycl -O2 -shared -fPIC -o libb70shim.so b70_shim.cpp
 echo "built libb70shim.so"

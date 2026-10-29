@@ -71,6 +71,22 @@ DPAS_GATHER = {          # us per (expert, gate/up projection); rows=2 interpola
 DPAS_GATHER_DOWN_FACTOR = {1: 1.16, 2: 1.25, 4: 1.29, 8: 1.47, 16: 1.67}
 MEASURED_ROWS_GATHER = (1, 4, 8, 16)
 K_LIMIT_GATHER = 5       # rev G/H/I unpack needs K <= 5; the 6.05 bpw recipe has no DPAS path
+
+# Fifth family, current best: rev J (probe_dpas7.cpp) - transposed tiles, so a column's ring words are plain
+# register rows and the shift amounts are compile-time constants. No iselect (rev H), no gather (rev I).
+# 1.27-1.46x over rev I at every point, bit-exact at rows 1/4/8/16 on both projections, and it runs at 437 GB/s
+# effective against a 484 GB/s measured stream slope - i.e. at the memory wall. Requires the device copy of the
+# weights to be intra-tile permuted (see b70-kernels.md 13v): same bytes, same DRAM traffic, same output bits,
+# but the device tensor is no longer byte-identical to the checkpoint.
+# Source: notes/b70/out_dpas.txt, "REV J".
+DPAS_TRANSPOSED = {      # us per (expert, gate/up projection); rows=2 interpolated
+    1: 1.40,
+    2: 1.42,
+    4: 1.45,
+    8: 1.68,
+    16: 2.02,
+}
+DPAS_TRANSPOSED_DOWN_FACTOR = {1: 1.11, 2: 1.20, 4: 1.29, 8: 1.38, 16: 1.51}
 # down_proj measures a little dearer than gate/up at the same weight count (transposed geometry, tn=160):
 DPAS_DOWN_FACTOR = {1: 1.15, 2: 1.16, 4: 1.14, 8: 1.26, 16: 1.28}
 DP4A_DOWN_FACTOR = {r: 1.0 for r in DP4A}      # dp4a is within noise of gate at every rows measured
@@ -123,6 +139,10 @@ def per_proj_us(rows, kernel, proj="gate_proj", K=3):
         if K > K_LIMIT_GATHER:
             raise ValueError(f"K={K} has no DPAS path (limit {K_LIMIT_GATHER}); use dp4a")
         return DPAS_GATHER[rows] * (DPAS_GATHER_DOWN_FACTOR[rows] if proj == "down_proj" else 1.0)
+    if kernel == "dpas_transposed":
+        # Rev J is compiled for K_MIN..K_MAX (2..16) and its unpack reads K dwords per column group, so unlike
+        # revs G/H/I it serves the dense recipes too - but it needs the permuted device layout.
+        return DPAS_TRANSPOSED[rows] * (DPAS_TRANSPOSED_DOWN_FACTOR[rows] if proj == "down_proj" else 1.0)
     raise KeyError(kernel)
 
 
@@ -140,6 +160,7 @@ def layer_us(picks, rows, scale=1.0, kernel=None, K=3):
     across every family that can serve the recipe.
     """
     fams = ["dp4a"] + (["dpas", "dpas_reg", "dpas_gather"] if K <= K_LIMIT_GATHER else [])
+    fams.append("dpas_transposed")   # rev J: needs the permuted layout, serves every recipe
     ks = fams if kernel is None else (kernel,)
     best = None
     for k in ks:
@@ -157,25 +178,31 @@ def floor_us(picks, expert_bytes, scale=1.0):
 def main():
     print(__doc__.split("Usage:")[0].strip())
     print(f"\ncost spread note: {SPREAD}\n")
-    print(f"{'rows':>5} {'dp4a':>9} {'rev G+X':>9} {'rev H+X':>9} {'rev I':>9} {'dispatch':>13}")
+    print(f"{'rows':>5} {'dp4a':>9} {'rev G+X':>9} {'rev H+X':>9} {'rev I':>9} {'rev J':>9} {'dispatch':>13}")
     for r in MEASURED_ROWS:
         a = sum(per_proj_us(r, "dp4a", p) for p in PROJS)
         b = sum(per_proj_us(r, "dpas", p) for p in PROJS)
         h = sum(per_proj_us(r, "dpas_reg", p) for p in PROJS)
         i = sum(per_proj_us(r, "dpas_gather", p) for p in PROJS)
-        win = min((a, "dp4a"), (b, "rev G+X"), (h, "rev H+X"), (i, "rev I"))
-        print(f"{r:5d} {a:>9.2f} {b:>9.2f} {h:>9.2f} {i:>9.2f} {win[1]:>13}")
-    print(f"\nOne kernel now wins at every measured batch: rev I (gather routing) is faster than dp4a even at\n"
-          f"rows=1, so the b=1 dp4a exception and the rows>=16 rev H exception are both deleted. The\n"
-          f"exception that survives is the recipe: K > {K_LIMIT_GATHER} has no DPAS path at all (the unpack\n"
-          f"reads four windows from one funnel-shifted 32-bit word, needing 3K + 16 <= 32), so the 6.05 bpw\n"
-          f"recipe dispatches to dp4a and pays ~2x. Rows=2 is interpolated for the DPAS families; the\n"
-          f"measured rows set is {MEASURED_ROWS} and nothing here extrapolates past 16.")
-    print("\nBinding constraint now: rev I runs the gate projection at 318 GB/s effective (5.86 MiB in 19.4 us)\n"
-          "against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - the first kernel in\n"
-          "this line within ~1.5x of the memory wall. Doubling its arithmetic still costs more (+42 %) than\n"
-          "doubling its gathers (+17 %), and extra split-K now hurts, so the next lever is instructions per\n"
-          "window, not routing and not parallelism.")
+        j = sum(per_proj_us(r, "dpas_transposed", p) for p in PROJS)
+        win = min((a, "dp4a"), (b, "rev G+X"), (h, "rev H+X"), (i, "rev I"), (j, "rev J"))
+        print(f"{r:5d} {a:>9.2f} {b:>9.2f} {h:>9.2f} {i:>9.2f} {j:>9.2f} {win[1]:>13}")
+    print("\nOne kernel wins at every measured batch now: rev J (transposed tiles) beats rev I by 1.27-1.46x and\n"
+          "dp4a by ~8x at rows=16. Dispatch is a single family, with one caveat that is a design decision rather\n"
+          "than a tuning knob: rev J needs the device copy of the weights intra-tile permuted (dword q*K+i ->\n"
+          "i*8+q). Same bytes, same DRAM traffic, same output bits, ~1.5 ms one-time device permute for a 512 MB\n"
+          "resident set - but the device tensor stops being byte-identical to the checkpoint, which is the\n"
+          "property the 'native layout, no repack' constraint was protecting. If that constraint is kept\n"
+          "literally the fallback is dpas_gather (rev I) at +27-46%, still one kernel; dp4a is the only option\n"
+          "where no permutation is possible at all. Revs G/H carry no advantage now and remain for provenance.\n"
+          "Rows=2 is interpolated; nothing here extrapolates past the measured set 1/2/4/8/16.")
+    print("\nBinding constraint now: rev J runs the gate projection at 437 GB/s effective (5.86 MiB in 14.0 us)\n"
+          "against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - ~90% of the\n"
+          "achievable streaming rate, so decode is bandwidth-bound in the sense the earliest design notes\n"
+          "assumed, which no kernel in this line achieved until now. Its own diagnostics say balanced rather\n"
+          "than dominated: NO_MAD (12.5) sits above both FETCH_ONLY (8.9) and ALU_ONLY (10.9), and the\n"
+          "components sum to 21.3 against a full 14.0 (~35% overlap). The remaining levers are bytes and\n"
+          "locality - placement, ordering, the 18.35 GiB threshold - not instructions.")
     print("\nrows > 16 is outside the measured set; the DPAS path uses two M=8 fragments above 8 rows and its")
     print("cost slope is still rising at 16, so quoting a 64- or 256-token decode number from this table")
     print("would be an extrapolation, not a measurement.")
