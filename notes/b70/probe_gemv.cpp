@@ -312,7 +312,16 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
     const int mtiles = (R + M - 1) / M;
     const size_t groups = (size_t)E * tn * KS * mtiles;
     const uint32_t nw = (uint32_t)(8 * m.K);        // dwords per tile
+#ifdef GEMV_KCONST
+    // E28's actual finding. The intra-dword offset of a lane's window group is LANE-INVARIANT (checked
+    // for K=2..6), so the only thing keeping the shift amounts runtime-variable is that K is a runtime
+    // value. Knowing K here makes them compile-time constants with no lane reassignment, no cross-lane
+    // reduction and no layout change - the accumulators stay in registers exactly as they are.
+    constexpr int K = 3;
+    if (m.K != 3.0) { fprintf(stderr, "GEMV_KCONST build handles K=3 only\n"); std::exit(2); }
+#else
     const int K = (int)m.K;
+#endif
     q.submit([&](sycl::handler &cgh)
     {
         sycl::local_accessor<int32_t, 1> red((size_t)4 * 16 * M, cgh);
@@ -377,7 +386,19 @@ static void submit_c(sycl::queue &q, const uint16_t *W, const int32_t *XSPL, flo
                     const int t = 4 * q0 + a4;
                     const int o0 = K * (t * 8 + 1) - 16;          // first window bit
                     const int o = o0 < 0 ? o0 + RB : (o0 >= RB ? o0 - RB : o0);
+#ifdef GEMV_KCONST
+                    // (K*(8t+1) - 16) & 31 with t = 4*q0 + a4: K*32*q0 is a multiple of 32 for every
+                    // integer K, so this depends on a4 alone. Tabulated, the shifts fold and the
+                    // s >= 32 select resolves at compile time for each unrolled j - while producing
+                    // bit-identical windows (unlike GEMV_CONSTSHIFT, which fakes the data).
+                    static constexpr uint32_t OFTAB[4] = {(3u * (8u * 0u + 1u) - 16u) & 31u,
+                                                          (3u * (8u * 1u + 1u) - 16u) & 31u,
+                                                          (3u * (8u * 2u + 1u) - 16u) & 31u,
+                                                          (3u * (8u * 3u + 1u) - 16u) & 31u};
+                    const uint32_t wi = (uint32_t)o >> 5, of = OFTAB[a4];
+#else
                     const uint32_t wi = (uint32_t)o >> 5, of = (uint32_t)o & 31u;
+#endif
                     const uint32_t d0 = dw[wi];
                     const uint32_t d1 = dw[(wi + 1 == nw) ? 0u : wi + 1u];
                     const uint32_t d2 = dw[(wi + 2 >= nw) ? (wi + 2 - nw) : wi + 2u];

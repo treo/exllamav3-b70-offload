@@ -526,6 +526,7 @@ measured rate curve at the matched footprint:
   | model (E = topk, R = 1) | MiB/layer | µs/layer | vs parent window | tok/s ceiling |
   |---|---|---|---|---|
   | Qwen3.8@2.68 | 17.58 | **239.2** (gate 80.7 ×2 + down 77.8) | ×1.05 of 250 µs | 87 |
+  | **Qwen3.8@2.68, K compiled in** | 17.58 | **126.1** (gate 39.7 ×2 + down 38.0, `probe_gemv -DGEMV_KCONST`, bit-identical output) | **×1.98 of 250 µs** | 165 |
   | Qwen3.8@2.68, batch 4 | 17.58 | 360.3 | ×0.69 — B70 binds | 58 |
   | GLM-5.3@3.05 | 72.00 | **717.2** (gate 245.7 ×2 + down 225.8) | parent window unmeasured (E10); it is 2.9× Qwen3.8's | 31 |
   | Qwen3.6-35B-A3B@2.49 | 9.00 | **126.6** (gate 45.4 ×2 + down 35.8) | ×1.3 against the ~165 µs Qwen3.5-class window (same geometry) | 198 |
@@ -537,6 +538,17 @@ measured rate curve at the matched footprint:
   it. GLM needs more than one card for rate, not only for hit rate; the cheapest geometries here
   (small hidden × intermediate, wide `tn`) are the ones the single-card case actually suits.
   rev C is ×1.82 median over rev B at these operating shapes (×2.18 at R=1, range ×0.97–4.22, n=36).
+* **That parity is a compile-time accident, not a property of the kernel.** The measured 239.2 µs assumes
+  trellis K arrives as a runtime value. It does not have to: the intra-dword bit offset of a lane's
+  window group is **lane-invariant** (`(K(8t+1)−16) & 31` with `t = 4q0 + a4`, and `K·32·q0` is a multiple
+  of 32 for every integer K — verified for K=2..6), so with K as a template parameter every shift amount
+  in the extractor is a compile-time constant and the straddle select folds away. Measured with
+  `probe_gemv -DGEMV_KCONST`: **gate ×1.90, down_proj ×1.89 at rows=1, bit-identical output to the
+  default build and bit-exact against `y_ref`** → per-layer **126.1 µs**, which is ×1.98 inside the
+  parent window rather than ×1.05. The engine must therefore dispatch on K at kernel-selection time — a
+  per-recipe instantiation, exactly the shape of the vendor's generated policy table (§2c item 14).
+  At rows=4 the gain is only ×1.09–1.13 (the fixed cost is a shrinking share), so the parity-at-batch-4
+  conclusion stands; the DPAS schedule still wins from rows ≈ 5 once both are compiled this way.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is

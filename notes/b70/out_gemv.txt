@@ -144,3 +144,57 @@ arithmetic rather than by building the repacker - see LESSONS 33.
 
 Reproduce: icpx -fsycl -O2 -DGEMV_CONSTSHIFT -o /tmp/pg_cs probe_gemv.cpp; run either binary on
 /tmp/gemv_dpE10 with argv = CASE order reps rows impl ks. Never quote the idealized build as a rate.
+
+================================================================================
+GEMV_KCONST - compile-time K: the ceiling above, delivered BIT-EXACT. Biggest single win.
+================================================================================
+Why it works: rev C's lanes already own 32 CONTIGUOUS ring positions (p in [32*q0, 32*q0+31]), and the
+intra-dword offset of a lane's group is (K*(8t+1) - 16) & 31 with t = 4*q0 + a4. K*32*q0 is a multiple of
+32 for every integer K, so that offset depends on a4 alone - lane-invariant, verified for K=2..6:
+
+    K=2: {18, 2, 18, 2}   K=3: {19, 11, 3, 27}   K=4: {20, 20, 20, 20}
+    K=5: {21, 29, 5, 13}  K=6: {22, 6, 22, 6}
+
+The only thing forcing runtime shifts and the straddle select was K being a runtime value. Making it a
+template parameter (-DGEMV_KCONST; a 4-entry table for K=3) needs no lane reassignment, no cross-lane
+reduce, no layout change, no extra bytes. Output is bit-identical to the default build and bit-exact
+against y_ref (E=2/R=4 and E=10/R=4, ks=4) - unlike -DGEMV_CONSTSHIFT, which fakes the data.
+
+Measured, E=10, min of 4 interleaved runs, burst mode:
+
+  gate_proj (k=2560, n=640, tn=40)
+   rows ks |  default us  slots/w |  KCONST us  slots/w | gain
+      1  1 |        75.2     6.56 |       52.8     4.61 | x1.42
+      1  4 |        75.4     6.58 |       39.7     3.47 | x1.90
+      4  4 |       112.6     9.83 |      103.3     9.02 | x1.09
+      8  4 |       251.8    21.98 |      231.0    20.16 | x1.09
+     16  4 |       486.2    42.44 |      446.8    39.00 | x1.09
+
+  down_proj (k=640, n=2560, tn=160) - different geometry, same win
+      1  1 |        71.9          |       38.0          | x1.89
+      1  4 |        75.2          |       45.8          | x1.64
+      4  1 |       112.7          |      103.7          | x1.09
+      4  4 |       140.6          |      124.1          | x1.13
+
+  per-layer (2 x gate + down), best ks per row count:
+      rows=1:  226.0 -> 126.1 us   (x1.79; against the 250 us parent window: x1.11 -> x1.98)
+      rows=4:  365.8 -> 330.2 us   (x1.11; still binding - DPAS territory)
+
+  against rev E (DPAS), each at its best:
+      rows 1:  revC+KCONST 39.7 vs revE 95.5  -> rev C wins x2.41
+      rows 4:             103.3 vs    99.8    -> tied (rev E x1.04)
+      rows 8:             231.0 vs   108.8    -> rev E wins x2.12
+     rows 16:             448.2 vs   122.2    -> rev E wins x3.67
+  so the schedule crossover moved from rows ~= 4 to rows ~= 5, because the dp4a path's fixed cost fell.
+
+Side note on probe_unpack.cpp (aligned-GROUP lane reassignment, built while that was still assumed
+necessary): it showed x1.30 on extraction alone, but kernel B's checksum is short by 0.02% against
+kernel A, and A reproduces the authoritative total exactly (8,360,138,626) - so B has a group/position
+mapping bug and its timing is NOT believed. The reassignment was unnecessary regardless: rev C's existing
+assignment already yields contiguous 32-window groups, they merely start 19 bits into a dword.
+
+Reproduce:
+    icpx -fsycl -O2 -DGEMV_KCONST -o /tmp/pg_kc probe_gemv.cpp
+    /tmp/pg_kc   /tmp/gemv_dpE10 0 21 1 1 4        # rows=1, ks=4
+    ./probe_gemv /tmp/gemv_dpE10 0 21 1 1 4        # default build, same case
+    python3 dump_gemv_case.py /tmp/gemv_dpE10down 10 4 0 --proj down_proj

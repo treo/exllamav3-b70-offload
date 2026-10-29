@@ -698,3 +698,32 @@ value claim ("the gain would be worth the cost"). The factual claim is often che
 when wrong, saves the whole task; the value claim is checkable with an idealized build before the real
 one. Doing either before writing the code is not avoidance — it is the cheapest experiment available.
 
+## 34. Ask what the compiler is being *forced* to treat as runtime
+
+The largest single-frame win of this whole kernel effort cost one `#ifdef` and a four-entry table: making
+trellis `K` a compile-time constant took the b=1 decode GEMV from 75.4 µs to 39.7 µs (**×1.90**, 6.58 →
+3.47 issue slots per weight), with output **bit-identical** to the previous build and bit-exact against
+the reference. Nothing about the algorithm changed.
+
+The reason it was sitting there: the extractor computed its bit offsets as `(K*(8t+1) − 16)`, so every
+window needed a variable 64-bit shift plus a select between two overlapping dword pairs. But the offset
+is `(K·32·q0 + K·(8a4+1) − 16) & 31`, and `K·32·q0` is a multiple of 32 for *any* integer K — so it
+depends only on the unrolled index `a4`. It was lane-invariant all along, and I had spent the previous
+hour designing a lane *reassignment* (aligned groups, with a cross-lane accumulator reduce to pay for it)
+to obtain a property the existing assignment already had. Two minutes of modular arithmetic, applied to
+the *existing* code rather than to a hypothetical one, ended the design debate.
+
+The general shape: performance work clusters at boundaries you did not know were artificial. A value that
+is a *format constant* arriving as a *runtime parameter* is one such boundary — the compiler must emit
+generic code for it, and every derived offset, stride and trip count inherits that generality. So before
+optimizing an inner loop, ask: which of these quantities is actually invariant, at what scope (per
+launch? per tile? per lane?), and does the compiler know? Then check whether the invariant is expressible
+as a template parameter or a constexpr lookup. The same question applies to `m.K`-style reads in the
+engine's kernel selection: dispatch on the format, don't pass it in.
+
+Corollary worth keeping: the idealization probe (`-DGEMV_CONSTSHIFT`, deliberately wrong data, timing
+only) said ×1.5–2.1 and the honest build delivered ×1.90. When an idealization and a real attempt agree,
+the idealization was measuring something true — and it cost a two-line diff to know that before writing
+the kernel I had planned instead.
+
+
