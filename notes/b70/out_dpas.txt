@@ -606,6 +606,66 @@ against the same y_ref that has caught every other mistake in this line of work.
 Recorded as analysis, explicitly not measurement: no N=8 build was made and no M=16 build exists yet. The
 difference between those two statements is the whole point of writing this section.
 
+================================================================================
+Can the DPAS path be built for exactly one row, known at compile time?  No - and the
+reason turns out to point at a bigger lever than the one the question was about.
+================================================================================
+Made the token width a build knob (-DNTOK_OVERRIDE=8|4; every consumer of NTOK is consistent, so this
+narrows the real operand, it is not a mask) and built rev F at each width:
+
+    N=16  builds, runs, bit-exact at rows 1/4/8
+    N=8   BUILDS FINE, then throws at launch, for every flag combination (none, p, x, psux, su, u):
+            "joint_matrix with parameters matrix_type::sint32, use::accumulator, Rows=8, Cols=8 is not
+             supported on this device"
+    N=4   same rejection (Rows=8, Cols=4); rows=8 additionally refused by the R <= NTOK guard
+
+So the smallest accumulator this toolchain will lower on B70 is 8x16 - the rejection is about the
+accumulator's *area*, not about row count, and it is a runtime device-support check with no
+static_assert and no readable table in the headers. A compile-time single-row DPAS variant is therefore not
+expressible at all: the question "could the compiler optimize it" never gets asked, because the operand
+cannot be built. And the earlier instruction count says the question was not worth much anyway: mads per
+tile are column blocks x k byte-blocks, independent of N, so a hypothetical N=1 DPAS would issue the same 8
+mads per tile and save only the PART that 'x' already cut (~0.4 us of 73.7).
+
+## The single-row variant does exist. We already have it, and it is faster.
+
+Collapse the token dimension of the same algebra to one column and the DPAS step becomes
+
+    C[m] = sum_k A[m,k] * x_k        with A[m, 4j..4j+3] = the four product bytes of weight j
+
+which is exactly rev C's `dot_acc(prod, splat(x))`: four weight-byte x activation products per instruction,
+none of the matrix assembly, no operand stores, no 16-deep partials. Measured at rows=1: rev C+KCONST 3.5
+slots/weight (39.7 us) against the DPAS path's 6.4 (73.7 us). So "a DPAS variant that only does one row" is
+the dp4a kernel by another name, and the two-schedule policy keyed on rows *is* the compile-time row-count
+specialization - the compiler gets to know the row count because it picks a different kernel per range.
+
+## Where the shape question does pay: K per mad, not N
+
+One row of the (invalid, see below) shape probe agrees with independent evidence and is worth chasing:
+M=8, N=16, K=32 runs and computes correctly, and that is precisely the vendor bench's int8 shape
+(`run_matrix<int8_t, int32_t, 8, 16, 32>`, measured at 366.92 of 367 TOPS). rev F uses K=8 per mad (MK=8:
+two weights per mad, since each weight contributes 4 product bytes). Because
+
+    mads per tile = (output columns / M) x (K bytes / K per mad)
+
+widening K from 8 to 32 would cut the mad stream 4x - four times the 2x available from the M=16
+consolidation in 13n, and unlike the N question it pays at rows=1, where this path loses. The A scratch
+already stores 16 weights x 4 bytes per column, so 8 weights per mad fits inside one tile row with no new
+layout. Stated as a hypothesis, not a result: legality must be established by changing rev F itself (the
+trusted construction), not by the standalone probe, and the test is the same y_ref comparison that has
+caught everything else here.
+
+## The probe was invalid, and how I know
+
+`probe_shapes.cpp` was written to enumerate legal shapes and reported that M=8, N=16, K=8 is unsupported -
+the shape rev F runs continuously. It also rejected every M=16 accumulator and most of the N sweep on that
+basis. Two causes found, one unfixed: `joint_matrix_fill` has its own shape restrictions (switching to
+`joint_matrix_load` from global changed nothing), and the remaining difference from rev F's construction was
+never isolated. A switch of work-group shape (16 threads / 1 sub-group vs 32 / 2) made no difference either.
+So no shape conclusion in this file comes from that probe; the N=8/N=4 results above come from rev F
+itself, which is its own oracle. Full lesson in LESSONS 40: calibrate an oracle on a case you already know
+passes before believing one negative from it.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -626,6 +686,11 @@ difference between those two statements is the whole point of writing this secti
     IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa ./probe_dpas3 CASE 1 1 8   # native .isaasm
     # item 5 price: compare psu vs psud (duplicate PART stores) per KS, warm + interleaved
     # structural variant: KS is forced to 1, so pass any ks (it is ignored)
+    DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
+    # does narrowing the token operand at compile time work? (it does not: launcher throws for N<16)
+    for n in 16 8 4; do icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DNTOK_OVERRIDE=$n -o /tmp/revF_n$n probe_dpas3.cpp; done
+    DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 /tmp/revF_n8 CASE 1 1 8      # "Rows=8, Cols=8 is not supported"
+    ./probe_shapes                                                          # INVALID oracle, see above
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
     # regression guard for the non-structural path (compare against the HEAD build in one window)
     git show HEAD:notes/b70/probe_dpas3.cpp > /tmp/revF_head.cpp && icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revF_head /tmp/revF_head.cpp

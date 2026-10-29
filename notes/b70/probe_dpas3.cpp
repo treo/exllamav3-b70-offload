@@ -70,7 +70,14 @@ namespace mx = sycl::ext::oneapi::experimental::matrix;
 
 static constexpr int MM = 8;      // matrix rows = output columns per mad
 static constexpr int MK = 32;     // matrix K for int8 = 8 weights x 4 bytes
-static constexpr int NTOK = 16;   // matrix columns = token slots
+#ifndef NTOK_OVERRIDE
+#define NTOK_OVERRIDE 16
+#endif
+// Matrix columns = token slots. Every consumer of this is consistent (B tensor pitch, staging stride,
+// PART stride and size, combine indexing), so -DNTOK_OVERRIDE=8|4 is a real compile-time narrowing of
+// the operand, not a mask: it asks whether the compiler exploits a known-small row count, since the HW
+// minimum N for int8 DPAS is 8 and below that the operation has to be emulated.
+static constexpr int NTOK = NTOK_OVERRIDE;
 static constexpr int SGSZ = 16;   // XMX needs 16-lane sub-groups
 static constexpr int TILE_BYTES = 64;          // one trellis tile row: 16 weights x 4 bytes
 static constexpr int A_TILE = 16 * TILE_BYTES; // one assembled A tile: 16 columns x 64 bytes = 1 KiB

@@ -847,6 +847,34 @@ are for ranking candidates and ruling things out (they killed `f` convincingly),
 fix is worth building. Item 5 was near the bottom of my list on the ablation's numbers and turned out to be
 the largest single win of the rev F line.
 
+## 40. Calibrate an oracle against a known-good case before trusting any negative from it
+
+Asked whether a compile-time single-row DPAS variant was expressible, I wrote a shape probe: build
+`joint_matrix` operands for a list of (M, N, K), launch, report supported/unsupported. It came back saying
+M=8, N=16, K=8 is not supported on this device - the exact shape `probe_dpas3` runs successfully thousands
+of times an hour. Every negative in that table became suspect instantly, and three of them would have
+redirected real work: it "proved" M=16 accumulators unusable (the consolidation plan) and N=8 unusable at
+any M.
+
+Two flaws, both invisible in the code: it materialized operands with `joint_matrix_fill`, which carries its
+own shape restrictions (fixing that changed nothing), and its kernel differed from the real one in some way
+I never isolated before the budget ran out. Read as device truth, that table would have killed the M and K
+levers on the strength of a harness that could not reproduce a known positive.
+
+The rule costs one line and would have caught it immediately: **put a case you already know passes into
+every oracle, and abort if it fails.** For a capability probe, the known-good case is whatever the shipping
+configuration does - same shape, same construction, and if the probe rejects it, the probe is the thing
+being measured. This is the fourth face of a failure I keep meeting in this project: the broadcasting
+oracle, the misordered argv that made correct kernels look wrong, the doubled log line that mislabeled an
+ablation, and now the probe that rejected its own ground truth. The fix is always the same - make the
+instrument produce the answer you already know before believing one you do not.
+
+Separating what survived: the *in-situ* negative is real. Building rev F itself with `NTOK=8` throws
+"joint_matrix with parameters matrix_type::sint32, use::accumulator, Rows=8, Cols=8 is not supported on
+this device" from inside the working kernel, identically for every flag combination. The working kernel is
+its own oracle; only my standalone generalization died.
+
+
 
 
 

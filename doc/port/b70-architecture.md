@@ -581,11 +581,20 @@ measured rate curve at the matched footprint:
   rev C+KCONST. At rows=1 rev C+KCONST still wins ×1.85 (39.7 vs 73.7 µs), and that gap is **not** token-lane
   waste: shrinking the token dimension would leave the mad stream untouched (8 mads per tile either way) and
   only trim PART, which `'x'` already made worth ~0.4 µs. `psux` costs 6.4 slots/weight against rev C's 3.5 —
-  the DPAS kernel is simply dearer per weight at one token. The remaining instruction lever is M, not N:
-  each A tile already holds 16 output columns but is consumed as two `MM=8` accumulators, so one consolidated
-  16×16 accumulator would halve the mad stream, halve the PART stores and drop an A load per byte-block, at
-  every row count (§2c item 13n; untested). Caveat: `'x'` is measured at E=10; `tn·E` must stay ≳ 256 groups,
-  so low-E models need grid = `tn·E·KS`.
+  the DPAS kernel is simply dearer per weight at one token. **A compile-time single-row DPAS variant is not
+  expressible**: narrowing rev F's token operand to 8 (or 4) compiles but throws at launch —
+  `joint_matrix<sint32, accumulator, Rows=8, Cols=8> is not supported on this device` — the smallest
+  accumulator the backend lowers here is 8×16, and the check is a runtime device query with no header table
+  to read. It also would not have helped: mad count is independent of N. The N=1 degeneration of the same
+  algebra *does* exist and we ship it — `C[m] = Σ_k A[m,k]·x_k` over four product bytes is exactly rev C's
+  `dot_acc(prod, splat(x))`, at 3.5 slots/weight versus the DPAS path's 6.4 — so the rows-keyed two-schedule
+  dispatch **is** the row-count specialization, chosen per kernel rather than per template argument. The real
+  instruction lever is `mads = (cols/M)·(K bytes/K per mad)`: consolidating the two `MM=8` accumulators into
+  one 16×16 halves the mad stream (and the PART stores, and one A load per byte-block), and widening K from
+  rev F's 8 to the vendor bench's int8 32 would quarter it — the latter pays at rows=1 too, so it ranks
+  first; both are untested and must be tried inside rev F, not through the standalone shape probe
+  (LESSONS 40). Caveat: `'x'` is measured at E=10; `tn·E` must stay ≳ 256 groups, so low-E models need grid
+  = `tn·E·KS`.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is
