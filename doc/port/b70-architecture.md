@@ -578,9 +578,14 @@ measured rate curve at the matched footprint:
   dp4a→DPAS crossover moves from rows ≈ 3–4 to **between rows 1 and 4**, so dispatch on rows ≥ 4 → DPAS with
   room, and treat rows = 2–3 as measured-needs-its-own-point; the DPAS rescue factors become ×3.1 (rows 8)
   and ×5.8 (rows 16) on gate; **b=4 layer time is 230.7 µs** (2 × 73.8 + 83.1) against 331.3 µs on
-  rev C+KCONST. At rows=1 rev C+KCONST still wins ×1.85 (39.7 vs 73.7 µs), which is now attributable to the
-  DPAS path computing 16 token columns for one valid row — the next lever, not partials. Caveat: `'x'` is
-  measured at E=10; `tn·E` must stay ≳ 256 groups, so low-E models need grid = `tn·E·KS`.
+  rev C+KCONST. At rows=1 rev C+KCONST still wins ×1.85 (39.7 vs 73.7 µs), and that gap is **not** token-lane
+  waste: shrinking the token dimension would leave the mad stream untouched (8 mads per tile either way) and
+  only trim PART, which `'x'` already made worth ~0.4 µs. `psux` costs 6.4 slots/weight against rev C's 3.5 —
+  the DPAS kernel is simply dearer per weight at one token. The remaining instruction lever is M, not N:
+  each A tile already holds 16 output columns but is consumed as two `MM=8` accumulators, so one consolidated
+  16×16 accumulator would halve the mad stream, halve the PART stores and drop an A load per byte-block, at
+  every row count (§2c item 13n; untested). Caveat: `'x'` is measured at E=10; `tn·E` must stay ≳ 256 groups,
+  so low-E models need grid = `tn·E·KS`.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is

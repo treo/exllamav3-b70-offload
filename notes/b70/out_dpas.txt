@@ -567,6 +567,45 @@ Limitations, stated rather than smoothed over:
   x1.85 at rows=1. That is variant 'a' (specialize N to the row count), and the gap it needs to close has
   shrunk from x2.5 to x1.85.
 
+================================================================================
+Variant (a), examined before building: shrinking the token dimension saves no instructions
+================================================================================
+The plan was to specialize the accumulator's N (token columns, NTOK=16) down to 8 for rows <= 8, on the
+theory that at b=1 fifteen sixteenths of the matrix work is discarded. Working out which loops actually
+generate the instruction count kills that theory:
+
+* mad instructions per tile = (column blocks = 2) x (k byte-blocks = MK/KP = 4) = 8, and NEITHER count
+  depends on N. Cutting N from 16 to 8 keeps all 8 mads and gives each one half the useful output, while
+  int8 DPAS at N=8 almost certainly executes at half the per-instruction throughput. Same instructions,
+  less work done.
+* What N=8 would save is traffic that 'x' has already taken away: PART halves again, from 0.78 to 0.39 MiB
+  on gate_proj - about 0.4 us at the measured 0.2-0.8 us/MiB in-L2 rate. On down_proj 3.12 -> 1.56 MiB,
+  maybe 1.3 us. Against a 73.7 us kernel that is noise, and it costs the delicate N-versus-pitch split
+  across ~12 sites where an off-by-4 runs fast and is wrong.
+* The x1.85 loss at rows=1 is therefore not token-lane waste. Slot arithmetic: psux at rows=1 costs
+  73.7 us for 16.384 M weights = 6.4 slots/weight, against rev C+KCONST's 3.5. The DPAS path is simply a
+  more expensive kernel per weight when there is one token to amortize it over - which is the same
+  conclusion the original crossover gave, now with the traffic excuse removed.
+
+The instruction-count lever that does exist is the other dimension. Each A tile already holds 16 output
+columns (r = 0..15), but they are consumed as two MM=8 accumulators, c0 and c1, so every tile issues two
+mads per byte-block where one M=16 mad would cover the same output. Consolidating to a single MM=16 x N=16
+accumulator per tile would:
+
+  - halve the mads (8 -> 4 per tile per byte-block loop, i.e. half the mad stream at every row count),
+  - halve the PART stores (two 8x16 stores -> one 16x16), and
+  - remove one of the two joint_matrix_load(A) calls per byte-block.
+
+Unlike the N change this pays at rows=1 too, which is where the DPAS path is losing, and it needs no new
+layout: the A tile is already assembled column-major with r as the column index. The open question is
+whether the toolchain accepts joint_matrix<..., accumulator, 16, 16> with the int8 operand shapes this
+kernel uses (bench.cpp's reference uses M=8, N=16, K=32 for int8), and whether the r -> (row, column-block)
+map in the store survives consolidation. Both are cheap to test: it is one new flag, and bit-exactness is
+against the same y_ref that has caught every other mistake in this line of work.
+
+Recorded as analysis, explicitly not measurement: no N=8 build was made and no M=16 build exists yet. The
+difference between those two statements is the whole point of writing this section.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
