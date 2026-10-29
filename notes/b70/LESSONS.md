@@ -881,6 +881,32 @@ plausible-looking results table further down the same file. What should survive 
 lesson plus whatever facts were independently corroborated - here the K=32 int8 shape comes from
 `doc/b70/b70-bench/bench.cpp`, not from my probe, so deleting it cost no evidence.
 
+## 41. Two separate caches can swallow a shader dump, and only one of them is the compiler's
+
+`IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=<dir>` worked for weeks and then stopped: the same command that
+had produced 34 files including native `.asm`/`.isaasm` began returning 4 files with no assembly at all, for
+two different binaries, with no change to either. Three wrong theories cost time — the runtime cache
+(`~/.cache/igdrc`), the SYCL program cache (`SYCL_DISABLE_PROGRAM_CACHE`, `SYCL_CACHE_DIR`), and "the device
+code is AOT-compiled so IGC never runs at launch" (this one I wrote into three documents as a finding).
+All wrong. The answer, from outside: **`NEO_CACHE_PERSISTENT=0`** — the Level Zero user-mode driver keeps its
+own persistent shader cache, so IGC is never invoked and emits nothing, and no compiler-side variable can
+reveal a backend call that never happened.
+
+Three things worth extracting. The mechanism: when a dump disappears after working, enumerate every cache
+between the tool and the hardware — here there are three layers (SYCL program cache, NEO driver cache, IGC
+disk cache) and I only tried two, then inferred a property of the compiler from the absence of its own
+output. The evidence discipline: I should have tested the AOT hypothesis by asking whether the *first* run of
+a freshly built binary dumped, which it did, meaning the answer was "something caches after the first run",
+not "compilation happens at build time". A hypothesis that explains the observations only if you never run
+the cheapest experiment is not a finding; it is a story, and I published it as if it were the reason.
+
+And the companion mistake, which turned a recoverable annoyance into lost data: I deleted the one rev H
+`.asm` I had captured, during cleanup, before anything had cited its contents into an artifact. Dumps are
+~1 MB and reproduce only under conditions I did not understand at the time. The rule now: copy the numbers
+into the artifact *first*, and if the instrument is finicky, archive the dump itself alongside it; delete
+nothing that is the sole instance of a measurement.
+
+
 
 
 

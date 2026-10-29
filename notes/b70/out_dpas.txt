@@ -949,6 +949,49 @@ I did not complete a rigorous spill/message census on this driver, so the "128 r
 remains the other IGC's measurement, not ours (LESSONS 40 applies in both directions: an instrument I have
 not calibrated cannot refute one either).
 
+================================================================================
+ISA CENSUS, rev G+X vs rev H+X, on this driver (the thing that was blocked)
+================================================================================
+The dump only came back after learning that **`NEO_CACHE_PERSISTENT=0`** is required: the Level Zero
+user-mode driver keeps its own persistent shader cache, so IGC is never invoked at launch and no compiler-
+side variable (IGC_EnableDiskCache, SYCL_DISABLE_PROGRAM_CACHE, SYCL_CACHE_DIR, clearing ~/.cache/igdrc)
+can produce output from a backend call that does not happen. Working command:
+
+    NEO_CACHE_PERSISTENT=0 DPAS_X=1 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isaG ./probe_dpas4 CASE 1 1 2
+    NEO_CACHE_PERSISTENT=0 DPAS_X=1 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isaH ./probe_dpas5 CASE 1 1 2
+
+Both dumped at each kernel's own optimum (grid + ks2, rows=1, gate). Rev H produced exactly the
+`VC_*submitILi3ELi1ELi1E*.asm` the author named (K=3, M=1, NF=1). Static instruction census of the gemm
+entries, and the four files are archived under notes/b70/isa/ so this is reproducible without re-dumping:
+
+                              rev G+X (simd16, joint_matrix)   rev H+X (ESIMD, K=3 M=1)
+    instruction lines                        906                             591
+    store.slm.d32                             48                               0
+    syncs                            108 (59 nop + 41 allrd)                  20
+    spill references                          11                                0
+    sends (mnemonic matches)                   3                                1
+    top opcodes: add                        149                              95
+               mov                          102                             141
+               shl / shr                 97 / 75                          38 / 77
+               or / mul                   94 / 48                          16 / 52
+               sync.nop                      59                               -
+               macl                            -                              34
+               cmp                             -                              37
+
+What this settles.
+* **The "no spills" claim reproduces on our driver** (0 vs 11 references), as does the mechanism behind rev
+  H's win: the SLM round trip is gone (48 stores -> 0) and the barrier traffic collapses (108 -> 20 syncs).
+  35 % fewer static instructions overall.
+* **Rev H's own bottleneck is now visible and it is not arithmetic**: `mov` is its largest class (141), ahead
+  of add (95) and shr (77), with `macl` (34) doing the magic-multiplier products. After memory traffic is
+  removed, what remains is shuttling each column's product dword into the DPAS B operand image. So the next
+  lever is the B-image construction (slice/concat patterns the allocator must shuffle), not more funnel-shift
+  cleverness in the unpack.
+* Method limit, stated rather than hidden: the send/dpas counts come from greping mnemonic patterns, and
+  ESIMD global loads do not appear as `send` in this dialect, so treat those two rows as indicative. A real
+  message census needs IGA on the image. Same caveat on "spill references": counted as textual mentions, not
+  verified one by one as spill sites - the 11 in rev G deserve that check if anyone reopens this.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -979,6 +1022,7 @@ not calibrated cannot refute one either).
     DPAS_X=1 ./probe_dpas4 CASE 5 <rows> <ks>      # experts in the grid too; best ks 2 (gate) / 1 (down)
     ./probe_dpas5 CASE 5 <rows> <ks>        # rev H, ESIMD xmx::dpas from registers; KS matters a lot (best = largest)
     DPAS_X=1 ./probe_dpas5 CASE 5 <rows> <ks>    # rev H with experts in the grid; optimum ks2 everywhere
+    # ISA dumps: NEO_CACHE_PERSISTENT=0 is required (LESSONS 41); archived dumps in notes/b70/isa/
     for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
       env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8

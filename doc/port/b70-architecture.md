@@ -620,6 +620,17 @@ measured rate curve at the matched footprint:
   42.5) → ×2.1 of the 250 µs parent window at 4× batch; b=1 ≈ 113–139 µs, parity with dp4a from one kernel
   family. All 27 new configurations bit-exact; the K ≤ 5 limit still excludes the 6.05 bpw recipe, and
   absolute times in this line carry ±15–20 % between warm windows (ratios are within-window).
+* **Schedule, updated for rev H (§2c 13r): three-way, not two.** The sentence above ("dp4a at b=1 and one
+  DPAS kernel at b ≥ 2") held for rev G alone and is now superseded: with the expert grid ported onto rev H —
+  ESIMD `xmx::dpas` fed from registers, no SLM, no barriers, no B loads — the DPAS-with-SLM path is 4–9 %
+  ahead at rows 1–8 and rev H wins ×1.28/×1.43 at rows=16 (gate 44.2 vs 56.4 µs, down 64.7 vs 92.7), so
+  dispatch is **dp4a at b=1 · rev G+X at rows 2–8 · rev H+X from rows ≈ 16**, and b=16 layer time falls to
+  173.1 µs from 205.5. The ISA census behind it (once `NEO_CACHE_PERSISTENT=0` let the dumps happen):
+  rev G+X 906 static instructions, 48 `store.slm.d32`, 108 syncs, 11 spill references; rev H+X 591, **0 SLM
+  stores, 20 syncs, 0 spills**. Rev H's largest remaining class is `mov` (141) — moving products into the
+  DPAS operand image — so the next lever after this is B-image construction, not the unpack arithmetic, and
+  at ~0.32 instructions/weight the DRAM floor is close enough that bytes and locality matter more than
+  further instruction cuts.
 * **The planning artifacts were re-derived on the measured cost model, and the old one was 2.4× optimistic.**
   `plan_operating_point.py`, `plan_concurrency.py` and `plan_kernel_split.py` computed B70 time as
   `expert_bytes / rate(matched footprint)` off the memcpy-shaped rate curve. That model is replaced by
