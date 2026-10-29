@@ -214,6 +214,36 @@ cost fell to ~3, rev E would cost ~5.5 slots/weight and beat rev C at rows=1 too
 to one decode schedule. Price: the B70's bytes stop being interchangeable with the 3090/CPU trellis
 kernels, plus a load-time pass - the E4c trade-off, so it must clear that bar. Gate E28.
 
+## Would compile-time K help rev E too? Priced, and the answer is "a little"
+
+Same knobs, rev E at its best split-K (KS=16, A in L2 scratch, B global), min of 3:
+
+  rows | full | unpack+assemble only | matrix path only | full - matrix-only | predicted with x1.90 extraction
+     1 | 95.5 |                69.3  |        41.5      |   26.2 us (27%)      |  83.1 us  (x1.15)
+     4 | 99.7 |                74.7  |        57.0      |   25.0 us (25%)      |  87.9 us  (x1.13)
+     8 |127.2 |                83.2  |        55.8      |   44.0 us (35%)      | 106.4 us  (x1.20)
+    16 |127.8 |               101.5  |        73.3      |   26.3 us (21%)      | 115.3 us  (x1.11)
+
+Two caveats stated plainly. (1) The halves do not sum (69.3 + 41.5 > 95.5): each knob removes work but
+leaves the loop, barrier and store scaffolding in place, so the difference bounds the extraction share
+rather than measuring it exactly. (2) Applying rev C's measured x1.90 to that whole share overstates the
+win, because K-constancy folds shifts and the straddle select only - it does nothing for the u32 stores
+into the A scratch, the two barriers per tile, the matrix loads or the PART stores, which is where most
+of rev E's overhead lives.
+
+And rev E has a prerequisite rev C does not. Its lane mapping is `t = lane + 16*tt`, so the intra-dword
+offset is `(K*(8*lane + 1) - 16) & 31` - **lane-dependent** (it is invariant only when K*8*lane is a
+multiple of 32 for every lane, i.e. K=4). rev C got the win for free because its mapping is
+`t = 4*q0 + a4`, where the `K*32*q0` term vanishes mod 32. So rev E needs a lane remap first: keep `a4`
+as the unrolled inner index and split `j` across lanes, folding the j-half offset into a per-lane bit
+base (one variable shift to form the 64-bit base per tile, then compile-time shifts for the windows).
+
+Verdict: worth doing only as a by-product - the engine will template K for rev C anyway, and sharing one
+extractor between the dp4a and DPAS paths removes a second copy of the trickiest inner loop. On its own
+merits, x1.1-x1.2 does not justify the remap; rev E's bigger levers are the per-tile barrier pair and the
+A scratch round trip itself, which only ESIMD register fragments (xmx::dpas on simd operands) can remove -
+this toolchain has no joint_matrix_construct, so the API forces the memory round trip.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
