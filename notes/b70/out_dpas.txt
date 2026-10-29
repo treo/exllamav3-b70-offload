@@ -670,6 +670,64 @@ the K question is corroborated independently by `doc/b70/b70-bench/bench.cpp`'s 
 (`run_matrix<int8_t, int32_t, 8, 16, 32>`, measured at 366.92 of 367 TOPS), not by the probe. Lesson kept:
 LESSONS 40, calibrate an oracle on a case you already know passes before believing one negative from it.
 
+================================================================================
+K per mad is already 32. The real cost split says the target is assembly, not mads.
+================================================================================
+The K-widening idea came from reading MK=8 somewhere and concluding rev F issued K=8 mads. It does not:
+`static constexpr int MK = 32; // matrix K for int8 = 8 weights x 4 bytes`, two kb blocks per trellis tile,
+so each tile issues 2 (kb) x 2 (column blocks) = 4 mads covering 16 weights - **0.25 mads per weight**, at
+the same 8x16x32 int8 shape the vendor bench measures at 366.92 of 367 TOPS. There is no wider K to move
+to, and the mad stream was never the cost.
+
+That in turn discredits a number I had been quoting from this file: "the mad path costs +62.7 us". The
+DPAS_NO_MAD ablation skips the whole tile-math call, *operand loads included*, so it priced loads and mads
+together and I attributed the sum to mads. Added two knobs to split it properly - DPAS_LOADS_ONLY (keeps
+joint_matrix_load, drops only joint_matrix_mad) and DPAS_NO_STORE (drops the PART store) - and ran the
+factorial warm and interleaved, F=psux, min of 4:
+
+  gate k=2560, rows=1     us     slots/weight   share
+    fixed (launch, combine, loop, no operand work)         7.9        0.69        11 %
+    + trellis unpack and A-operand assembly              49.4        4.31        66 %
+    + joint_matrix_load of A and B                       15.5        1.35        21 %
+    + the mads themselves                                  1.5        0.13       2 %
+    = full psux                                           74.3        6.48
+    PART stores removed from full: -0.0 us (stores are free; also confirms the ablations did not
+    dead-code-eliminate each other - the no-store run equals the full run, it did not collapse to the
+    fixed rung)
+
+  gate rows=8: fixed 9.2, unpack 49.7, loads 15.0, mads 1.5  -> 75.4 us (identical split: assembly is
+    per-weight work, invisible to batch, which is exactly why the DPAS path is flat in rows)
+  down k=640 rows=1: fixed 8.0, unpack 53.2, loads 17.9, mads 0.8 -> 79.9 us; rows=8 -> 87.9 us
+
+## What this retracts
+
+* "Widen K per mad to quarter the mad stream" - void, K is already 32. The invalid shape probe left that
+  residue in my reasoning; deleting the file did not delete the idea it seeded, which is worth knowing about
+  how bad instruments do their damage.
+* Item 13n's recommendation to consolidate the two MM=8 accumulators into one 16x16, "halving the mad
+  stream", is **not worth building**: the mad stream is 0.13 slots/weight (2 %), so halving it buys ~1 %,
+  and the other things consolidation would remove are half the A loads (~0.7 slots/weight, ~10 %) and the
+  PART stores, which just measured free. Correct arithmetic on the wrong cost model still produced a
+  plausible-sounding plan; only the measurement killed it.
+* The earlier claim that operand sourcing (SLM vs global) was a first-order effect survives, but note it is
+  the *load* term it acts on, and that term is 21 % - not the 4x kernel-wide swing rev E showed, which the
+  packed-B and barrier work has since removed.
+
+## What it points at
+
+The DPAS kernel is 66 % trellis unpack plus assembly into the A operand layout, and another 21 % moving
+those assembled bytes into matrix registers. Both are consequences of the same thing: this toolchain has no
+joint_matrix_construct, so A must be written to memory and re-read. That is the ESIMD register-operand route
+(`xmx::dpas` on `simd` operands) - previously the "last resort", now the only remaining lever, and its
+ceiling is most of the kernel: fixed + mads is ~9.4 us of 74.3. It also matters *because* rows 4-16 is
+where the DPAS path is chosen: assembly cost is batch-independent, so cutting it moves the regime the
+policy actually uses, and would drag the crossover toward rows=1 as a side effect.
+
+Feasibility first, and calibrated this time: `doc/b70/b70-bench/bench.cpp` already contains a working
+`run_matrix<int8_t, int32_t, 8, 16, 32>` ESIMD kernel, so the shapes and the call exist and are known-good -
+a probe of this route starts from a configuration that is measured to run at full rate, not from a shape
+guess.
+
 ## Reproduce
 
     python3 dump_gemv_case.py /tmp/gemv_dpE10 10 16 0 --with-reference --with-abytes
@@ -690,6 +748,10 @@ LESSONS 40, calibrate an oracle on a case you already know passes before believi
     IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa ./probe_dpas3 CASE 1 1 8   # native .isaasm
     # item 5 price: compare psu vs psud (duplicate PART stores) per KS, warm + interleaved
     # structural variant: KS is forced to 1, so pass any ks (it is ignored)
+    DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
+    # cost factorial (assembly vs loads vs mads vs stores), all warm + interleaved
+    for r in "DPAS_NO_MAD=1 DPAS_NO_UNPACK=1" "DPAS_NO_MAD=1" "DPAS_LOADS_ONLY=1" "DPAS_NO_UNPACK=1" "" "DPAS_NO_STORE=1"; do
+      env $r DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8; done
     DPAS_F=psux DPAS_A_GLOBAL=1 DPAS_B_GLOBAL=1 ./probe_dpas3 CASE 5 1 8
     # does narrowing the token operand at compile time work? (it does not: launcher throws for N<16)
     for n in 16 8 4; do icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DNTOK_OVERRIDE=$n -o /tmp/revF_n$n probe_dpas3.cpp; done

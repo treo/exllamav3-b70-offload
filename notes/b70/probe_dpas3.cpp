@@ -39,7 +39,9 @@
 // Switches (env):
 //   DPAS_F=psfu|none|any subset   rev F changes above (default psfu)
 //   DPAS_A_GLOBAL, DPAS_B_GLOBAL  operand sources, as in rev E (B global + 'p' = packed, 64-byte pitch)
-//   DPAS_NO_MAD                   unpack + assembly only
+//   DPAS_NO_MAD                   unpack + assembly only (also skips the operand loads - see below)
+//   DPAS_LOADS_ONLY               operand loads kept, mads dropped
+//   DPAS_NO_STORE                 PART stores dropped (prices store instructions, not just bytes)
 //   DPAS_NO_UNPACK                matrix path only (stale A, no trellis loads)
 //   both NO_ switches             fixed overhead: B staging, barriers, PART stores, combine
 //   DPAS_CHECK=<file>             bitwise comparison of y against a reference file
@@ -208,6 +210,11 @@ struct Launch
     Meta m;
     int KS = 8;
     bool skip_mad = false, skip_unpack = false;
+    // DPAS_NO_MAD also removed the operand loads, which is how "the mad path" got credited with 62.7 us
+    // in this file's earlier decomposition - mads are 4 per 16-weight tile, so that attribution was wrong.
+    // These two knobs split it: loads_only keeps joint_matrix_load and skips only joint_matrix_mad,
+    // no_store skips the PART store (prices stores + their instructions, not just their bytes).
+    bool loads_only = false, no_store = false;
 };
 
 // Per-sub-group SLM: the staged B slice (unless B is global) and the A tile(s) (unless A is global).
@@ -250,6 +257,7 @@ static void submit(const Launch &L)
     slm_layout(F, m, KS, slmB, slmA);
     const size_t slmTotal = std::max<size_t>(2 * (slmB + slmA), 64);
     const bool skip_mad = L.skip_mad, skip_unpack = L.skip_unpack;
+    const bool loads_only = L.loads_only, no_store = L.no_store;
     const uint32_t *W = L.W;
     const int8_t *B = L.B;
     const int8_t *X16 = L.X16;
@@ -359,8 +367,13 @@ static void submit(const Launch &L)
                         AMat a0, a1;
                         load_a(a0, A, 0, kb);
                         load_a(a1, A, 1, kb);
-                        mx::joint_matrix_mad(sg, c0, a0, b, c0);
-                        mx::joint_matrix_mad(sg, c1, a1, b, c1);
+                        // 'loads_only' keeps the operand loads and drops only the mads, so the mad class can
+                        // be priced apart from the loads that feed it (DPAS_NO_MAD conflates the two).
+                        if (!loads_only)
+                        {
+                            mx::joint_matrix_mad(sg, c0, a0, b, c0);
+                            mx::joint_matrix_mad(sg, c1, a1, b, c1);
+                        }
                     }
                 }
                 else
@@ -375,8 +388,8 @@ static void submit(const Launch &L)
                             BMat b;
                             load_a(a, A, cb, kb);
                             load_b(b, ti, kb);
-                            if (cb == 0) mx::joint_matrix_mad(sg, c0, a, b, c0);
-                            else         mx::joint_matrix_mad(sg, c1, a, b, c1);
+                            if (!loads_only && cb == 0) mx::joint_matrix_mad(sg, c0, a, b, c0);
+                            if (!loads_only && cb == 1) mx::joint_matrix_mad(sg, c1, a, b, c1);
                         }
                 }
             };
@@ -445,7 +458,7 @@ static void submit(const Launch &L)
                         mad_tile(A, ti, c0, c1);
                         if constexpr (!SGBAR) sync(); // single A buffer: wait before overwriting it
                     }
-                    store_part(e, c0, c1);
+                    if (!no_store) store_part(e, c0, c1);
                 }
             }
             else
@@ -709,6 +722,8 @@ int main(int argc, char **argv)
     L.PART2 = PART + ((flags & F_DUPP) ? part_n : 0);
     L.skip_mad = getenv("DPAS_NO_MAD") != nullptr;
     L.skip_unpack = getenv("DPAS_NO_UNPACK") != nullptr;
+    L.loads_only = getenv("DPAS_LOADS_ONLY") != nullptr;
+    L.no_store = getenv("DPAS_NO_STORE") != nullptr;
 
     auto dispatch = [&]
     {

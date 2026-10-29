@@ -588,13 +588,17 @@ measured rate curve at the matched footprint:
   to read. It also would not have helped: mad count is independent of N. The N=1 degeneration of the same
   algebra *does* exist and we ship it — `C[m] = Σ_k A[m,k]·x_k` over four product bytes is exactly rev C's
   `dot_acc(prod, splat(x))`, at 3.5 slots/weight versus the DPAS path's 6.4 — so the rows-keyed two-schedule
-  dispatch **is** the row-count specialization, chosen per kernel rather than per template argument. The real
-  instruction lever is `mads = (cols/M)·(K bytes/K per mad)`: consolidating the two `MM=8` accumulators into
-  one 16×16 halves the mad stream (and the PART stores, and one A load per byte-block), and widening K from
-  rev F's 8 to the vendor bench's int8 32 would quarter it — the latter pays at rows=1 too, so it ranks
-  first; both are untested and must be tried inside rev F, not through the standalone shape probe
-  (LESSONS 40). Caveat: `'x'` is measured at E=10; `tn·E` must stay ≳ 256 groups, so low-E models need grid
-  = `tn·E·KS`.
+  dispatch **is** the row-count specialization, chosen per kernel rather than per template argument. Neither
+  shape axis is the lever either, once the kernel is measured rather than modeled: `MK` is already 32
+  (8 weights per mad — the vendor bench's int8 8×16×32 shape), so "widen K" was void, and the mads
+  themselves cost 1.5 µs of 74.3 (**0.13 slots/weight, 2 %**), which kills the 16×16 consolidation whose
+  selling point was halving them; operand loads are 1.35 sw (21 %) and PART stores measured free. What
+  dominates — 66 %, and identical at rows=1 and rows=8 — is **trellis unpack plus assembly of the A operand
+  in memory, and the load that reads it back** (4.31 + 1.35 sw), which exists only because this toolchain has
+  no `joint_matrix_construct`. The ESIMD register-operand route (`xmx::dpas` on `simd` A) is therefore the
+  single remaining lever: ceiling ~65 % of the kernel, batch-independent cost, so it improves exactly the
+  rows 4–16 regime the schedule selects (§2c 13o). Caveat: `'x'` is measured at E=10; `tn·E` must stay
+  ≳ 256 groups, so low-E models need grid = `tn·E·KS`.
 * Two structural findings travel with those numbers.
   * **Decode compute time is independent of the quantization recipe.** Across the six Qwen3.8 recipes
     (K = 2, 3, 4, 5, 6; 11.72 → 35.16 MiB/layer, a 3.0× byte range) the measured layer time is
