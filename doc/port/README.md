@@ -37,8 +37,8 @@ material for the card is symlinked at [`doc/b70/`](../b70/) (cheat sheets, the L
 | pinned ↔ device bandwidth | 13.3 GB/s (Gen4 ×8) | **14.4 GB/s** |
 | activation payload per decode layer | 5.1 KiB down, 10 KiB up | same, and it hides entirely |
 | GPU work available to hide the offload behind | 165 µs/layer (Qwen3.5), ~250 µs/layer (Qwen3.8) | unchanged — and now 3–8× the offload cost on Qwen, **not** on GLM (241 µs/layer of expert reads) |
-| what the trellis tile walk actually sustains | — (the CPU is DRAM-bound at 45 GB/s) | **287–313 GB/s scattered, 321–492 GB/s clustered**; tile repacking buys **0.95–1.00×**, work-item ordering buys **1.03–1.71×** |
-| is the decode arithmetic affordable? | 7-op VNNI fallback costs ~20 % on x86 | yes, and cheaply: realistic density costs 1–4 % of bandwidth, hardware dot vs manual byte-sum ≤1 % |
+| what the trellis tile walk actually sustains | — (the CPU is DRAM-bound at 45 GB/s) | **132–292 GB/s scattered, 216–558 clustered** (the spread is working-set size, not code): tile repacking buys **0.96–1.05×** with no consistent sign, work-item ordering buys **1.08–1.99×** and never less |
+| is the decode arithmetic affordable? | 7-op VNNI fallback costs ~20 % on x86 | yes: real unpack density costs **0.1–4.4 %** of bandwidth at decode-like footprints (14 % at 64 MiB), and the hardware int8 dot and a manual byte-sum are indistinguishable (0.2–0.4 %) |
 
 Oversized models are covered too, and they are a different problem: at 108.8 GiB of routed-expert
 trellis (GLM-5.3-Flash@3.05, present on this box) only 29 % of the experts fit the B70, so the B70
@@ -89,7 +89,7 @@ What remains before the design is exercised end to end:
 1. `notes/b70/probe_gemv.cpp` — the `Recipe A` trellis decode for one 16×16 tile diffed against
    `tests/testlib/trellis.py` on the device, plus the K=4 vector table from
    `doc/b70/EXL3 mul1 Trellis Unpacking…` (Gate B′6), and then the *fragment* kernel measured in both
-   orderings from b70-kernels.md §3a. That single file settles Gates B′6, E4 and E4b, and it is the
+   orderings from b70-kernels.md §3a. That single file settles Gates B′6, E4, E4b and E4c, and it is the
    last measurement that can invalidate the decode cost model.
 2. `exllamav3/exllamav3_ext/b70/` + `ext_b70.py` — the torch-free C-ABI engine library, with a
    `b70_engine_submit(job_desc)` that does nothing but DMA the slot message in, wait, and publish

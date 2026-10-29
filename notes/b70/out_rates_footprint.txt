@@ -1,0 +1,43 @@
+# probe_rates.cpp, absolute rate vs working-set size. One invocation per (shape, size), best of 4
+# reps, every mode specialised at compile time, exact cover asserted. Generated with:
+#     for s in 0 2; do for m in 2048 1024 512 256 128 64; do ./probe_rates $s $m; done; done
+#
+# This sweep exists because the rate quoted in the design docs came from a single footprint
+# (1536 MiB) and that turned out to be a point on a curve, not a constant.
+
+Qwen3.8 gate/up k=2560 n=640 K=2.5   tiles_n 40  tiles_k 160  bands 5  500 KiB/expert
+  set   experts        R2 scat   R3 band   R6 dense   R8 clust   band/native  clust/native
+2048M      4194           257.0     259.6      255.7      369.5        1.010        1.438
+1024M      2097           274.0     273.4      261.7      545.8        0.998        1.992
+ 512M      1048           248.6     248.5      245.1      364.9        1.000        1.468
+ 256M       524           229.8     230.0      229.0      346.9        1.001        1.510
+ 128M       262           200.1     204.8      199.2      278.4        1.023        1.391
+  64M       131           291.8     292.3      250.4      558.3        1.002        1.913
+
+GLM gate/up k=4096 n=2048 K=3.0      tiles_n 128 tiles_k 256  bands 16  9 MiB/expert
+  set   experts        R2 scat   R3 band   R6 dense   R8 clust   band/native  clust/native
+2048M       682           260.3     272.4      261.7      321.9        1.046        1.237
+1024M       341           254.7     252.3      255.8      321.3        0.991        1.261
+ 512M       170           252.4     265.7      253.4      300.0        1.053        1.189
+ 256M        85           231.6     222.9      231.3      293.1        0.962        1.266
+ 128M        42           208.0     207.3      207.4      224.9        0.997        1.081
+  64M        21           131.6     138.7      130.3      215.6        1.054        1.638
+
+WHAT SURVIVES THE SWEEP
+1. Ordering beats layout, everywhere. clustered/native is 1.08-1.99x and never below 1.08;
+   banded/native lives in 0.96-1.05 with no consistent sign. So "repack the tiles" is still not the
+   lever, but the earlier claim that it is worth *exactly* nothing was an artifact of one footprint:
+   on GLM's geometry it reaches +5 % at two sizes. Native order remains the decision because the gain
+   is inconsistent, smaller than the ordering effect, and would be paid for with a repack pass at load
+   and the loss of byte-interchangeability with the 3090's kernels (which expert migration needs).
+2. The absolute scattered rate is NOT a card constant: 132-292 GB/s (Qwen3.8) and 132-260 (GLM)
+   across a 64 MiB-2 GiB footprint, non-monotonic, with no monotone relation to grid size (Qwen3.8 at
+   128 MiB has 104,800 items and reads at 200 GB/s; at 64 MiB it has half the items and reads at 292).
+   The prime suspects are DRAM bank/hash aliasing against the address range and L2 reuse across the 4
+   reps, neither of which this probe separates. Consequence for planning: a decode estimate built on
+   one microbenchmark number carries up to ~2x uncertainty, so the planning figure must come from the
+   real GEMV at real per-job footprints (E4), and the sweep's low end, not its middle, is what
+   oversized/flat-routing models like GLM should be sized against.
+3. Dense arithmetic stays within a few percent of pure reads at every footprint (R6 vs R2: -0.4 % to
+   -14 %; the worst cases are the two smallest Qwen3.8 sets), so "decode is bandwidth-bound" holds,
+   but its margin is footprint-dependent too. At 64 MiB Qwen3.8 the density penalty is 14 %, not 4 %.

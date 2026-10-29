@@ -31,17 +31,21 @@ same inputs).
 
 | resource | figure | consequence |
 |---|---|---|
-| VRAM read, measured on this exact access pattern | **287–313 GB/s scattered, 321–492 GB/s clustered** (608 GB/s spec; `probe_rates`, **[M]**) | 779–919 G-weights/s scattered, 855–1574 clustered; the spread is *ordering*, not layout — §3a |
-| lanes × clock | 4096 × 2.8 GHz = 1.15·10¹³ lane-ops/s | ≈ 9 simple ops per weight before decode turns ALU-bound; **[M]** dense arithmetic costs only 1–4 % of bandwidth, so decode sits on the bandwidth side of that line |
+| VRAM read, measured on this exact access pattern | **132–292 GB/s scattered, 216–558 GB/s clustered** (608 GB/s spec; `probe_rates`, **[M]**; the range is working-set size, 64 MiB–2 GiB — `out_rates_footprint.txt`) | 351–919 G-weights/s scattered at K = 2.5–3.0; the spread is *ordering* and *footprint*, not layout — §3a |
+| lanes × clock | 4096 × 2.8 GHz = 1.15·10¹³ lane-ops/s | the real unpack density (+47 lane-inst per 32-lane word) costs 0.1–4.4 % of bandwidth at decode-like footprints, 14 % at a 64 MiB one — decode sits on the bandwidth side of that line, with less margin than the first measurement suggested |
 | XMX | 183 TFLOP/s fp16, 367 TOPS int8 **[M]** (`b70-bench`) | prefill is XMX-bound only above ~64 rows/expert |
 | SLM / L1 | 128 KiB per Xe core (driver-reported **[M]**), 18 MiB L2 | a Qwen3.8 decode job reads ~12 MiB, comparable to L2 — see §3a item 4 |
 | subgroup | 16 and 32; DPAS wants 16 | lane = output column = exactly the trellis permutation (§2.3) |
 
 The earlier draft of this table said the decode kernel "lives or dies on ops per weight" and made
 verifying the int8 dot's instruction count a phase-1 gate. Measurement overturned that: at realistic
-density (extract + multiply + accumulate, ~10 weights per u32) the loop loses only **1–4 %** of
-bandwidth versus the same reads with no arithmetic, and `dot_acc` versus a manual 3-mask/3-shift/3-add
-byte sum differ by **≤1 %** (**[M]**, `probe_rates` R6/R7). Decode on this card is bandwidth-bound, so
+density (extract + multiply + accumulate, ~10 weights per u32, **+47 lane-instructions per 32-lane
+word = per 128 B of stream**) the loop loses **4.4 %** of bandwidth on Qwen3.8's geometry and **0.1 %**
+on GLM's versus the same reads with no arithmetic, and `dot_acc` versus a manual 3-mask/3-shift/3-add
+byte sum differ by **0.2–0.4 % — not measurably** (**[M]**, `probe_rates` R6/R7, reproduced across
+three independent runs in `out_rates_repeat.txt`). Breaking the accumulator into 8 independent chains
+makes it 1.2–1.4 % *worse*, so the residual is instruction count and register pressure, not dependency
+latency. Decode on this card is bandwidth-bound, so
 the dot earns its place on instruction count and energy, not on throughput, and it is no longer a
 design risk. Op count still matters where arithmetic is heavy against bytes: the XMX routes (§4), and
 Recipe A (~6 ops/weight) versus Recipe B (~4) on the half-rate layers, where 3.2 weights per byte
@@ -108,16 +112,18 @@ for 256 vector engines even at 4 slots.
   18 MiB L2 with it measurably hurts the next layer. Compare with the default policy in the
   harness; this is the B70 analogue of the CPU's banding question and should be answered by
   measurement, not by analogy.
-* Traffic model to check against: `experts × expert_bytes / 420 GB/s [P]` + `~10 µs` handshake, i.e.
-  ~38 µs for 8 experts at 1.465 MiB. Gate E4 sets the floor on the measured read rate.
+* Traffic model to check against: `experts × expert_bytes / 250 GB/s` (mid-band scattered) + `~10 µs`
+  handshake, i.e. ~58 µs for 8 experts at 1.465 MiB; at the clustered end the same job is ~33 µs.
+  Gate E4 replaces the rate with the real kernel's own measurement at a matched footprint.
 
 ## 3a. Locality: the one lever the measurements actually found
 
 `probe_rates` compared, on identical bytes and identical tile geometry, a work-item→tile mapping that
-spreads consecutive items across the tier against one that keeps them adjacent: **1.03–1.71×**
-(287→492 GB/s on Qwen3.8's gate/up geometry; 313→321 on GLM's, whose wider `tiles_n` scatters even
-the "adjacent" mapping). Nothing about the trellis layout changed. So the kernel and the allocator,
-not a swizzle, carry this:
+spreads consecutive items across the tier against one that keeps them adjacent: **1.08–1.99×, measured
+across two geometries and six working-set sizes, never negative** (Qwen3.8 at 1 GiB: 274→546 GB/s;
+GLM at 1 GiB: 255→321; the weakest case is GLM at 128 MiB, 208→225). By contrast the tile *permutation*
+(`b70-architecture.md` §2.2) measures 0.96–1.05× with no consistent sign. Nothing about the trellis
+layout changed here. So the kernel and the allocator, not a swizzle, carry this:
 
 1. **Grid order = memory order.** Schedule so that concurrently running work-items are consecutive
    fragments of the *same* expert (item id innermost in `kt`, then band, then expert). The reverse —
@@ -135,10 +141,13 @@ not a swizzle, carry this:
 5. Cache-control hints (`annotated_ptr`, evict-first weight reads, `sycl::prefetch`) are
    **second-order** to 1–3 and are measured as an increment on top of them, never instead of them.
 
-The failure mode this section exists to prevent: writing the GEMV first, measuring 290 GB/s in phase
-2, and finding the cause was one line of grid ordering. E4 is judged against both regimes — below
-300 GB/s is treated as an ordering bug, 300–420 acceptable, above 420 evidence that locality *and*
-probably L2 reuse are working.
+The failure mode this section exists to prevent: writing the GEMV first, measuring ~200 GB/s in phase
+2, and finding the cause was one line of grid ordering. E4 is judged against the footprint-matched
+bracket in `notes/b70/out_rates_footprint.txt` rather than a single number: for Qwen3.8-class geometry
+that is 200–292 GB/s scattered and 278–558 clustered, so landing near the bottom of the scattered band
+means the ordering rules above are not implemented, and exceeding the clustered band is evidence that
+locality *and* something unmodelled (L2 reuse across a repeated-expert stream, which decode actually
+presents) are working.
 
 ## 4. Prefill kernels (`rows ≥ 32`): feeding XMX
 

@@ -55,11 +55,12 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | 3090 `cuStreamWriteValue32` → B70 kernel sees it | **works** | — |
 | B70 kernel store → 3090 `cuStreamWaitValue32` retires | **works** (plain volatile store + `sycl::atomic_fence(acq_rel, system)`) | — |
 | device | 256 CUs reported, SG 16/32, SLM 128 KiB, 1024 max WG | — |
-| **decode tile walk, native order** | **287–313 GB/s** scattered (47–51 % of 608) | — |
-| same, consecutive work-items on consecutive tiles | **321–492 GB/s** (53–81 %) — the `LOCALITY payoff` is 1.03–1.71× | the CPU's band-8 repack exists for this reason |
-| same tiles, banded/repacked order | **0.95–1.00×** vs native: repacking buys nothing on Xe2 | band-2/band-8 + planar is worth ~20 % on x86 |
-| mul1 decode arithmetic at real density (extract+mul+dot per weight) | costs **1–4 %** of bandwidth versus the same reads with no arithmetic | decode is bandwidth-bound, not ALU-bound |
-| hardware int8 dot vs manual byte-sum | **≤1 %** apart at these rates | `vpdpbusd` vs `vpmaddubsw` fallback is a real gap on x86 |
+| **decode tile walk, native order** | **132–292 GB/s** scattered (Qwen3.8), **132–260** (GLM) — 22–48 % of 608; the spread is working-set size, not code | single-point rates are not card constants: `out_rates_footprint.txt` |
+| same, consecutive work-items on consecutive tiles | **216–558 GB/s**; `LOCALITY payoff` **1.08–1.99×**, never negative | the CPU's band-8 repack exists for this reason; here the GPU analogue is grid order |
+| same tiles, banded/repacked order | **0.96–1.05×** vs native, no consistent sign, and the probe's configuration variance exceeds the effect → E4c re-tests it in situ | band-2/band-8 + planar is worth ~20 % on x86 |
+| mul1 decode arithmetic at real density (+47 lane-inst per 128 B of stream) | **−0.1 %** (GLM) to **−4.4 %** (Qwen3.8) of bandwidth at 1 GiB; up to **−14 %** at a 64 MiB footprint | decode is bandwidth-bound, with less margin at small footprints |
+| hardware int8 dot vs manual byte-sum | **0.2–0.4 %** apart over three independent runs: not measurable | `vpdpbusd` vs `vpmaddubsw` fallback is a real gap on x86 |
+| accumulator dependency | splitting into 8 chains is **1.2–1.4 % slower**, so the density cost is instruction count / register pressure, not latency | R9 exists to kill that explanation |
 | routing breadth (from real selection counts) | Qwen3.8@2.68: 97.6 % of picks in 411/512 experts; GLM: 70.8 % in 91/288 (effective support 213–231) | the profile is a decayed cumulative, so both are upper bounds |
 
 Read as: the B70's link is not the problem (it is a shade faster than the 3090's on this box),

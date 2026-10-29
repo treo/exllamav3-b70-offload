@@ -25,9 +25,15 @@
 //   R6/R7  the arithmetic at the *real* decode density: a mul1 GEMV costs ~5-7 lane-ops per weight
 //       (window extraction + multiply + dot), and at K=3 there are 32/K = 10.7 weights per u32 word,
 //       so a faithful proxy is ~10 extract+mul+dot triples per word. R6 uses dot_acc, R7 the manual
-//       byte sum; R6/R7 is what the hardware dot is actually worth, and R6's absolute rate says
-//       whether decode lands bandwidth-bound or ALU-bound on this compiler. That is the number the
-//       kernel design is gated on, not an instruction count in a listing.
+//       byte sum; R6/R7 is what the hardware dot is actually worth.
+//   R9     R6 with the accumulator split across 8 independent chains: same loads, same op count, no
+//       serial dependency. It measures *slower*, so the density penalty is not accumulator latency -
+//       it tracks instruction count and register pressure. Without R9 it would be tempting to
+//       explain the 1-4 % away as a dependency stall, which is a different design warning.
+//
+// One invocation covers ONE geometry (argv[1]); a sweep is a shell loop over shapes, and
+// out_rates_repeat.txt is three independent invocations per shape to bound run-to-run spread. Do NOT
+// reason from a single run's absolute rate: use the ratios, which reproduce to <=3 %.
 //
 // Two earlier revisions of this probe reported 1580 GB/s against a 608 GB/s peak, for reasons worth
 // recording because they are the general traps in any GPU bandwidth microbenchmark:
@@ -98,6 +104,7 @@ static double pass(sycl::queue &q, u32 *src, u32 *sink, size_t tiles_per_expert,
             const uint32_t kt0 = uint32_t((r / bands) % (tiles_k / kt_per_item)) * kt_per_item;
             const size_t base = expert * tiles_per_expert;
             u32 acc = 0;
+            u32 acc8[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };   // MODE 6 only: 8 independent chains
             for (uint32_t i = 0; i < kt_per_item; ++i)
             {
                 const size_t row = size_t(kt0 + i) * tiles_n;
@@ -124,7 +131,12 @@ static double pass(sycl::queue &q, u32 *src, u32 *sink, size_t tiles_per_expert,
                             const u32 v2 = w[x + 1 < tile_words ? x + 1 : 0];
                             // ~10 weights per word at K=3: extract a 16-bit window from the word pair
                             // (the funnel_r shape, which never shifts by 32), then mul + accumulate.
-                            // MODE 4 keeps the hardware dot, MODE 5 replaces it with the byte sum.
+                            // MODE 4 keeps the hardware dot, MODE 5 replaces it with the byte sum,
+                            // MODE 6 is MODE 4 with the accumulator dependency broken across 8
+                            // partial sums: same op count, same loads, no serial chain. If the
+                            // density penalty is issue serialization it disappears here; if it is
+                            // ALU throughput it stays, and this probe would have to be believed the
+                            // other way.
                             for (uint32_t j = 0; j < 10; ++j)
                             {
                                 const uint32_t s = j & 15u;
@@ -132,6 +144,12 @@ static double pass(sycl::queue &q, u32 *src, u32 *sink, size_t tiles_per_expert,
                                 const u32 pr = st * 0x83DCD12Du;
                                 if constexpr (MODE == 4)
                                     acc += u32(sycl::ext::oneapi::dot_acc(pr, 0x41414141u, int32_t(acc)));
+                                else if constexpr (MODE == 6)
+                                {
+                                    const uint32_t c = j & 7u;
+                                    acc8[c] += u32(sycl::ext::oneapi::dot_acc(pr, 0x41414141u,
+                                                                              int32_t(acc8[c])));
+                                }
                                 else
                                     acc += (pr & 0xffu) + ((pr >> 8) & 0xffu) + ((pr >> 16) & 0xffu) + (pr >> 24);
                             }
@@ -139,6 +157,8 @@ static double pass(sycl::queue &q, u32 *src, u32 *sink, size_t tiles_per_expert,
                     }
                 }
             }
+            if constexpr (MODE == 6)
+                for (uint32_t c = 0; c < 8; ++c) acc += acc8[c];
             sink[(id[0] * 8) & (SINK_WORDS - 1)] += acc;     // unconditional: nothing may be deleted
         }).wait();
         const double s = duration<double>(steady_clock::now() - t).count();
@@ -189,6 +209,15 @@ static double pass_clustered(sycl::queue &q, u32 *src, u32 *sink, size_t tiles_p
 int main(int argc, char **argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    // Strict, not forgiving: `./probe_rates --quick` used to parse as shape 0 via atoi and silently
+    // measure one geometry while the reader believed it had measured three. Unknown arguments die.
+    if (argc > 1 && (argv[1][0] == '-' || atoi(argv[1]) < 0 || atoi(argv[1]) >= int(sizeof(SHAPES)/sizeof(SHAPES[0]))))
+    {
+        fprintf(stderr, "usage: %s [shape 0..%zu] [MiB]\n  0 %s\n  1 %s\n  2 %s\n",
+                argv[0], sizeof(SHAPES)/sizeof(SHAPES[0]) - 1,
+                SHAPES[0].name, SHAPES[1].name, SHAPES[2].name);
+        return 2;
+    }
     const int shape_ix = argc > 1 ? atoi(argv[1]) : 0;
     const size_t mib = argc > 2 ? size_t(atoi(argv[2])) : 1536;
     const Shape sh = SHAPES[shape_ix];
@@ -252,8 +281,9 @@ int main(int argc, char **argv)
     static const char *NAMES[] = { "R2 native tile order (scatter)", "R3 banded order    (scatter)",
                                    "R4 native + mul + int8 dot    ", "R5 native + mul + byte sum    ",
                                    "R6 native + density, dot      ", "R7 native + density, sum      ",
+                                   "R9 density, dot, 8 chains     ",
                                    "R8 native tile order (cluster)" };
-    double rate[7] = {0, 0, 0, 0, 0, 0, 0};
+    double rate[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     size_t moved = 0;
     // Warm up, then round-robin the modes: measured first-in-process kernels run during the front-end
     // clock ramp (this box idles far below its 2.8 GHz boost), which made the mode that happened to
@@ -265,27 +295,31 @@ int main(int argc, char **argv)
 #define MEASURE(M) { const double r = pass<M>(q, src, sink, tiles_per_expert, experts, tiles_n, \
                        tiles_k, bands, tile_words, 2, &moved); if (r > rate[M]) rate[M] = r; }
         MEASURE(0) MEASURE(1) MEASURE(2) MEASURE(3) MEASURE(4) MEASURE(5)
+        MEASURE(6)   // dense dot with 8 independent accumulator chains
         {
             // MODE 6 proxy for the clustered regime: identical arithmetic to MODE 0 but with the
             // identity item->tile map, i.e. consecutive items read consecutive tiles, which is what
             // a single-expert GEMV fragment stream looks like.
             const double r = pass_clustered(q, src, sink, tiles_per_expert, experts, tiles_n, tiles_k,
                                             bands, tile_words, 2, &moved);
-            if (r > rate[6]) rate[6] = r;
+            if (r > rate[7]) rate[7] = r;
         }
 #undef MEASURE
     }
-    for (int mode = 0; mode < 7; ++mode)
+    for (int mode = 0; mode < 8; ++mode)
         printf("  %-30s %8.1f GB/s   %9.1f G-weights/s   %6.1f %% of 608 GB/s\n",
                NAMES[mode], rate[mode], rate[mode] * 8.0 / sh.K, 100.0 * rate[mode] / 608.0);
     printf("  layout payoff (banded/native)      %.2f x\n", rate[0] > 0 ? rate[1] / rate[0] : 0.0);
     printf("  LOCALITY payoff (clustered / scrambled native)  %.2f x\n",
-           rate[0] > 0 ? rate[6] / rate[0] : 0.0);
+           rate[0] > 0 ? rate[7] / rate[0] : 0.0);
     printf("  light arithmetic (byte-sum / dot)  %.2f x\n", rate[2] > 0 ? rate[3] / rate[2] : 0.0);
-    printf("  real density  (byte-sum / dot)     %.2f x  ( >1 means the hardware dot wins )\n",
-           rate[4] > 0 ? rate[5] / rate[4] : 0.0);
+    printf("  dot vs byte-sum at density         %.3f x  ( >1 = hardware dot is FASTER )\n",
+           rate[5] > 0 ? rate[4] / rate[5] : 0.0);
     printf("  ALU pressure  (dot at density / light) %.2f x  (<1 = arithmetic costs bandwidth)\n",
            rate[2] > 0 ? rate[4] / rate[2] : 0.0);
+    printf("  CHAIN test: density-with-8-accumulators / light-dot  %.3f x"
+           "   (1.000 = the density cost was accumulator latency)\n",
+           rate[2] > 0 ? rate[6] / rate[2] : 0.0);
 
     u32 host[SINK_WORDS / 64];
     q.memcpy(host, sink, sizeof(host)).wait();

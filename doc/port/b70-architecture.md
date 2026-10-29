@@ -114,18 +114,36 @@ it also means eviction from `S_b` has nowhere to go, so the tier is then a stati
 
 ### 2.2 Weight layout on the B70
 
-**Settled by measurement (`notes/b70/probe_rates.cpp`, `out_rates.txt`): the B70 stores experts in
-native tile order, full stop.** Banded repacking (the GPU analogue of the CPU's band-8, k-major along
-`n`) was measured against native on three geometries and gained **0.95–1.00×** — nothing, and
-slightly negative where `tiles_n` is large. So there is no repack pass at load, no un-swizzle
-interaction, and the bytes stay interchangeable with the 3090's kernels, which is what lets an expert
-move between homes without translation. `exl3_b70_tile_layout(K)` still exists as the single place
-the layout is *reported* (Gate B4's rule that no second table may appear), but its answer is `native`
-for every K, and a future change must come with a measured win, not an analogy to the CPU tiers.
+**Decided: the B70 stores experts in native tile order** (**[M]** `notes/b70/probe_rates.cpp`,
+`out_rates.txt`, `out_rates_repeat.txt`, `out_rates_footprint.txt`). Banded repacking (the GPU
+analogue of the CPU's band-8, k-major along `n`) was measured against native on two geometries across
+six working-set sizes: **0.96–1.05×, with no consistent sign** — it helped twice on GLM's wide
+`tiles_n` and hurt there elsewhere, and sat on 1.00 for Qwen3.8. That is not nothing, but it is not a
+lever either, and it is paid for twice: a repack pass at load, and losing the byte-identity that lets
+an expert move between the 3090 and the B70 without translation (§5). So there is no repack at load,
+no un-swizzle interaction, and the bytes stay interchangeable with the 3090's kernels.
+`exl3_b70_tile_layout(K)` still exists as the single place the layout is *reported* (Gate B4's rule
+that no second table may appear), but its answer is `native` for every K, and reversing that needs a
+consistent win in the real GEMV (E4), not an analogy to the CPU tiers.
 
-What *does* move the number by 1.03–1.71× is **locality**, not permutation: the same tile reads run
-at 287–313 GB/s when consecutive work-items land on scattered tiles and 321–492 GB/s when they land
-consecutively. That is a kernel-scheduling and allocation property, so it is specified in
+The size of the intervention is why the null deserves belief. Banding rewrites the tile index from
+native `kt·tiles_n + nt` to `(nt/8)·tiles_k + kt`, cutting the k-step of a GEMV fragment from
+`tiles_n × tile_bytes` = 3200 B (Qwen3.8) or 12288 B (GLM) to `8 × tile_bytes` = 640–768 B: an item's
+64 tile reads collapse from a 25–60 KiB scatter into one contiguous ~5 KiB run — a 5–16× stride
+reduction, and both mappings were checked to be exact covers of the same tiles before timing. What
+does *not* come out of the data is a mechanism story: per-item locality ought to matter only when few
+streams are in flight, yet GLM's banded gain appears at 2 GiB, 512 MiB and 64 MiB and not at 1 GiB,
+256 MiB or 128 MiB. The honest summary is **no reliable gain, and this instrument is not sharp enough
+to prove the gain is exactly zero** — the configuration variance (which moves absolute rates ~2×, see
+`out_rates_footprint.txt`) exceeds the effect. §12 therefore records the layout decision as made on
+engineering grounds and revisitable, not as closed by measurement.
+
+What *does* move the number, consistently and in one direction, is **locality**: clustered
+work-item→tile mapping over scattered, **1.08–1.99×** across both geometries and all six footprints,
+never negative, never below 1.08. Absolute rates for orientation: 132–292 GB/s scattered and
+216–558 GB/s clustered, the low ends being GLM at a 64 MiB working set and the high end Qwen3.8
+clustered at 64 MiB–1 GiB. That is a kernel-scheduling and allocation property, so it is specified in
+kernel-scheduling and allocation property, so it is specified in
 [b70-kernels.md](b70-kernels.md) §3a (keep a layer's experts contiguous in B70 VRAM; give one
 work-group one expert's fragment range; never interleave experts across the items of a wave) and it
 is what gate E4 is written against.
@@ -329,29 +347,42 @@ the CPU path's promote hook cost 2-3 ms/token.
 
 Constants on this box, as measured (see `notes/b70/out_rates.txt` and `notes/b70/README.md`):
 `link_rate` 14.4 GB/s **[M]**; `notify` 3.2 µs resident / 5–8 µs per submission **[M]**;
-`vram_rate` for the decode read pattern **287–313 GB/s scattered, 321–492 GB/s clustered** **[M]**
-(47–81 % of the 608 GB/s spec; 779–919 G-weights/s scattered, 855–1574 clustered) — which replaces the earlier
-"target ≥420 GB/s" projection, and the *clustered* end is only reachable if the kernel keeps one
-expert's tiles together (b70-kernels.md §3a); `xmx_rate` 183 TFLOP/s fp16 / 367 TOPS int8 **[M]**
-(`b70-bench`); `parent_gpu_work` 165 µs/layer (Qwen3.5) and ~250 µs/layer (Qwen3.8) **[M, doc/prep]**,
-GLM unmeasured (E10 measures it first).
+`vram_rate` for the decode read pattern: **scattered 200–292 GB/s (Qwen3.8) / 132–260 GB/s (GLM),
+clustered 278–558 / 216–322**, as a function of working-set size (**[M]**, `out_rates_footprint.txt`
+for the sweep; `out_rates.txt` and `out_rates_repeat.txt` are the 1–1.5 GiB points) — 45–81 % of the
+608 GB/s spec, and 729–919 G-weights/s scattered at the reference footprint. **The absolute rate is
+not a card constant**: identical code and geometry vary ~2× with footprint, non-monotonically, so the
+planning figures below carry up to ~2× uncertainty until E4 measures the real GEMV at the footprints
+decode actually presents; that replaces the earlier "target ≥420 GB/s" projection. The *clustered*
+end is only reachable if the kernel keeps one expert's tiles together (b70-kernels.md §3a);
+`xmx_rate` 183 TFLOP/s fp16 / 367 TOPS int8 **[M]** (`b70-bench`); `parent_gpu_work` 165 µs/layer
+(Qwen3.5) and ~250 µs/layer (Qwen3.8) **[M, doc/prep]**, GLM unmeasured (E10 measures it first).
 
-The read-rate measurement also settles the arithmetic question for decode: at realistic density
-(window extract + multiply + accumulate, ~10 weights per word) the loop loses only **1–4 %** of
-bandwidth versus the same reads with no arithmetic, and the hardware int8 dot and the manual
-byte-sum differ by **≤1 %**. Decode on this card is bandwidth-bound, so neither the dot's availability
-nor Recipe A-versus-Recipe B decides decode throughput — locality and job composition do. (The dot
+The read-rate measurement also settles the arithmetic question for decode. The cost is taken as the
+difference between two measured kernels, never as a modelled duty cycle: adding the real unpack
+density (window extract + multiply + accumulate, ~10 weights per word, **+47 lane-instructions per
+32-lane word = per 128 B of stream**) costs **4.4 % of bandwidth on Qwen3.8's geometry and 0.1 % on
+GLM's** at the 1 GiB footprint, and the hardware int8 dot and a manual byte-sum differ by
+**0.2–0.4 %, i.e. not measurably** (three independent runs, `out_rates_repeat.txt`). Splitting the
+accumulator across 8 independent chains makes it 1.2–1.4 % *worse*, so the residual cost is not
+dependency latency — it tracks instruction count and register pressure. One caveat from the footprint
+sweep: at a 64 MiB working set the density penalty grows to ~14 % (Qwen3.8), because the loop is then
+running close enough to the card's latency limit that extra instructions stop hiding under memory
+latency. Decode on this card is bandwidth-bound at the footprints decode actually uses, so neither the
+dot's availability nor Recipe A-versus-Recipe B decides decode throughput — locality and job
+composition do. (The dot
 still matters for the XMX prefill routes and for power, and `spillMemSize`/ISA checks stay in the
 harness; what no longer gates the design is "what if `dot_acc` becomes seven ops".)
 
 What the model says at a glance:
 
 * Decode, at the **measured** read rates, per layer: Qwen3.8's 49.2 M weights (10 picks × 4.92 M)
-  take **54–63 µs** scattered, ~31–49 µs if the kernel achieves the clustered end — against a parent
-  window of ~250 µs/layer, so the offload is hidden with a 4–8× margin. Qwen3.5 is proportionally
-  cheaper. **GLM is the hard case: 201 M weights per layer is ~241 µs**, and its geometry shows almost
-  no locality gain (1.03×), so whether GLM's offload is hidden depends entirely on GLM's own
-  per-layer parent work (45 layers at H=4096, 64 heads) — which E10 must measure before anyone
+  take **55–95 µs** scattered across the footprint sweep, 31–62 µs at the clustered end — against a
+  parent window of ~250 µs/layer, so the offload is hidden with a 2.6–4.5× margin. Qwen3.5 is
+  proportionally cheaper. **GLM is the hard case: 201 M weights per layer is 278–548 µs** at its
+  measured band (132–260 GB/s scattered, and only 1.08–1.64× available from locality), so GLM's
+  offload is plausibly *not* hidden — whether it is depends entirely on GLM's own per-layer parent
+  work (45 layers at H=4096, 64 heads), which E10 must measure before anyone
   promises "free at decode" for it. The claim is therefore conditional per model, not universal.
 * Prefill is link-bound at ~2048 rows unless `sz_out` drops to fp16 or the row split keeps more work
   on the 3090; the model gives the crossover for both, and the harness measures which the box lands on.
@@ -424,7 +455,9 @@ Qwen3.8 @6.05, 1 card: 205 of 512 resident, h = 96.6 %, CPU residue 1.29 ms/toke
 The economics, for GLM's geometry (9.00 MiB expert = 9.44e6 B, K=3, topk 8; 43 MoE layers of which the
 local profile covers 42, so the per-token figures below are ~2 % light) at measured rates — `link`
 14.4 GB/s and `disk` 5.0–5.2 GB/s **[M]**, CPU 47.4 GB/s **[M, doc/prep §5]**, B70
-300 GB/s **[M planning figure; 420 is the clustered goal]**:
+250 GB/s **[M, the middle of the scattered sweep; §2.2 shows the rate is footprint-dependent, and the
+break-even below moves only from 3.8 to 4.1 uses across the whole 132–545 GB/s range, so this input
+barely matters]**:
 
 ```
 admit one expert to S_b  = expert_bytes / link_rate              =  655 us   (from S_c)
@@ -767,14 +800,18 @@ answer goes the wrong way:
    design. The residual risk is that this is driver-version-specific, so the test belongs in the
    per-commit set rather than in the archive.
 2. ~~Does `dot_4x8packed_us_int` / `sycl::ext::oneapi::dot_acc` compile to one Xe2 instruction?~~
-   **Answered behaviourally** (`probe_rates`, R6 vs R7): at realistic decode density the hardware dot
-   and a manual byte-sum differ by ≤1 %, and dense arithmetic costs only 1–4 % of bandwidth against
-   the same reads with no arithmetic. Decode is bandwidth-bound, so the ISA question no longer gates
+   **Answered behaviourally** (`probe_rates`, R6 vs R7, reproduced over three independent runs):
+   the hardware dot and a manual byte-sum differ by 0.2–0.4 % (mean 1.002×, 1.004×) at realistic
+   decode density, and that density costs 4.4 % (Qwen3.8) to 0.1 % (GLM) of bandwidth against the
+   same reads with no arithmetic. Decode is bandwidth-bound, so the ISA question no longer gates
    the design; it stays relevant to the XMX prefill routes and to J/token. (Direct ISA inspection is
    unavailable on this driver: `IGC_ShaderDumpEnable` emitted nothing, `SYCL_SAVE_TEMPS` left no files.)
-3. ~~How much of the 608 GB/s does the decode GEMV actually reach?~~ **Measured** 287–313 GB/s
-   scattered, 321–492 GB/s clustered, native order. The surprise is that the *arrangement* is worth
-   1.03–1.71× while the tile permutation is worth nothing (0.95–1.00×), so the lever moved from
+3. ~~How much of the 608 GB/s does the decode GEMV actually reach?~~ **Measured, with a surprise**:
+   scattered 132–292 GB/s (Qwen3.8) and 132–260 (GLM), clustered 216–558, native order — and the
+   absolute rate depends ~2× on the *working-set size*, non-monotonically, which is why no design
+   number is allowed to rest on one microbenchmark point (`out_rates_footprint.txt`). The arrangement
+   is worth 1.08–1.99× while the tile permutation is worth 0.96–1.05× with no consistent sign, so the
+   lever moved from
    layout (§2.2, closed) to kernel scheduling and VRAM allocation (b70-kernels.md §3a, and gate E4
    restated against both regimes). Qwen3.8's decode layer stays hidden at 4–8× margin; **GLM's does
    not clear comfortably** (~241 µs/layer of expert reads), which is now a measured concern rather
@@ -809,8 +846,8 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | no `sycl::atomic_ref` on the shared region, at any scope | closed | `UR_RESULT_ERROR_DEVICE_LOST` repro (`probe_stores.cpp` case 7) | nothing |
 | explicit `i[0]` indexing + every-word assertions in kernel tests | closed | silent zero-store bug, `LESSONS` 4a | nothing |
 | three disjoint homes, two cut points, no replication | closed by argument + measurement | 1.5× rate ratio; `plan_placement.py` shows replication would cost residency it cannot pay | a model whose routing is so peaked that duplicate hot experts beat the capacity loss (E14 would show it) |
-| native tile layout on the B70, no repack | closed | banded/native 0.95–1.00× **[M]** | a measured win >1.15× in the real GEMV (E4) |
-| locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | 1.03–1.71× scatter-vs-cluster **[M]** | E4 measuring the real GEMV below 300 GB/s |
+| native tile layout on the B70, no repack | **decided on engineering grounds, not closed by measurement** | banded/native 0.96–1.05× over 2 geometries × 6 footprints: no consistent sign, and the probe's configuration variance exceeds the effect **[M]** | E4c: a *consistent* win in the real GEMV at decode footprints, large enough to pay for a load-time repack and for losing byte-interchangeability with the 3090 kernels |
+| locality rules (one expert per work-group, contiguous per-layer VRAM) | adopted as design, unmeasured in situ | clustered/native 1.08–1.99×, never below 1.08 **[M]** | E4 measuring the real GEMV below 200 GB/s |
 | streamed/staged prefill dead for `S_b`, live for `S_c` | closed | ~200-row crossover from measured bytes/rates | a model with far more skewed routing (E7′ measures) |
 | admission economics: β ≈ 655 µs, μ_cpu ≈ 199 µs, break-even ≈ 4 uses | closed as arithmetic | measured rates | only new rate measurements |
 | migration policy = cost-based, break-even on **churn**, not picks | adopted as arithmetic; **churn itself unmeasured and unmeasurable offline** | `\|res\|`, `fill`, and the two thresholds, which coincide at ~0.3 %/token (link saturation 0.31 %, economic 0.36 %) from measured quantities | E11: under ~0.3 %/token migrate with a link-budgeted per-step cap; over it, `S_b` is static apart from priming and the CPU serves the residue |

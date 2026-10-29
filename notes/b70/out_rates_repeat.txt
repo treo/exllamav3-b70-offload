@@ -1,0 +1,36 @@
+# repeatability of probe_rates: three INDEPENDENT process invocations per geometry, 1 GiB
+# working set. The main sweep (out_rates.txt) uses 1.5 GiB: absolute rates are lower there
+# (larger footprint), but every ratio below is reproduced there too.
+# mode key: R2 native read | R3 banded read | R4 light dot | R5 light byte-sum
+#           R6 dense dot | R7 dense byte-sum | R9 dense dot, 8 accumulator chains
+#           R8 clustered (identity item->tile map)
+
+Qwen3.8 gate/up k=2560 n=640 K=2.5   (GB/s, 1 GiB working set)
+        R2      R3      R4      R5      R6      R7      R9      R8
+     273.9   273.4   274.3   276.1   262.1   262.5   260.3   544.5
+     275.4   273.1   274.6   274.6   262.3   261.7   259.1   543.4
+     274.1   274.3   274.5   274.4   262.5   261.4   257.7   544.5
+       1.5     1.2     0.3     1.7     0.4     1.1     2.6     1.1   <- spread
+  banded / native              0.998 0.992 1.001   mean 0.997
+  dense arithmetic / native    0.957 0.952 0.958   mean 0.956
+  8 chains / 1 chain           0.993 0.988 0.982   mean 0.988
+  hw dot / byte sum (dense)    0.998 1.002 1.004   mean 1.002
+  clustered / native           1.988 1.973 1.987   mean 1.983
+
+GLM gate/up k=4096 n=2048 K=3.0   (GB/s, 1 GiB working set)
+        R2      R3      R4      R5      R6      R7      R9      R8
+     253.7   253.0   259.9   258.4   254.7   253.5   251.9   320.6
+     252.8   252.5   253.8   255.2   255.2   254.7   251.5   321.2
+     259.0   252.2   258.7   254.5   256.1   255.0   251.5   320.9
+       6.2     0.8     6.1     3.9     1.4     1.5     0.4     0.6   <- spread
+  banded / native              0.997 0.999 0.974   mean 0.990
+  dense arithmetic / native    1.004 1.009 0.989   mean 1.001
+  8 chains / 1 chain           0.989 0.986 0.982   mean 0.986
+  hw dot / byte sum (dense)    1.005 1.002 1.004   mean 1.004
+  clustered / native           1.264 1.271 1.239   mean 1.258
+
+How to read it: absolute rates repeat to 0.1-2.4% and depend on working-set size (1 GiB here, 1.5 GiB
+in the sweep); RATIOS repeat to <=3%, and those are the level at which design conclusions are drawn.
+The marginal cost of arithmetic is taken as a difference between two measured kernels, never as a
+modelled duty cycle: R6-R2 = -4.4% (Qwen3.8) and -0.1% (GLM) for +47 lane-instructions per 32-lane
+word = per 128 B of stream.

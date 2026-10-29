@@ -213,10 +213,69 @@ the design in a different direction:
    Fix: template on the variant, one instantiation per measured configuration.
 
 Then, and only then, the numbers stabilised across modes and repetitions - and the surviving result
-(locality worth 1.03–1.71×, layout worth nothing, arithmetic worth 1–4 %) reversed two conclusions
-the earlier, smoother-looking numbers had supported.
+(locality worth up to ~1.7–2.0×, layout worth nothing reliable, arithmetic worth a few percent)
+reversed two conclusions the earlier, smoother-looking numbers had supported.
 
 ## 16. A proxy metric must be the same *kind* of quantity as the thing it proxies
+
+Needing a churn number for the migration policy and having only cumulative expert-count profiles, I
+tried two proxies and both produced confident, useless figures:
+
+* comparing the top-N **sets of counts** between groups of layers reported "92 % overlap". The sets
+  were of *values*, and decayed counts repeat (many experts share 16.046875), so the intersection
+  measured value collisions, not whether the same experts were hot.
+* splitting one layer's array in half reported "100 % overlap". That partitions experts by index: a
+  spatial split of a static snapshot, with no time in it at all, and the same value-collision artifact
+  on top.
+
+Both were rejected before reaching the plan, and the honest state is now written where the number is
+used (`doc/port/b70-architecture.md` §4a: churn unmeasured, the two thresholds coinciding at
+~0.3 %/token, E11 to produce it from two snapshots or per-window counters). The lesson generalises to
+every statistic scraped from someone else's artifact: ask what the *identity* of the compared objects
+is, and whether the artifact has the axis (here, time) the question needs. A decayed cumulative count
+cannot answer "how fast does the set change", no matter how neatly the numbers line up.
+
+## 17. An absolute microbenchmark rate is not a constant; sweep the working set before quoting one
+`probe_rates` measured the *same* kernel on the *same* geometry at six working-set sizes and returned
+132–292 GB/s (Qwen3.8) and 132–260 GB/s (GLM) — a ~2× swing, non-monotonic, with no clean relation to
+grid size (128 MiB: 104,800 items at 200 GB/s; 64 MiB: half the items at 292). The first version of
+the design docs quoted "287–313 GB/s" as if it were a property of the card, when it was a property of
+the card *plus* a 1536 MiB footprint I had not thought about.
+
+Three rules came out of it:
+
+* **Quote rates as a bracket with the footprint attached**, and take design numbers from the regime
+  the real workload sits in, not from wherever the probe happened to land.
+* **Ratios between modes survive; absolutes do not.** Across three independent runs, absolute rates
+  repeat to 0.1–2.4 % but every mode-ratio repeats to ≤3 %, and the ratios are what the design
+  conclusions rest on.
+* **Check that the effect you are measuring is bigger than the instrument's variance.** Banded-vs-
+  native came out at 0.96–1.05× while footprint noise alone is ~2×, so the correct claim is "no
+  reliable gain", not "worth nothing". Overstating a null is the mirror image of overstating a win.
+
+## 18. An unrecognised flag is parsed as data
+
+`./probe_rates --quick` did not select a quick mode (there is none): `atoi("--quick")` is 0, which is
+a valid shape index, so the probe silently measured *one* geometry while I believed I had a sweep. It
+surfaced only because the output had one block where three were expected. The probe now rejects
+arguments that are not a shape index and prints the shape table. Generalise: any tool whose arguments
+are integers must validate them, because the failure mode is a plausible result, not an error.
+
+## 19. When a model and a measurement disagree by 30×, check the model's units first
+
+Trying to sanity-check "dense unpack arithmetic costs 1–4 % of bandwidth", I computed an ALU duty
+cycle of 0.4 % from the measured rate and concluded the measurement must be wrong — the numbers seemed
+to imply the loop could not be anything but bandwidth-bound, with absurd headroom. The error: I divided
+lane-operations by lanes as if a SIMD instruction moved 4 B, when one 32-lane `u32` instruction covers
+128 B of stream, so the real figure was ~13 % of two issue slots, and the 1–4 % cost was perfectly
+consistent. The corrected model is still not the evidence — the *measured difference* between two
+kernels is — but the episode is why every arithmetic claim in `doc/port` is now expressed as
+"R6 minus R2 measured −4.4 % / −0.1 %" rather than as an instruction-count argument.
+
+Related, and the reason R9 exists: it would have been easy to explain the residual density cost as
+accumulator dependency latency. Adding 8 independent accumulator chains made it 1.2–1.4 % *worse*, so
+that explanation is wrong and the cost tracks instruction count and register pressure instead. A
+plausible mechanism invented for a number is worth nothing until something can vary it.
 
 Needing a churn number for the migration policy and having only cumulative expert-count profiles, I
 tried two proxies and both produced confident, useless figures:
