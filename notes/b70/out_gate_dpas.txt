@@ -25,4 +25,11 @@ staged-layout input - the parent's staged forms consumed verbatim by the B70 (D3
   gate_proj K=5          planar+band2   rows 1/4/8/16 exact; control (wrong tile map) rejected
   gate_proj K=5          planar+band8   rows 1/4/8/16 exact; control (wrong tile map) rejected
 
-168 comparisons, 0 failures, 0 skips
+rev L (probe_dpas9) - the clean-line kernel:
+  gate_proj K=3 tn=40    native + staged2 verbatim exact at rows 1/16
+  down_proj K=3 tn=160   native + staged2 verbatim exact at rows 1/16
+  gate_proj K=2          native + staged2 verbatim exact at rows 1/16
+  gate_proj K=5          native + staged2 verbatim exact at rows 1/16
+  gate+up fused (one launch)  both projections exact at rows 1/16
+
+188 comparisons, 0 failures, 0 skips

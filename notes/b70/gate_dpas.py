@@ -160,6 +160,59 @@ def staged_checks(fails):
     return n
 
 
+def revl_checks(fails):
+    """rev L (probe_dpas9) is the kernel the engine will implement, so it gets the same certification as the
+    research line: native input, verbatim parent-staged input (staged2), and the fused gate+up launch - each
+    bit-exact against its own y_ref. Requires /tmp/revL (build.sh builds it)."""
+    bin_ = "/tmp/revL"
+    if not os.path.exists(bin_):
+        print("  SKIP  revL: /tmp/revL not built (build.sh builds probe_dpas9)")
+        return 0
+    n = 0
+    print("\nrev L (probe_dpas9) - the clean-line kernel:")
+    for case, K, label, ks in CASES:
+        if K > 5 or not os.path.isdir(case) or not os.path.exists(os.path.join(case, "sx8.bin")):
+            continue
+        ref = np.load(os.path.join(case, "y_ref.npy")).astype(np.float32)
+        banded = make_banded(case, K, 2)
+        for tag, src, lay in (("native ", case, "native"), ("staged2", banded, "staged2")):
+            for R in (1, 16):
+                for f in glob.glob(os.path.join(src, "y_dev_ks*_r*.bin")):
+                    os.remove(f)
+                rc, out, err = run(bin_, [src, "1", str(R), str(ks), lay])
+                f = os.path.join(src, f"y_dev_ks{ks}_r{R}.bin")
+                n += 1
+                if rc or not os.path.exists(f):
+                    fails.append(f"revL {label} {tag} rows={R}: rc={rc} no output - {(err or out).strip()[:60]}")
+                    continue
+                got = np.fromfile(f, dtype=np.float32)
+                want = ref[:, :R, :]
+                if got.size != want.size or not np.array_equal(got.reshape(want.shape), want):
+                    fails.append(f"revL {label} {tag} rows={R}: NOT bit-exact")
+        print(f"  {label:<22} native + staged2 verbatim exact at rows 1/16")
+    # fused gate+up: needs a second case dir with identical tiling (same activations, different weights)
+    up = "/tmp/gemv_up_R64"
+    pri = "/tmp/gemv_R64"
+    if os.path.isdir(up) and os.path.isdir(pri):
+        refs = {d: np.load(d + "/y_ref.npy").astype(np.float32) for d in (pri, up)}
+        for R in (1, 16):
+            for f in glob.glob(pri + "/y_dev_ks*_r*.bin"):
+                os.remove(f)
+            rc, out, err = run(bin_, [pri, "1", str(R), "1", "native", up])
+            for suffix, d in (("", pri), ("_p2", pri)):
+                path = os.path.join(d, f"y_dev_ks1_r{R}{suffix}.bin")
+                n += 1
+                if rc or not os.path.exists(path):
+                    fails.append(f"revL fused{suffix or ' gate'} rows={R}: rc={rc} missing output")
+                    continue
+                want = refs[up if suffix else pri][:, :R, :]
+                got = np.fromfile(path, dtype=np.float32)
+                if got.size != want.size or not np.array_equal(got.reshape(want.shape), want):
+                    fails.append(f"revL fused{suffix or ' gate'} rows={R}: NOT bit-exact")
+        print("  gate+up fused (one launch)  both projections exact at rows 1/16")
+    return n
+
+
 def main():
     quick = "--quick" in sys.argv
     staged = "--staged" in sys.argv
@@ -245,6 +298,7 @@ def main():
 
     if staged:
         checks += staged_checks(fails)
+    checks += revl_checks(fails)
     print(f"\n{checks} comparisons, {len(fails)} failures, {len(skips)} skips")
     for s in skips:
         print(f"  SKIP  {s}")

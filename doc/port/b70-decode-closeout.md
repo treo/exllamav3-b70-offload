@@ -156,7 +156,22 @@ actually run:
    reached for it first, which is why the two layouts coincide rather than merely being compatible.
 
 So on this host the 3.46 ms per 512 MiB device permute is simply not paid: staging already emits the bytes the
-B70's fastest kernel wants, and the copy is verbatim. **Two things still stand between that and shipping it.**
+B70's fastest kernel wants, and the copy is verbatim. **Correction from rev L (`out_revl.txt`): "verbatim" was
+only half right.** Isolated with an anchor in one window — same kernel binary, only the `layout` argument
+differing (gate, rows=16, ks2, min of 4 interleaved rounds): native 19.40 µs, planar-dwords-unbanded 19.50 µs,
+planar+banded (what AVX2 stages) **23.10 µs**, planar+banded8 23.20 µs. So the intra-tile dword permutation is
+indeed free, but the **tile banding the parent applies for its own DRAM traversal costs the B70 ~19 %** on the
+gemm, independent of `g`. That is a real conflict rather than a tuning detail — the CPU swizzles because it
+measured a 3.4× cold-traversal win, and the B70 would rather it did not — and it turns normalize-at-admit from a
+convenience into the fix: reorder tiles during the admit copy (a tile-order pass at the measured 144 GiB/s, so
+~3.5 ms per 512 MiB, once) instead of paying 19 % on every launch.
+**Open discrepancy, stated rather than papered over:** `out_e25_fuse.txt` and `out_rows_gt16.txt` record banding
+as free-to-positive (−4.6 % … +1.0 %), measured without an anchor, and the case dirs from that test were cleared
+from `/tmp` before it could be re-run. Today's figure is anchored, isolated across four configurations and
+reproducible across repeats, so it is the one to act on; resolving the conflict means regenerating those dirs and
+re-measuring both binaries interleaved with the anchor.
+
+**Two things stood between the verbatim-copy claim and shipping it.**
 
 - ~~The B70 kernel's tile index map must follow the staged banding `(nt/group, kt, nt%group)` instead of
   checkpoint `(kt, nt)`~~ **done and measured**: `-DDPAS_BAND=g` implements it in three lines of addressing

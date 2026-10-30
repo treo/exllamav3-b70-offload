@@ -1,0 +1,75 @@
+rev L (probe_dpas9.cpp): the clean-line kernel — wins as the main path, no experiment switches
+===============================================================================================
+probe_dpas7.cpp had accumulated every hypothesis of the chapter (iselect vs gather, buckets, shared streams,
+ablation modes, EPT sweeps, band defines, an address-debug print). It reads as a museum, and a museum is the
+wrong shape for the kernel the engine is about to copy. rev L keeps the verified math verbatim and deletes
+everything that lost. 1015 -> 726 lines; the kernel body has no mode variable and no compile-time experiment
+flags left in the hot path.
+
+KEPT (each is a measured win, referenced in the file header)
+  * Tokens on M / weights as B, u8 x s8 -> int32 (rev G): XMX fixes N=16, so tokens belong on M.
+  * ESIMD xmx::dpas with the unpacked tile in registers (rev H): no SLM, no barriers, no B loads.
+  * Transposed tiles (rev J): operand routing becomes register rows with compile-time shifts.
+  * One expert per thread (D4).
+  * Partials + a SEPARATE combine kernel (D2: the atomic fused combine cost 4.5x the round trip it saved).
+  * rows <= 16 (the spill-free ceiling from E29's ring sweep). Above that the engine buckets launches with the
+    additive law; the probe does not carry the bucketing code any more.
+  * gate+up in ONE launch as an argument (a second case dir), not an environment variable and not a second
+    schedule: the same launch times both ways depending on whether dir2 was given.
+  * 3 s of in-process warm-up by default (WARM_S overrides).
+
+REMOVED (all refuted; implementations remain in probe_dpas7/8 for forensics)
+  * DPAS_BKT / DPAS_SHARED row bucketing (E29) and the native NF=4 32-row launch.
+  * DPAS_BUCKETS naive-schedule harness (the law is recorded; the harness is not needed).
+  * DPAS_M override, DPAS_EPT override and EPT auto-fill, the four ablation modes, DPAS_CHECK, the
+    DPAS_ADDR_DEBUG print, and the fused-vs-separate comparison scaffolding.
+  * DPAS_CHECK specifically: rev J's self-check skipped silently on size mismatch and printed passes that had
+    not compared anything. rev L always writes its outputs and the harness (gate_dpas.py) does the checking.
+
+VERIFIED IN EVERY MODE (bit-exact against each case's own y_ref; anchor rev I gate rows=1 = 19.4 us, healthy)
+  native  rows=1  12.4 us | rows=16 19.4 us     (rev J published 13.7 / 21.3 in the same anchor window)
+  staged2 rows=16 23.1 us (verbatim parent-staged input)
+  fused gate+up KS=1: rows=1 22.6 us, rows=16 34.3 us  (E25a published 25.7 / 35.0)
+  7/7 outputs bit-exact across those configurations, including both fused projections' outputs.
+
+MEASUREMENT CORRECTION — consuming the parent's staged layout is NOT free; the tile banding costs ~19 %
+-------------------------------------------------------------------------------------------------------
+Isolated with the anchor in one window, same case content, same kernel binary, `layout` argument varying
+(gate, E=10, K=3, ks2, rows=16, min of 4 interleaved rounds):
+
+  native   (transpose at load, tiles in (kt,nt) order)        19.40 us
+  staged   (planar dwords, tiles in (kt,nt) order)            19.50 us   <- the intra-tile transpose is free
+  staged2  (planar dwords + band 2 = what AVX2 stages)        23.10 us   <- +19 %
+  staged8  (planar dwords + band 8)                           23.20 us   <- +19 %, independent of g
+
+So the D3-alt conclusion needs amending: the *dword permutation* really is free (which is what was verified
+byte-for-byte), but the *tile banding* the parent applies for its own DRAM traversal costs the B70 ~19 % on the
+gemm. That was not known when "copy verbatim" was adopted, and it is a genuine conflict rather than a tuning
+detail: the CPU swizzles because it measured a 3.4x cold-traversal win, and the B70 would rather it did not.
+
+CONFLICT WITH AN EARLIER MEASUREMENT, STATED RATHER THAN PAPERED OVER. out_e25_fuse.txt and out_rows_gt16.txt
+record banding as "free to mildly positive (-4.6 % ... +1.0 %)", measured as rev J planar-unbanded (20.3 us) vs
+rev J planar-banded (20.4 us) on /tmp/gemv_R64_* case dirs. Today's measurement says +19 %. Those cannot both
+be right. The earlier sweep had no in-window anchor, and today's planar-unbanded number (19.5) is 4 % faster
+than the earlier one (20.3) while today's banded (23.1) is 14 % slower, so the suspect is the earlier *banded*
+datum, not today's baseline. The R64 case dirs were removed from /tmp before this could be re-tested directly,
+so the discrepancy is OPEN. Resolve by regenerating the R64 dirs and re-running both binaries interleaved with
+an anchor; until then trust today's (anchored, isolated, four-configuration) result, and note that
+out_cpu_layout.txt's "verbatim copy" claim inherits this open question.
+
+What it changes if it holds: normalize-at-admit (close-out D3 design) stops being optional convenience and
+becomes the fix — the admit path copies tiles in the order the B70 wants (a tile-order copy, not a byte
+permute; the device copy pass measured 144 GiB/s payload, so ~3.5 ms per 512 MiB, once) and the "+5.4 % of
+load, once" figure covers it. The alternative, accepting +19 % on every gemm, is strictly worse at decode.
+
+Reproduce:
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revL probe_dpas9.cpp
+    WARM_S=3 /tmp/revL /tmp/gemv_dpE10         3 16 2 native     # transposed at load
+    WARM_S=3 /tmp/revL /tmp/gemv_dpE10_planar  3 16 2 staged     # planar dwords, unbanded
+    WARM_S=3 /tmp/revL /tmp/gemv_dpE10_full    3 16 2 staged2    # verbatim AVX2 staged form
+    WARM_S=3 /tmp/revL /tmp/gemv_R64 3 16 1 native /tmp/gemv_up_R64       # fused gate+up
+    anchor: DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2      # 19.4 us when the device is ramped
+Case dirs regenerate with: python3 gate_dpas.py --staged   (writes *_planar, *_full, *_full8)
+
+STATUS: rev L is now the kernel the close-out recommends the engine implement. gate_dpas.py still certifies
+revs C/I/J/K as well; extending it to rev L (native / staged2 / fused) is the next task.

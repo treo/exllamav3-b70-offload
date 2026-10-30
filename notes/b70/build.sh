@@ -62,6 +62,11 @@ echo "built probe_dpas8"
 icpx -fsycl -O2 -o probe_permute probe_permute.cpp
 echo "built probe_permute"
 
+# rev L (probe_dpas9): the clean-line kernel - wins as the main path, no experiment switches. This is the
+# kernel the engine should copy; probe_dpas7/8 remain as the forensic record of what was tried and rejected.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas9 probe_dpas9.cpp
+echo "built probe_dpas9"
+
 # dp4a path: one binary per trellis K, since compile-time K is worth x1.2-1.5 at rows=1 (out_gemv.txt).
 # gate_dpas.py expects /tmp/pgK<K>; it reports a clear SKIP when one is missing rather than passing silently.
 for k in 2 3 4 5 6; do
