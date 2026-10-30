@@ -1,0 +1,70 @@
+Sustained decode load: 150 s soak, power at cap, no performance drift
+======================================================================
+The standing gap: every rate in this chapter is a warm-window number (continuous work inside the timing process,
+min-of-N), never a soak. Question: does sustained decode drift - thermally, or by hitting a power limit?
+
+Method. `WARM_S` is the soak knob now that the warm-up loop waits every 8 dispatches (LESSONS 53): it executes
+real device work for the given wall time, and the timing loops run AFTER it - so the reported number is measured
+deep inside continuous load. One process, 150 s of continuous fused gate+up decode at E=96, rows=16, KS=2 (2 gemm
+launches + 1 combine_both per iteration, ~412 us/iteration, i.e. roughly 360k layer-iterations), while a sampler
+polled `xpu-smi stats -d 0 -j` every ~4 s (35 samples over 146 s). Probe exit rc=0.
+
+RESULT - performance:
+  warm 0 s: 404.3 us | warm 1 s: 410.1 | warm 2-3 s: 409.9 | AFTER 150 s SOAK: 412.1 us (single-launch 417.x)
+  drift vs the 1-3 s warm window: +0.5%. Nothing in the chapter's decode numbers is a soak artifact.
+
+RESULT - the device is POWER-LIMITED under decode:
+
+  metric (tile_0)                     first    mean     max    last
+  gpu_power_w                          56      285     294     290      cap reported by xpu-smi: 275 W
+  gpu_frequency_mhz                   1200    2393    2458    2416      (1200 = the idle first sample; the early
+                                                                        peak 2458 vs late 2433 max is ~1% droop)
+  compute_percent                        0       97     100     100
+  memory bandwidth_percent               0       54     100     100
+  memory read_kbps                       -    3.78e8  7.08e8  7.05e8   = 378 GB/s avg, 708 GB/s peak
+  memory write_kbps                      -    1.00e8  1.89e8  1.86e8   = 100 GB/s avg
+  gpu_core_celsius                      51       70      71      71     plateau by ~60 s
+  memory_celsius                        54       80      86      86     STILL RISING at the end of 150 s
+  vr_celsius                            67       90      94      94     hottest component, still rising
+  memory used_mib                      231      650     662     662
+
+Reading it:
+  * Idle ~56 W, sustained decode ~285 W average with 294-306 W peaks, against a 275 W reported cap. Average
+    demand exceeds the cap, so the limit is engaged: frequency sits at ~2.4 GHz with ~1% droop from its early
+    peak, and that is exactly the magnitude of variation the anchor has been showing. Numbers in this chapter
+    that differ by 1-2% are inside the power-cap envelope, not evidence of anything.
+  * Compute units are saturated (97-100%) while DRAM bandwidth averages ~54% of peak. So the adopted kernel at
+    E=96/rows=16 is limited by issue/arithmetic+power, not by bytes - consistent with the CPU-home story being
+    the reverse (bandwidth-bound) and with the quant ladder (out_quant_ladder.txt) showing decode TIME insensitive
+    to bits-per-weight at small E.
+  * Steady state for the core is reached (~71 C) but memory (86 C) and VR (94 C) temps were still climbing at
+    150 s. 150 s is not a long soak. For anything hour-scale the VR stage is the component to watch, and this box
+    is a workstation card in a desktop chassis - thermal results here should not be transferred to a dense
+    deployment without a real long run.
+
+Planning consequences:
+  1. Power per decode layer, E=96 gate+up at rows=16: ~412 us at ~290 W board power. Energy per layer-iteration
+     ~120 uJ. Extrapolated over 48 MoE layers x tokens/s this is a real share of the box's budget, and it is a
+     cap-limited share: reducing kernel TIME without reducing ENERGY does not escape the cap, so power-aware
+     optimisation should target work eliminated (launches, unpack instructions, redundant reads), not just
+     latency-hiding.
+  2. Because the part is at its cap, the "spare bandwidth" argument in the cost model should be read as spare
+     bandwidth *at the expense of clock*: bytes moved and GHz are trading against each other here, which is the
+     mechanism behind the flat quant ladder.
+  3. Co-tenancy matters more than this chapter assumed: firefox holds the same render node (LESSONS 54), and
+     both parties draw on the same 275 W. Contaminated anchors (20-44 us readings against a healthy 19.4) are
+     expected on this box and were observed again during the batches adjacent to this soak.
+
+CAVEATS: single config, single card, one desktop box, no pinned clocks, co-tenant present (the memory counters
+include anything else using the device). Absolute us in this file came from a window whose anchor read 23.8 us,
+so treat 412.1 vs 410.1 as the ratio it is (+0.5%), not as microsecond-accurate absolutes.
+
+Reproduce:
+    # terminal 1: soak; WARM_S is the soak duration, the timed rounds run after it
+    WARM_S=150 /tmp/revL9 /tmp/f96_gate 3 16 2 native /tmp/f96_up
+    # terminal 2: sample
+    while sleep 4; do xpu-smi stats -d 0 -j; done > /tmp/stats.jsonl
+    # useful paths: power.gpu_power_w.tile_0.{avg,max}, frequency.gpu_frequency_mhz.tile_0.avg,
+    #               memory.bandwidth_percent.tile_0.avg, temperature.{gpu_core,memory,vr}_celsius.tile_0.*,
+    #               utilization.compute_percent.tile_0
+    xpu-smi            # one-shot table: temp, Pwr:Usage/Cap, memory, GPU-Util

@@ -1052,7 +1052,22 @@ nothing that is the sole instance of a measurement.
     backlog had not been providing extra ramp that the honest 1 s would lose. The reason warm-up length barely
     moves these numbers is that timing takes min-of-several-rounds, and the first rounds ramp the clock — so
     warm-up mainly prevents a throwaway first round; several timed rounds are what make the estimate stable, and
-    both are needed. General form: any loop that enqueues asynchronously and bounds itself by wall time is
+    both are needed.
+
+55. **Quote achieved bandwidth together with the working-set size, or you will mistake L2 for DRAM — and the
+    cache-residency self-check is free.** The chapter's headline rate ("437 GB/s ≈ 90 % of the 484 GB/s stream
+    slope, so the streaming path is at the wall") came from an E=10 case whose weights are 5.9 MiB against a
+    24 MiB L2, measured by re-reading those same tensors thousands of times. Running the quantization ladder made
+    it unavoidable: 3x the bytes changed the time by 3% and the arithmetic reached 693 GB/s, above the 674 GB/s
+    *copy* peak — a DRAM-bound kernel cannot beat copy, so the number was describing cache, not memory. Two
+    habits. (1) Put the resident-set size next to every rate in a report, and compare it to L2 explicitly
+    (`devinfo` prints it in one line). (2) Treat "exceeds the copy peak" as a proof of residency, not as a result
+    to celebrate. The correct DRAM-regime numbers were already in hand at E=96 (492 GB/s at rows=1, 287–292 at
+    rows=16) — the error was in which label I put on them, and the fix was arithmetic, not new measurement.
+    Related instrument note: `xpu-smi stats -d 0 -j` gives power, per-domain temps, frequencies and memory
+    read/write rates as JSON, and is the cheapest way to discover that the part is power-capped (~285 W mean vs a
+    275 W cap under decode) — which in turn bounds what optimisation can buy: at the cap, latency hidden and
+    energy spent are the same currency, so removing work beats scheduling it better. General form: any loop that enqueues asynchronously and bounds itself by wall time is
     measuring the host, not the device — check it whenever per-launch work grows (bigger E, bigger rows, fused
     multi-projection grids).
 

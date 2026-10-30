@@ -1,0 +1,73 @@
+Quantization ladder on the B70 (K = 2..6): decode time is nearly bytes-INSENSITIVE at small resident sets,
+and the "effective bandwidth" it reports is L2 bandwidth, not DRAM
+============================================================================================================
+Six Qwen3.8-Flash-Next checkpoints, identical architecture (512 experts, topk 10, moe_intermediate 640, hidden
+2560, 48 layers), differing only in quantization. Cases dumped per checkpoint (E=10, gate_proj, K taken from the
+tensor geometry): /tmp/q_<quant>, plus the long-standing /tmp/gemv_dpE10 for 2.68. rev L (probe_dpas9 /tmp/revL9),
+KS=1, min of 2 rounds, WARM_S=2. "bytes/expert" is the gate_proj trellis alone (weights.bin / 10).
+
+ bpw   K | bytes/expert |   rows=1   rows=8  rows=16 (us) | GB/s  r1   r8  r16 | bit-exact
+ 2.05   2 |   0.39 MiB  |    17.2    20.9    22.2         |      238  196  185 | yes/yes/yes
+ 2.68   3 |   0.59 MiB  |    16.9    20.1    23.0         |      365  306  267 | yes/yes/yes
+ 4.05   4 |   0.78 MiB  |    16.6    18.5    20.9         |      494  444  393 | yes/yes/yes
+ 4.18   5 |   0.98 MiB  |    18.6    19.5    23.1         |      550  524  443 | yes/yes/yes
+ 5.05   5 |   0.98 MiB  |    18.5    19.6    23.2         |      554  524  441 | yes/yes/yes
+ 6.05   6 |   1.17 MiB  |    17.7    19.5    24.3         |      693  629  505 | yes/yes/yes
+
+1. THREE-FOLD MORE BYTES FOR ~3% MORE TIME. From K=2 to K=6 the weight footprint grows 3.0x (0.39 -> 1.17
+   MiB/expert) while rows=1 time moves 17.2 -> 17.7 us (+3%) and rows=16 moves 22.2 -> 24.3 us (+9%). Achieved
+   "GB/s" therefore climbs almost perfectly proportionally to bits-per-weight (238 -> 693), because the
+   denominator is fixed by something other than bytes.
+   Consequence for the design: at a small resident set, quantization is essentially FREE in decode latency. What
+   it costs is VRAM capacity, admit/readmit link time (at the measured 8.37 GB/s a 0.39 MiB expert arrives in
+   ~46 us and a 1.17 MiB one in ~140 us, so a quantization choice is a 3x admission-cost choice), and energy
+   (the part runs at its power cap under decode, out_sustained_power.txt). It is NOT a small-batch latency
+   choice - which is the opposite of what plan_quant_scaling.py's "expert_bytes drives everything" invites a
+   reader to conclude about time.
+
+2. THESE RATES ARE NOT DRAM RATES - THE WORKING SET FITS IN L2. `devinfo` reports global cache (L2) = 24.0 MiB on
+   this device. At E=10 the gate set is 0.39-1.17 MiB and even the fused pair is <= 23.4 MiB, and the burst timing
+   loop re-reads the same tensors thousands of times. Proof it is cache-resident rather than DRAM: the K=6 case
+   reaches 693 GB/s, ABOVE the device's measured DRAM copy rate (674 GB/s) and far above the stream slope
+   (484 GB/s). No DRAM-bound kernel can beat copy.
+
+   This qualifies a claim the chapter has been carrying: "437 GB/s effective vs 484 GB/s stream slope, i.e. the
+   kernel runs at ~90% of achievable bandwidth" was measured on E=10 cases, whose weights fit L2. The honest
+   version is that the DRAM-regime numbers come from the larger-E cases, where the set cannot be cached:
+   E=96 fused (2 x 56.2 MiB) achieves 492 GB/s at rows=1 and 287-292 GB/s at rows=16 (out_egrid.txt), and the
+   soak's xpu-smi counters agree: memory bandwidth averaged 54% of peak with 100% peaks, 378 GB/s read + 100
+   GB/s write sustained, while compute units sat at 97-100%.
+
+   Practical rule for reading any rate in this chapter: state the working-set size next to it. A rate measured
+   with a sub-L2 resident set is an upper bound on what a rotating real decode set will see.
+
+3. WHY TIME IS FLAT: the small-E regime is latency/occupancy-bound, exactly the regime D8 was derived in (grid
+   800 of 2048 slots at E=10, KS=1). Bytes only enter the wall clock once the grid is saturated AND the set
+   exceeds L2. Both conditions are met at E=96 - and there the ladder should be re-run: predicted that time
+   becomes ~proportional to bits-per-weight. That measurement is the natural next cell and has NOT been done;
+   the claim here is only that at E=10 bytes do not bind.
+
+4. CERTIFICATION SIDE EFFECT, useful on its own: the kernel is bit-exact at rows 1/8/16 on REAL checkpoint data
+   for K = 2, 3, 4, 5, 6 - five of the six quants, 18 outputs, all exact. The regression gate (gate_dpas.py)
+   covers K = 2/3/5 on synthetic case dirs, so K=4 and K=6 were previously uncertified on any data; extending the
+   gate to iterate over these checkpoint-derived dirs would be cheap and would certify the whole shipped ladder.
+
+CAVEATS
+  * Window contamination, again: the anchor read 43.9 us before this batch and 23.8 us after (healthy 19.4),
+    because the desktop browser shares the render node (LESSONS 54). Within-ladder ratios stand - all six were
+    measured back to back, one process per config - but absolute us here are probably 6-20% pessimistic, which
+    if anything understates how flat the ladder is.
+  * The 2.68 row is the long-standing /tmp/gemv_dpE10 dir; the other five were dumped fresh by the same script.
+    Same shapes (E=10, k=2560, n=640, tk=160, tn=40), different provenance.
+  * 4.18 and 5.05 have the SAME expert K (5) and the same bytes/expert; they differ in non-expert tensors, so
+    their rows being within 0.1-0.2 us of each other is a useful null control on the whole measurement.
+  * KS=1 only, one layer, gate_proj only. down_proj (tn=160, so a much larger grid) is a different occupancy
+    regime and should be measured before generalising "flat" to the whole layer.
+
+Reproduce:
+    python3 notes/b70/dump_gemv_case.py /tmp/q_6.05bpw_h6_ng8 10 16 0 --with-reference \
+            --ckpt=Qwen3.8-Flash-Next-exl3-6.05bpw_h6_ng8
+    WARM_S=2 /tmp/revL9 /tmp/q_6.05bpw_h6_ng8 2 1 1
+    (quants present: 2.05bpw_h4_ng4, 2.68bpw_h6_ng8, 4.05bpw_h6_ng6, 4.18bpw_h6_ng8, 5.05bpw_h6_ng8,
+     6.05bpw_h6_ng8; expert K = 2, 3, 4, 5, 5, 6 respectively)
+    L2 size: ./devinfo | grep -i "cache"        -> global cache (L2): 24.0 MiB

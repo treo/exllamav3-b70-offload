@@ -23,7 +23,13 @@ measurements.
 ## The number that ends the optimization chase
 
 At rows=1, gate_proj: **14.0 µs = 437 GB/s effective** against a measured 484 GB/s stream slope and 674 GB/s
-copy peak. **~90 % of achievable**, i.e. the streaming path is at the wall. Its own floor mode says the kernel
+copy peak. **~90 % of achievable**, i.e. the streaming path is at the wall. **Asterisk added later, and it
+matters:** that case has E=10 and 5.9 MiB of weights, which fits the device's 24 MiB L2 (`devinfo`), and the
+timing loop re-reads the same tensors — so 437 GB/s is partly L2 bandwidth, not DRAM. The DRAM-regime figures are
+the large-E cases: E=96 fused achieves 492 GB/s at rows=1 and 287–292 GB/s at rows=16 (`out_egrid.txt`), and the
+quantization ladder makes the point sharply — at E=10, 3× the bytes changes the time by 3% and reports up to
+693 GB/s, which exceeds the 674 GB/s copy peak and so cannot be DRAM (`out_quant_ladder.txt`). Rule for reading
+any rate here: check the working-set size against L2. Its own floor mode says the kernel
 is balanced rather than dominated (`NO_MAD` 12.5 > `FETCH_ONLY` 8.9 and > `ALU_ONLY` 10.9; components sum to
 21.3 vs 14.0 — ~35 % overlap). Unpack instruction count is no longer the lever.
 
@@ -55,9 +61,9 @@ What is left, in measured order of size:
 | ~~Rows > 16 unmeasured~~ | **done** — bucketing 16-row launches is additive: x2.00 / x2.98 / x3.96 at 32 / 48 / 64 rows, both projections, each bucket bit-exact against its own `y_ref` slice (`out_rows_gt16.txt`) | follow-up: a **shared-stream** bucket kernel would pay the weight stream once — projected x1.44 at rows=32 rising to x2.36 at rows=256 (upper bound from two measured points, unimplemented) |
 | ~~D3 pricing (permute)~~ | **done** — `probe_permute` / `out_permute.txt`: 3.46 ms per 512 MiB device-side, host permute-copy below link rate for K=3, so permute on the device at admit | — |
 | Parent side past b=1, and attention | at low batch the parent binds again, and it is calibrated only at b=1 | parent-budget re-run at b=4/8/16 with an attention term. **Partly done, and the part that is left is the part this box cannot do:** the CPU home (`S_c`) is now measured over b=1..16 (`out_cpu_worker_calib.txt`) — it is compute-bound, its assumed 47.4 GiB/s was unreachable, and correcting it moved the placement walls by 0-1 us because `S_c` was not the binding leg in any tested config. The 3090 parent leg (`T_parent` = 250 us/layer + `S_g`/936 GB/s) needs a CUDA box, so "binding returns to the parent at b<=8" still rests on an inherited number |
-| Low-E models | X/EPT=1 was validated at E=10 | one case with E=2/4 and large tn |
+| ~~Low-E models~~ **partly closed** | X/EPT=1 was validated at E=10 | E=32 and E=96 now measured (`out_egrid.txt`): one-expert-per-thread scales cleanly (2.4x/7.1x time for 3.2x/9.6x experts, no grid pathology), and D8's fuse/separate rule held in 15/18 cells with the three misses all within 6%. **Still open: E=2/4** — under-fill is worse there, and that is the regime where fusion should pay most |
 | Per-launch vs per-thread-share split of the 7.8 µs floor | sets the ceiling for item 1 above | extend `DPAS_FLOOR` with a no-combine, no-setup mode |
-| Sustained power/thermals during decode | all rates are warm-window, not soak | harness E-items with the power monitor at duty cycle |
+| ~~Sustained power/thermals during decode~~ **done** | all rates were warm-window, not soak | 150 s continuous fused decode at E=96 (`out_sustained_power.txt`): **+0.5% drift** (410.1 → 412.1 µs), so the chapter's numbers are not soak artifacts. But the part is **power-capped**: ~285 W mean / 294–306 W peaks against a 275 W cap, ~2.4 GHz with ~1% clock droop, compute 97–100% while DRAM bandwidth averages 54% of peak. Core plateaus at 71 °C; **memory (86 °C) and VR (94 °C) were still climbing at 150 s**, so hour-scale thermals remain open and the VR stage is the one to watch. Consequence: work eliminated beats latency hidden — you cannot buy speed without spending the same watts |
 
 ## Precedent in the tree: the parent already ships repacked weights, and the device already fixes layout
 
