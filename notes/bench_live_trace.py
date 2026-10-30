@@ -115,6 +115,10 @@ def main():
                          "(a second domain is the only way to test whether the cross-session "
                          "agreement with independence is a corpus artifact)")
     ap.add_argument("--stats-dir", default="/tmp/live_stats")
+    ap.add_argument("--prefill", type=int, default=0,
+                    help="also time a single N-token prefill (0 = skip). Reported as tokens/s of the whole "
+                         "prompt, which is the unit the acceptance figures use, and the number "
+                         "doc/port/b70-prefill.md says must exist before any B70-prefill speedup is claimed")
     ap.add_argument("--cold-start", action="store_true")
     ap.add_argument("--jobs", type=int, default=1,
                     help="run N CONCURRENT sessions (different prompt slices): the only way to measure "
@@ -277,6 +281,32 @@ def main():
             print(f"  CONCURRENT union({args.jobs}): median distinct experts touched per step, per layer - "
                   f"mean {statistics.mean(per_layer):.1f}, min {min(per_layer):.1f}, max {max(per_layer):.1f} "
                   f"(measured on live parallel streams, not modelled)")
+        if args.prefill:
+            # One N-token prefill, timed with events, pipelined (sync only around the whole call) - the same
+            # accounting the decode passes use. Chunking is the engine's business (-cs/--chunk_size); this
+            # measures what the configured stack actually does with the chunk it is given.
+            n = args.prefill
+            body = all_ids[:, :min(n, total)]
+            if body.shape[1] < n:
+                print(f"  prefill: prompt corpus only {body.shape[1]} tokens requested {n}; measuring what exists")
+            from exllamav3 import Job
+            from exllamav3.generator.sampler import ArgmaxSampler
+            gen = lm.generator()
+            try:
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                gen.enqueue(Job(input_ids=body, max_new_tokens=1, sampler=ArgmaxSampler(),
+                                stop_conditions=[], return_logits=False))
+                while gen.num_remaining_jobs():
+                    for _ in gen.iterate():
+                        pass
+                torch.cuda.synchronize()
+                dt = time.perf_counter() - t0
+                print(f"  prefill {body.shape[1]} tokens: {dt*1000:8.1f} ms  ->  {body.shape[1]/dt:7.0f} tok/s "
+                      f"({dt*1e6/(nl*body.shape[1]):6.1f} us per MoE layer per token)")
+            except Exception as exc:                                # noqa: BLE001 - report, never hide
+                print(f"  prefill measurement FAILED ({type(exc).__name__}: {str(exc)[:100]})")
+
         pr1, dm1, tk1 = mig_counters()
         print(f"  placement migration over this pass: {pr1-pr0} promotions CPU->GPU, {dm1-dm0} demotions "
               f"GPU->CPU across {len(mods)} layers ({tk1-tk0} sweeps)")

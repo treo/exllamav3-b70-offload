@@ -86,16 +86,25 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    * Activation traffic, scheduler and the engine's chunking (chunk_size 4096 default) are not modelled here;
      at R=2048 activations are ~5% of the bytes, so the omission is safe for the roofline and not for a
      wall-clock prediction.
-   * The parent's own prefill was measured only via acceptance-era end-to-end numbers (1790 / 2523 / 1401 /
-     5043 tok/s on Qwen3.5 under different splits, port-acceptance E6) - not per layer, not on Qwen3.8, and not
-     with the B70 in the loop. A matched prefill baseline (same model, same chunk, parent vs parent+B70) needs
-     to be measured before any "Nx faster prefill" claim is written anywhere.
+   * The matched prefill baseline now exists (partially). Same instrument as the decode baselines, same model,
+     2048-token chunk, real text, `-mct 15` (`notes/b70/run_prefill_baseline.sh`):
+       Qwen3.8@2.05, `-mcs 256` (256 of 512 experts on the CPU home): 3125.4 ms → **655 tok/s** (31.9 µs/layer)
+       Qwen3.8@2.68, `-mcs 384`:                                     4276.3 ms → **479 tok/s** (43.5 µs/layer)
+     Against decode's 58.3 tok/s at b=1 on 2.68, prefill is only ~8x faster than single-stream decode - which
+     is the point. Prefill touches essentially every expert per layer, so on a capacity-starved split it is
+     dominated by remote work, and the roofline in §3 (56 ms/chunk at 674 GB/s with weights read ONCE, i.e.
+     ~36.6k tok/s) is ~75x above what the shipping stack achieves. Two honest limits on that comparison: the
+     all-GPU control arm failed structurally (this tracer needs the CPU split's counters to trace, so
+     `-mcs 0` exits before measuring - the acceptance-era 5043 tok/s on Qwen3.5 stands as the only no-offload
+     reference, on a different model), and the numbers are cold-placement single passes, not a tuned prefill
+     configuration. Neither caveat closes a 75x gap.
    * Residency policy under prefill (which experts to hold while a chunk streams through 48 layers) is the
      same machinery as decode placement, and the live-trace finding that routing is far more concentrated than
      the stored profiles (`out_live_trace.txt`) applies to prefill picks too - unverified, since the traces
      were decode-only.
 
 Next actions, in order: (1) `probe_gemm.cpp` variants A/B at rows/expert 32 and 64, measuring traffic
-amplification; (2) the matched prefill baseline on Qwen3.8@2.68 (parent alone vs parent + CPU home, as
-measured for decode in `out_engine_step.txt` §8); (3) then R1-vs-R2 at fixed traffic, which §4 argues is the
-cheap part. Update §12's row when (1) lands.
+amplification; (2) ~~the matched prefill baseline~~ **done for the CPU-split arms** (655 / 479 tok/s at
+`-mcs` 256 / 384, above), still owed: an all-GPU control on Qwen3.8's shapes and a warm-placement repeat, since
+cold placement is known to be worth 1.6-1.8x on decode; (3) then R1-vs-R2 at fixed traffic, which §4 argues is
+the cheap part. Update §12's row when (1) lands.
