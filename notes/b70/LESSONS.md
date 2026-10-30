@@ -1127,6 +1127,19 @@ nothing that is the sole instance of a measurement.
     wording and what it got wrong in the same cell (done in close-out D8), because the next reader — often me —
     remembers the stale version and needs to know which memory to discard.
 
+57. **When holding one lever fixed to isolate another, enumerate every axis that moves — "looks equal" is not
+    evidence of equality.** To compare fusion against split-K I paired `separate KS=2` with `fused KS=1` because
+    their per-launch thread counts matched, and concluded fusion wins by a constant 1.13x. But separate is TWO
+    launches: at equal per-launch grid the fused variant was doing twice the k-work per thread in half the
+    launches, so both levers had moved and the constancy was measuring my pairing, not the device. Matching KS
+    instead (equal total thread-slots by construction) gives 1.6–1.9x where the device is under-filled and
+    0.96–1.12x where it is not — the original D8 conclusion, with the opposite emphasis. Habit: before calling two
+    configurations "matched", write out the invariants you actually need (here: total thread-slots, work per
+    thread, launch count, and which projections they carry) and check each; a coincidence in one of them is not a
+    control. Corollary for reporting: when the top candidates differ by less than the noise floor, say "indifferent"
+    rather than naming a winner — `best_launch()` now flags INDIFFERENT when the runner-up is within 3%, because a
+    decision table that ranks noise teaches the reader to trust it.
+
 
 
 

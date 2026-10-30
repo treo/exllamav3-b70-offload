@@ -7,20 +7,32 @@ Why this module exists. plan_operating_point.py and plan_concurrency.py computed
 model was retired by measurement: the real GEMV was instruction-bound for every kernel up to rev H, and its
 time is independent of the quantization recipe (Qwen3.8 across K=2..6: 73.6-74.8 us for identical weight
 counts,
-b70-kernels.md 2b/2c). Two kernel families now exist, both bit-exact against a Python reference:
+b70-kernels.md 2b/2c). Families, all bit-exact against a Python reference:
 
-  dp4a   probe_gemv.cpp rev C with -DGEMV_KCONST  (compile-time trellis K)
-  dpas   probe_dpas4.cpp rev G with DPAS_X=1      (tokens on M, experts in the grid)
+  dp4a             probe_gemv.cpp rev C with -DGEMV_KCONST  (compile-time trellis K; niche: unpermutable AND K>5)
+  dpas (rev G)     probe_dpas4.cpp with DPAS_X=1  (tokens on M, experts in the grid) - superseded
+  dpas_reg / _gather (revs H, I)                 register and gather operand routing - superseded
+  dpas_transposed  rev J (probe_dpas7.cpp) / rev L (probe_dpas9.cpp): transposed tiles, the current kernel and
+                   the one the close-out recommends the engine implement; needs the permuted device layout (D3)
+  fused (E25a/b)   gate+up in ONE gemm launch at the KS that fills the grid, plus ONE combine_both launch
+
+The engine dispatches by row count AND by grid occupancy, which is why the tables are indexed by rows and by E.
 
 and the engine dispatches between them by row count, which is why the tables below are indexed by rows.
 
 Every number is microseconds per (expert, projection) on Qwen3.8@2.68bpw, E=10, measured as the reported
-projection time divided by E, warm (>=15 s sustained load) and interleaved min-of-N, best split-K per
-configuration. Two windows were kept where they disagree, because they sometimes disagree by 20 %:
-see `SPREAD`. Cost is per weight, not per byte: these are the same weights at any trellis K.
+projection time divided by E, with >= 1 s of CONTINUOUS executed work in the timing process (WARM_S; LESSONS 53)
+and min-of-N interleaved with an anchor that warms itself (LESSONS 54 - >= 2000 reps, or the device is still at
+its 1200 MHz idle clock and every number is ~2.2x off). Two windows were kept where they disagree, because they
+sometimes disagree by 20 %. Cost is per weight, not per byte: these are the same weights at any trellis K, and
+the quantization ladder measured that directly (3x bytes for +3% time at a small resident set,
+out_quant_ladder.txt).
 
-Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X, rev H, and
-rev I = probe_dpas6.cpp, the current fastest at every measured point). Dispatch is by recipe as well as rows:
+Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (revs F/G/H and rev I =
+probe_dpas6.cpp), out_revl.txt + out_dpas.txt (rev J = probe_dpas7.cpp and rev L = probe_dpas9.cpp, the current
+fastest and the kernel the close-out recommends the engine implement), out_e25_fuse.txt (E25a gate+up fusion),
+out_e25b_combine.txt (the single combine_both launch it enabled), out_ks_grid.txt (the per-KS joint choice), and
+out_egrid.txt / out_low_e_grid.txt (E = 2..96). Dispatch is by recipe as well as rows:
 the GATHER-family DPAS revisions (G/H/I) require K <= 5, so for those denser recipes fall back to dp4a; the
 transposed family (rev J/L) does not - it serves K = 2..6 verified, 2..16 compiled.
 Usage: python3 plan_decode_cost.py           # prints the tables and the dispatch
@@ -109,7 +121,11 @@ DPAS_TRANSPOSED_DOWN_FACTOR = {1: 1.11, 2: 1.20, 4: 1.29, 8: 1.38, 16: 1.51}
 # bucketing it does not have to be paid for in prefetch depth. Measured per (expert, gate+up PAIR) and per
 # (expert, down):
 # Source: notes/b70/out_e25_fuse.txt (fused, ks1) and out_dpas.txt (down, ks1).
-DPAS_FUSE_GU = {1: 2.57, 2: 2.59, 4: 2.56, 8: 2.87, 16: 3.50}
+DPAS_FUSE_GU = {1: 2.080, 2: 2.263, 4: 2.447, 8: 2.630, 16: 3.370}
+# ^ refreshed from out_ks_grid.txt (certified window, fused schedule WITH E25b's single combine_both). The values
+#   this replaces (2.57 / 2.87 / 3.50 at rows 1/8/16) came from E25a, when the fused schedule still ran two
+#   combine launches, so they overstated fused cost by up to 19%. rows=2 and rows=4 are log-linear interpolations
+#   between the measured rows=1 and rows=8 points, not measurements.
 DPAS_FUSE_DOWN = {1: 1.52, 2: 1.62, 4: 1.84, 8: 2.29, 16: 2.98}
 HW_THREADS = 2048        # B70 slots reported by the probe banner (32 Xe cores x 8 vector engines x 8 threads)
 
@@ -119,15 +135,91 @@ HW_THREADS = 2048        # B70 slots reported by the probe banner (32 Xe cores x
 # means "fusion not evaluated", and planners must say so rather than guess.
 GATE_TILES_N = {"Qwen3.8": 40}
 
+# --- per-KS launch tables (out_ks_grid.txt; measured in a certified-healthy window, anchor 19.0-19.3 us on all
+# 27 cells, every fused cell bit-exact for both projections at KS = 2/4/8) ------------------------------------
+# us per (expert, SINGLE projection), and us per (expert, gate+up PAIR), keyed [E][rows][KS]. E is the number of
+# experts in the launch grid - what the planners call `picks` when all owned experts run on this device.
+KS_SEP = {
+    2:  {1: {1: 8.225, 2: 4.975, 4: 3.525}, 8: {1: 8.975, 2: 5.675, 4: 4.200}, 16: {1: 9.575, 2: 5.875, 4: 4.450}},
+    4:  {1: {1: 4.088, 2: 2.537, 4: 1.900}, 8: {1: 4.613, 2: 2.900, 4: 2.225}, 16: {1: 5.013, 2: 3.250, 4: 2.787}},
+    10: {1: {1: 1.685, 2: 1.170, 4: 1.375}, 8: {1: 2.000, 2: 1.490, 4: 1.755}, 16: {1: 2.290, 2: 1.890, 4: 2.360}},
+    32: {1: {1: 1.258, 2: 1.005}, 8: {1: 1.594, 2: 1.448}, 16: {1: 1.878, 2: 1.794}},
+    96: {1: {1: 1.249, 2: 1.311}, 8: {1: 1.509, 2: 1.680}, 16: {1: 1.857, 2: 2.122}},
+}
+KS_FUSED = {
+    2:  {1: {1: 8.800, 2: 5.850, 4: 4.750}, 8: {1: 9.800, 2: 6.650, 4: 5.350}, 16: {1: 10.500, 2: 6.900, 4: 5.700}},
+    4:  {1: {1: 4.500, 2: 3.025, 4: 3.750}, 8: {1: 5.125, 2: 3.625, 4: 4.300}, 16: {1: 5.725, 2: 4.375, 4: 5.725}},
+    10: {1: {1: 2.080, 2: 2.370, 4: 2.450}, 8: {1: 2.630, 2: 2.990, 4: 3.370}, 16: {1: 3.370, 2: 3.870, 4: 4.400}},
+    32: {1: {1: 2.609, 2: 2.544}, 8: {1: 3.044, 2: 3.241}, 16: {1: 3.775, 2: 3.956}},
+    96: {1: {1: 2.507, 2: 2.481}, 8: {1: 3.050, 2: 3.264}, 16: {1: 3.765, 2: 4.305}},
+}
+
+
+def best_launch(E, rows, tn=40, hw_threads=HW_THREADS):
+    """Joint (fusion, split-K) choice: the measured schedule that minimises us per (expert, gate+up pair).
+
+    This is the executable form of D8 - the two levers are two sources of one resource (parallelism), so they are
+    chosen together, not in sequence. Returns (us_per_pair, fused, KS, note).
+
+    Refuses to invent: E must be one of the measured expert counts (nearest-below is used and flagged, never
+    interpolated on E, because the cost curve is dominated by grid occupancy which is a step function of waves);
+    rows must be a measured bucket.
+    """
+    if rows not in (1, 8, 16):
+        raise ValueError(f"rows={rows} is not a measured bucket (1/8/16); above 16 use n_buckets() per D-rule "
+                         "on the rows=16 cost")
+    es = sorted(KS_SEP)
+    e_used, note = E, ""
+    if E not in KS_SEP:
+        if E < es[0]:
+            raise ValueError(f"E={E} is below the smallest measured expert count {es[0]}")
+        e_used = max(e for e in es if e <= E)
+        note = f"E={E} not measured; using nearest measured point below (E={e_used});"
+    cands = [(2.0 * v, KS, False) for KS, v in KS_SEP[e_used][rows].items()] \
+        + [(v, KS, True) for KS, v in KS_FUSED[e_used][rows].items()]
+    us, KS, fused = min(cands)
+    grid = (2 * tn if fused else tn) * KS * 2 * e_used
+    note += f" grid {grid} threads ({100.0 * grid / hw_threads:.0f}% of HW)"
+    alt = sorted(c for c in cands if c[0] > us)
+    if alt and (alt[0][0] - us) / us < 0.03:
+        a = alt[0]
+        note += (f"; INDIFFERENT - {'' if a[2] else 'sep '}KS={a[1]} "
+                 f"{'fused ' if a[2] else ''}at {a[0]:.2f} is within 3% (measurement noise floor)")
+    return us, fused, KS, note.strip()
+
+
+def selftest_launch():
+    """Assertions on the joint-chooser so a table edit cannot silently change a schedule decision."""
+    assert abs(best_launch(10, 1)[0] - 2.080) < 1e-9, best_launch(10, 1)
+    assert best_launch(2, 1)[1] and best_launch(2, 1)[2] == 4, best_launch(2, 1)      # fused, KS=4
+    assert best_launch(4, 1)[1] and best_launch(4, 1)[2] == 2, best_launch(4, 1)      # fused, KS=2
+    assert not best_launch(32, 1)[1] and best_launch(32, 1)[2] == 2, best_launch(32, 1)  # separate, KS=2
+    for bad in (0, 1):
+        try:
+            best_launch(bad, 1)
+            raise AssertionError(f"E={bad} should be refused (below the measured range)")
+        except ValueError:
+            pass
+    try:
+        best_launch(10, 32)
+        raise AssertionError("rows=32 should be refused; route it through n_buckets() instead")
+    except ValueError:
+        pass
+    us, fused, KS, note = best_launch(24, 8)      # unmeasured E -> nearest below, flagged
+    assert fused and KS == 1 and "nearest measured point below" in note, (us, fused, KS, note)
+    return True
+
 
 def should_fuse(tn, KS, E, hw_threads=HW_THREADS):
     """E25/D8: fuse projections only when the separate launches under-fill the device.
 
-    Fusion and split-K are substitutes for the same resource (parallelism): a gate launch is
-    tn*KS*2*E threads, and at KS=1 that is 800 of ~2048 slots, where fusing gate+up wins x1.49-1.66. Once a
-    single launch already fills the machine (KS>=2 here), fusion buys no occupancy and only pays the cost of
-    interleaving two independent weight streams (+7 %). The 0.6 factor is the measured crossover region, not
-    a derived constant - refine it when a second model geometry is swept.
+    Fusion and split-K draw on the same resource (parallelism), so this predicate is a *fill* test, not a
+    preference. Matched-KS measurements (out_ks_grid.txt) give the gain when the test passes: 1.62-1.87x at E=2
+    and E=4 KS=1, against 0.96-1.12x once the separate launches already fill the machine - i.e. fusion buys
+    concurrency and nothing else. Earlier wording here claimed "fusing at KS=1" was the rule; that was an
+    artifact of an E=10-only sweep: at E=2/4 the best schedule is fused AND split-K (KS=4 / KS=2), because
+    neither lever alone fills the device. Prefer best_launch() for a schedule choice; this remains for the
+    narrow question 'does fusing at this KS fill anything?'.
     """
     return tn * KS * 2 * E < 0.6 * hw_threads
 
@@ -240,6 +332,17 @@ def floor_us(picks, expert_bytes, scale=1.0):
 def main():
     print(__doc__.split("Usage:")[0].strip())
     print(f"\ncost spread note: {SPREAD}\n")
+    assert selftest_launch(), "joint-launch chooser selftest failed"
+    print("joint (fusion, split-K) choice - us per (expert, gate+up pair), from measured cells")
+    print(f"{'E':>5} " + " ".join(f"{'rows=' + str(r):>20}" for r in (1, 8, 16)))
+    for E in sorted(KS_SEP):
+        cells = []
+        for r in (1, 8, 16):
+            us, fused, KS, n = best_launch(E, r)
+            tag = "~tie" if "INDIFFERENT" in n else ""
+            cells.append(f"{us:6.2f} {'fused' if fused else 'sep   '} KS={KS} {tag}")
+        print(f"{E:5d} " + " ".join(f"{c:>26}" for c in cells))
+    print("\nfamilies, per (expert, all three projections):")
     print(f"{'rows':>5} {'dp4a':>9} {'rev G+X':>9} {'rev H+X':>9} {'rev I':>9} {'rev J':>9} {'E25a':>9} {'dispatch':>13}")
     for r in MEASURED_ROWS:
         a = sum(per_proj_us(r, "dp4a", p) for p in PROJS)

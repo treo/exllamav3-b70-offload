@@ -3,7 +3,7 @@ XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte -> a GEMM become
 
 Qwen3.8 2.05 bpw: eb 1.215 MiB, h 100.0 %, parent bill 69 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 165 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       41        0  parent    12.00      83    1.0x       1.0
+      1    10.0      250       36        0  parent    12.00      83    1.0x       1.0
       2    19.4      257       89        0  parent    12.35     162    1.9x       1.0
       4    36.4      272      167        0  parent    13.05     307    3.7x       1.1
       8    65.1      301      299        0  parent    14.45     554    6.6x       1.2
@@ -16,7 +16,7 @@ Qwen3.8 2.05 bpw: eb 1.215 MiB, h 100.0 %, parent bill 69 MiB/layer weights + 4.
 
 Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       41        0  parent    12.00      83    1.0x       1.0
+      1    10.0      250       36        0  parent    12.00      83    1.0x       1.0
       2    19.8      257       89        0  parent    12.35     162    1.9x       1.0
       4    38.4      272      174        0  parent    13.05     307    3.7x       1.0
       8    72.9      301      330        0   B70:D    15.83     505    6.1x       1.1
@@ -29,7 +29,7 @@ Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.
 
 Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       39       28  parent    12.00      83    1.0x       1.0
+      1    10.0      250       35       28  parent    12.00      83    1.0x       1.0
       2    19.8      257       86       55  parent    12.35     162    1.9x       1.0
       4    38.4      272      168      107  parent    13.05     307    3.7x       1.0
       8    72.9      301      319      203   B70:D    15.31     523    6.3x       1.1
@@ -42,7 +42,7 @@ Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5
 
 Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill 94 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 138 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       42        0  parent    12.00      83    1.0x       1.0
+      1    10.0      250       37        0  parent    12.00      83    1.0x       1.0
       2    19.2      257       89        0  parent    12.35     162    1.9x       1.0
       4    35.3      272      163        0  parent    13.05     307    3.7x       1.1
       8    60.9      301      281        0  parent    14.45     554    6.6x       1.3
@@ -55,7 +55,7 @@ Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill 94 MiB/layer weights + 4.
 
 Qwen3.8 6.05 bpw: eb 3.608 MiB, h 90.4 %, parent bill 101 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 129 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       38       77  parent    12.00      83    1.0x       1.0
+      1    10.0      250       33       77  parent    12.00      83    1.0x       1.0
       2    19.7      257       82      151  parent    12.35     162    1.9x       1.0
       4    38.0      272      159      292     CPU    13.99     286    3.4x       1.1
       8    71.2      301      298      546     CPU    26.23     305    3.7x       1.1

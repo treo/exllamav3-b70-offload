@@ -5,27 +5,48 @@ Why this module exists. plan_operating_point.py and plan_concurrency.py computed
 model was retired by measurement: the real GEMV was instruction-bound for every kernel up to rev H, and its
 time is independent of the quantization recipe (Qwen3.8 across K=2..6: 73.6-74.8 us for identical weight
 counts,
-b70-kernels.md 2b/2c). Two kernel families now exist, both bit-exact against a Python reference:
+b70-kernels.md 2b/2c). Families, all bit-exact against a Python reference:
 
-  dp4a   probe_gemv.cpp rev C with -DGEMV_KCONST  (compile-time trellis K)
-  dpas   probe_dpas4.cpp rev G with DPAS_X=1      (tokens on M, experts in the grid)
+  dp4a             probe_gemv.cpp rev C with -DGEMV_KCONST  (compile-time trellis K; niche: unpermutable AND K>5)
+  dpas (rev G)     probe_dpas4.cpp with DPAS_X=1  (tokens on M, experts in the grid) - superseded
+  dpas_reg / _gather (revs H, I)                 register and gather operand routing - superseded
+  dpas_transposed  rev J (probe_dpas7.cpp) / rev L (probe_dpas9.cpp): transposed tiles, the current kernel and
+                   the one the close-out recommends the engine implement; needs the permuted device layout (D3)
+  fused (E25a/b)   gate+up in ONE gemm launch at the KS that fills the grid, plus ONE combine_both launch
+
+The engine dispatches by row count AND by grid occupancy, which is why the tables are indexed by rows and by E.
 
 and the engine dispatches between them by row count, which is why the tables below are indexed by rows.
 
 Every number is microseconds per (expert, projection) on Qwen3.8@2.68bpw, E=10, measured as the reported
-projection time divided by E, warm (>=15 s sustained load) and interleaved min-of-N, best split-K per
-configuration. Two windows were kept where they disagree, because they sometimes disagree by 20 %:
-see `SPREAD`. Cost is per weight, not per byte: these are the same weights at any trellis K.
+projection time divided by E, with >= 1 s of CONTINUOUS executed work in the timing process (WARM_S; LESSONS 53)
+and min-of-N interleaved with an anchor that warms itself (LESSONS 54 - >= 2000 reps, or the device is still at
+its 1200 MHz idle clock and every number is ~2.2x off). Two windows were kept where they disagree, because they
+sometimes disagree by 20 %. Cost is per weight, not per byte: these are the same weights at any trellis K, and
+the quantization ladder measured that directly (3x bytes for +3% time at a small resident set,
+out_quant_ladder.txt).
 
-Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X, rev H, and
-rev I = probe_dpas6.cpp, the current fastest at every measured point). Dispatch is by recipe as well as rows:
+Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (revs F/G/H and rev I =
+probe_dpas6.cpp), out_revl.txt + out_dpas.txt (rev J = probe_dpas7.cpp and rev L = probe_dpas9.cpp, the current
+fastest and the kernel the close-out recommends the engine implement), out_e25_fuse.txt (E25a gate+up fusion),
+out_e25b_combine.txt (the single combine_both launch it enabled), out_ks_grid.txt (the per-KS joint choice), and
+out_egrid.txt / out_low_e_grid.txt (E = 2..96). Dispatch is by recipe as well as rows:
 the GATHER-family DPAS revisions (G/H/I) require K <= 5, so for those denser recipes fall back to dp4a; the
 transposed family (rev J/L) does not - it serves K = 2..6 verified, 2..16 compiled.
 
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 
+joint (fusion, split-K) choice - us per (expert, gate+up pair), from measured cells
+    E               rows=1               rows=8              rows=16
+    2           4.75 fused KS=4            5.35 fused KS=4            5.70 fused KS=4 
+    4           3.02 fused KS=2            3.62 fused KS=2            4.38 fused KS=2 
+   10           2.08 fused KS=1            2.63 fused KS=1            3.37 fused KS=1 
+   32          2.01 sep    KS=2           2.90 sep    KS=2           3.59 sep    KS=2 
+   96       2.48 fused KS=2 ~tie      3.02 sep    KS=1 ~tie      3.71 sep    KS=1 ~tie
+
+families, per (expert, all three projections):
  rows      dp4a   rev G+X   rev H+X     rev I     rev J      E25a      dispatch
-   16    134.97     18.53     15.29      9.43      7.09      6.48         rev J   fused gate+up + down = x1.09 vs three separate launches
+   16    134.97     18.53     15.29      9.43      7.09      6.35         rev J   fused gate+up + down = x1.12 vs three separate launches
 
 One kernel wins at every measured batch now: rev J (transposed tiles) beats rev I by 1.27-1.46x and
 dp4a by ~8x at rows=16. Dispatch is a single family, with one caveat that is a design decision rather
