@@ -140,10 +140,13 @@ def main():
             mib = dev * eb
             s = interp(band, mib, 1)
             c = interp(band, mib, 2)
-            # Measured decode cost replaces bytes/rate: the GEMV is instruction-bound and recipe-independent,
-            # so the footprint curve is kept here only as a locality diagnostic. rows > 16 is outside the
-            # probed set and is clamped to rows=16 cost (optimistic; flagged below).
-            rr = min(B, max(pdc.MEASURED_ROWS))
+            # Measured decode cost replaces bytes/rate. Priced PER EXPERT at the rows that expert actually
+            # sees - B*topk/distinct(B) - not at the global batch: with topk=8 a b=8 step touches ~65 experts
+            # and gives each of them ~1 row, so charging every one of them 8 (or 16) rows inflated the device
+            # term. Above 16 rows per expert the cost buckets additively (out_rows_gt16.txt); the footprint
+            # curve below is kept only as a locality diagnostic.
+            rpe = B * topk / max(d, 1.0)
+            rr = next((m for m in pdc.MEASURED_ROWS if m >= rpe), rpe)
             us_layer, kern = pdc.layer_us(dev, rr, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
             usc = c            # clustered-rate column is now diagnostic only
             us = us_layer

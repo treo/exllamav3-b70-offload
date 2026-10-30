@@ -118,17 +118,19 @@ def main():
             dev_mib = u * h * eb
             rate = pq.interp(band, dev_mib, 1)      # diagnostic only now: footprint, not a rate driver
             tp = fixed + us(rd_l + rows * (state_l + kv_l), 936.0)
-            # Measured decode cost. rows > 16 is outside the probed set, so those rows are held at the
-            # rows=16 per-expert cost (the DPAS path's slope is still rising there, so this is optimistic
-            # on the device side and is flagged in the printed note rather than silently extrapolated).
-            rr = min(rows, max(pdc.MEASURED_ROWS))
-            rr = min(rows, max(pdc.MEASURED_ROWS))
+            # Measured decode cost, priced PER EXPERT at the row count that expert actually sees. One step's
+            # `rows` tokens make rows*topk selections spread over union(rows) touched experts, so the average
+            # per-expert row count is rows*topk/union - the "rows/exp" column below - NOT the global row count.
+            # An earlier revision charged every touched expert the global count (clamped to the 16-row
+            # measurement limit), which inflates the device term whenever topk > 1: at b=8 with topk=8 it
+            # priced ~1 row as if it were 16. cost() is measured at 1/2/4/8/16 and, above 16, buckets
+            # additively (out_rows_gt16.txt), so we round the per-expert count UP to the next measured point
+            # rather than interpolating a curve that is flat below ~9 rows and stepped above.
+            rpe = rows * topk / max(u, 1.0)
+            rr = next((m for m in pdc.MEASURED_ROWS if m >= rpe), rpe)
             tb, kern = pdc.layer_us(u * h, rr, pdc.scale_from_eb(eb, float(lab)))
             tc_ = us(u * (1 - h) * eb, ppb.CPU_RATE)
             wall = max(tp, tb, tc_)
-            # rows > 16 is outside the probed set, so those rows are held at the rows=16 per-expert cost
-            # (the DPAS slope is still rising there, so this is optimistic on the device side and is flagged
-            # in the printed note rather than silently extrapolated).
             binds = "parent" if wall == tp else (f"B70:{kern[0].upper()}" if wall == tb else "CPU")
             step = wall * nl / 1000.0
             tput = rows / (step / 1000.0)

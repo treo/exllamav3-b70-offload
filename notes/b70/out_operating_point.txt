@@ -33,11 +33,11 @@ parent window per layer ~250 us at b=1 [M, doc/prep] (scales weakly with b until
   is what IT actually reads per layer, which is the only footprint the rate curve should be
   sampled at. The all-picks row (h=1) is printed as the upper bound a 3090-sized S_g would see.
  rows   union  dev picks  footprint  in L2?   GB/s  us/layer  x b=1  clust  ms/token  cards
-    1    10.0        9.8      14.3M     yes    292        40   1.0x    558      1.90    0.2
-    2    19.9       19.4      28.4M      no    292        82   2.1x    558      3.95    0.3
-    4    38.8       37.9      55.5M      no    292       168   4.3x    558      8.09    0.7
-    8    72.7       71.0     104.0M      no    234       376   9.5x    383     18.06    1.5
-   16   131.2      128.0     187.6M      no    214       847  21.4x    310     40.65    3.4
+    1    10.0        9.8      14.3M     yes    292        41   1.0x    558      1.98    0.2
+    2    19.9       19.4      28.4M      no    292        82   2.0x    558      3.95    0.3
+    4    38.8       37.9      55.5M      no    292       160   3.9x    558      7.70    0.6
+    8    72.7       71.0     104.0M      no    234       301   7.3x    383     14.45    1.2
+   16   131.2      128.0     187.6M      no    214       543  13.1x    310     26.05    2.2
   b=1: 48 layers x 40 us = 1.90 ms/token of B70 time (14.3 MiB/layer read while doing 9.8 expert-projection-layers of work; dispatch picks dpas_transposed)
   upper bound if this card owned every pick: 53 us/layer
 
@@ -46,11 +46,11 @@ GLM@3.05:  topk=8 (config.json), expert block 9.000 MiB, 288 experts/layer, 42 M
   is what IT actually reads per layer, which is the only footprint the rate curve should be
   sampled at. The all-picks row (h=1) is printed as the upper bound a 3090-sized S_g would see.
  rows   union  dev picks  footprint  in L2?   GB/s  us/layer  x b=1  clust  ms/token  cards
-    1     8.0        5.6      50.8M      no    132       124   1.0x    216      5.20      ?
-    2    15.8       11.2     100.5M      no    175       256   2.1x    221     10.74      ?
-    4    30.2       21.4     192.2M      no    220       513   4.1x    259     21.55      ?
-    8    55.1       39.0     351.1M      no    239      1116   9.0x    296     46.86      ?
-   16    96.1       68.1     612.6M      no    253      2430  19.6x    304    102.07      ?
+    1     8.0        5.6      50.8M      no    132       129   1.0x    216      5.43      ?
+    2    15.8       11.2     100.5M      no    175       256   2.0x    221     10.74      ?
+    4    30.2       21.4     192.2M      no    220       489   3.8x    259     20.52      ?
+    8    55.1       39.0     351.1M      no    239       893   6.9x    296     37.50      ?
+   16    96.1       68.1     612.6M      no    253      1558  12.0x    304     65.42      ?
   b=1: 42 layers x 124 us = 5.20 ms/token of B70 time (50.9 MiB/layer read while doing 5.7 expert-projection-layers of work; dispatch picks dpas_transposed)
   upper bound if this card owned every pick: 534 us/layer
 
