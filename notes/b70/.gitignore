@@ -22,6 +22,7 @@ probe_dpas5
 probe_dpas6
 probe_dpas7
 probe_dpas8
+probe_permute
 libb70shim.so
 # IGC shader dumps (IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=...): ~1.2 MB of .isaasm/.spv/.ll per run
 isa/

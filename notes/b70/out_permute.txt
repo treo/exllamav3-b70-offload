@@ -1,0 +1,12 @@
+device: Intel(R) Arc(TM) Pro B70 Graphics   K 3  (tile = 24 dwords = 96 B)
+device permute vs host reference: exact (0 of 98304 dwords differ)
+  14 MiB  device permute    226.3 us (  60.4 GiB/s payload) | device copy     49.2 us ( 278.1 GiB/s) | permute/copy x4.60 | rep drift 3.5 us
+  64 MiB  device permute    896.6 us (  69.7 GiB/s payload) | device copy    242.0 us ( 258.3 GiB/s) | permute/copy x3.71 | rep drift 6.0 us
+ 256 MiB  device permute   1732.5 us ( 144.3 GiB/s payload) | device copy    631.3 us ( 396.0 GiB/s) | permute/copy x2.74 | rep drift 1.7 us
+ 512 MiB  device permute   3456.4 us ( 144.7 GiB/s payload) | device copy   1186.8 us ( 421.3 GiB/s) | permute/copy x2.91 | rep drift 11.5 us
+host 64 MiB: memcpy   3062.8 us (  20.4 GiB/s) | permute-copy   9186.3 us (   6.8 GiB/s) | x3.00  (link rate is ~9 GB/s = ~8.4 GiB/s, so the comparison that matters is whether the permute-copy stays above it)
+  14 MiB  device permute    174.1 us (  78.5 GiB/s payload) | device copy     37.1 us ( 368.2 GiB/s) | permute/copy x4.69 | rep drift 13.6 us
+  64 MiB  device permute    731.0 us (  85.5 GiB/s payload) | device copy    172.9 us ( 361.6 GiB/s) | permute/copy x4.23 | rep drift 47.9 us
+ 256 MiB  device permute   2226.8 us ( 112.3 GiB/s payload) | device copy    631.4 us ( 396.0 GiB/s) | permute/copy x3.53 | rep drift 18.8 us
+ 512 MiB  device permute   4242.9 us ( 117.8 GiB/s payload) | device copy   1073.1 us ( 465.9 GiB/s) | permute/copy x3.95 | rep drift 25.3 us
+host 64 MiB: memcpy   3092.9 us (  20.2 GiB/s) | permute-copy   6855.1 us (   9.1 GiB/s) | x2.22  (link rate is ~9 GB/s = ~8.4 GiB/s, so the comparison that matters is whether the permute-copy stays above it)

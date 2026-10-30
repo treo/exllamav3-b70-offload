@@ -43,6 +43,11 @@ echo "built probe_dpas7"
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas8 probe_dpas8.cpp
 echo "built probe_dpas8"
 
+# D3 cost model: what the intra-tile permute charges for staging (device permute vs device copy vs host
+# permute-copy). Takes an optional K argument; results in out_permute.txt.
+icpx -fsycl -O2 -o probe_permute probe_permute.cpp
+echo "built probe_permute"
+
 # dp4a path: one binary per trellis K, since compile-time K is worth x1.2-1.5 at rows=1 (out_gemv.txt).
 # gate_dpas.py expects /tmp/pgK<K>; it reports a clear SKIP when one is missing rather than passing silently.
 for k in 2 3 4 5 6; do
