@@ -839,6 +839,5 @@ int main(int argc, char **argv)
     sycl::free(W, q); sycl::free(XA, q); sycl::free(Q, q); sycl::free(SX8, q);
     sycl::free(Y, q); sycl::free(PART, q);
     if (!dir2.empty()) { sycl::free(W2, q); sycl::free(PART2, q); sycl::free(Y2, q); }
-    sycl::free(Y, q); sycl::free(PART, q);
     return 0;
 }
