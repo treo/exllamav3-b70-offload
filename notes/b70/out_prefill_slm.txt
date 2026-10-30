@@ -1,0 +1,70 @@
+probe_slm, matched-vectorization sweep — SLM staging is a penalty, and re-use is cheaper than no re-use
+=========================================================================================================
+Same program as the first version of this artifact, after the ISA showed the comparison had been invalid
+(§1 below). Tile sizes are the real Qwen3.8@2.68 gate/up shapes: 80 KiB = one expert-projection tile
+(tn=40, k=4096), 40 KiB at KS=2, 20 KiB at KS=4. items/group = row-slabs sharing one weight pass.
+WARM_S=1 of executed work, q.wait() every 8 dispatches, min of 3, 8 GiB unique working set = 341x L2.
+Window 00:55; anchors in out_prefill_gemm.txt were 19.2-19.3 us in this box's windows.
+
+tile    items   OWNED (1 read/byte)   REUSE (all items read tile)   SLM (stage + walk)   SLM/OWNED
+20 KiB     32        1458.9 GB/s            1726.9 GB/s               960.6 GB/s           1.52x
+40 KiB     16        1159.6 GB/s            1633.6 GB/s               380.7 GB/s           3.05x
+40 KiB     32        1349.3 GB/s            1690.4 GB/s               535.8 GB/s           2.52x
+40 KiB     64        1458.0 GB/s            1566.8 GB/s               946.5 GB/s           1.54x
+80 KiB     32        1128.9 GB/s            1584.0 GB/s               187.6 GB/s           6.02x
+(GB/s is UNIQUE bytes delivered in all rows; app-visible request rate for REUSE is items x that, e.g.
+ 54.1 TB/s at 40 KiB/32 items. OWNED/REUSE/SLM = the three modes of probe_slm. 160 KiB exceeds the
+ 128 KiB/group SLM budget; 80 KiB x 16 and 20 KiB x 16/64 failed the same guard — printed as a note,
+ not a number.)
+
+WHAT THE MATCHED COMPARISON SAYS
+1. **Concurrent re-reads of the same bytes are not a cost — they are cheaper than a unique stream.** Reuse at
+   40 KiB/32 delivers 1690 GB/s of unique bytes while OWNED, which never repeats a byte, manages 1349. Thirty
+   -one copies of every read are absorbed on-chip (100% L1 hit, 54 TB/s of request-side bandwidth) and the
+   DRAM side still moves each byte once. Directionally consistent with llm-scaler's group-major rule (neigh-
+   bouring groups should touch the same bytes), but see the CONFIDENCE block in out_prefill_gemm.txt: this
+   probe's absolute rates are contaminated by address arithmetic, so this is a hint to test in `probe_gemm`,
+   not a design number.
+2. **SLM staging is 1.5-6x slower than the same walk from global, and it scales badly.** At the tile size a
+   real kernel wants (80 KiB, one expert-projection) it is 6.0x worse; at 20 KiB only 1.5x. The ISA gives the
+   mechanism without speculation: the staged body is 2382 instruction lines vs 1749/1754 for the two global
+   modes, carrying all 80 of the global `load.ugm.d32x4` (the staging read is unavoidable) *plus* 80
+   `load.slm.d32x4` and 89 `store.slm.*`. Staging therefore adds a round trip through local memory rather
+   than replacing traffic — and the SLM pipe is far narrower than the global path.
+
+1. WHY THE FIRST VERSION OF THIS FILE WAS WRONG
+The initial sweep compared a vectorized global walk against a scalar SLM walk: the global modes emitted
+`load.ugm.d32x4.a64` while the staged path emitted scalar `load.slm.d32`/`store.slm.d32`, because the staged
+loop's per-lane addresses were strided by 16 dwords and the compiler would not vectorize that. Any
+staged-vs-global conclusion from that table was an access-width artifact in disguise. Fixed by making the
+staged walk lane-contiguous (`local_addr[(li % 4) + j*4 + i*128]`), which is both what a real kernel would do
+and what vectorizes. Verified in the ISA rather than assumed — all three modes now carry the same
+`load.ugm.d32x4` count (80), and the SLM mode's extra work is exactly the local round trip:
+
+    notes/b70/asm_slm/mode0_OCL_..._entry_0001.asm   ugmd32x4=80  slm_ld=0   slm_st=0   (OWNED)
+    notes/b70/asm_slm/mode1_OCL_..._entry_0008.asm   ugmd32x4=80  slm_ld=0   slm_st=0   (REUSE)
+    notes/b70/asm_slm/mode2_OCL_..._entry_0015.asm   ugmd32x4=80  slm_ld=80  slm_st=89  (SLM)
+
+LESSON (the general one, filed as LESSONS 68): when comparing two memory *mechanisms*, verify in the ISA that
+the compiler gave both the same access *width and shape*. Here the artifact of the first run would have
+"proven" SLM was 2.5x slower for a reason that had nothing to do with SLM. A mismatch that large is invisible
+in the timing output and obvious in one grep.
+
+2. WHAT SURVIVES, AND WHAT THE PREFILL KERNEL THEREFORE DOES
+  * Survives: SLM staging is the wrong mechanism (1.5-6x, mechanism identified). The design in
+    `doc/port/b70-prefill.md` §4a accordingly maps (expert, column tile, k-slice) to a work-group and each
+    16-row slab to a work-item, reads B globally and concurrently, and stages nothing. That part of the design
+    does not depend on the contested re-use rate — it is the cheaper of the two mechanisms measured.
+  * Open, and now the central question: whether a real kernel can beat the additive `ceil(rows/16)` traffic
+    law (E29, measured on sequential buckets). `probe_gemm` variants A (today's bucket ordering) vs B
+    (concurrent slab ordering) decide it, scored on bytes moved per chunk; both get ISA dumps, and the dumps
+    must show matching load widths before their timings are compared — which is the mistake this whole
+    detour exists to prevent repeating.
+  * Not established: any absolute prefill GB/s from this probe.
+
+Reproduce:
+    icpx -fsycl -O2 -o probe_slm probe_slm.cpp        # needs oneAPI setvars sourced; see LESSONS 52
+    WARM_S=1 ./probe_slm [tile_KiB] [items] [unique_MiB] [reps]      # e.g. 40 32 8192 3
+    NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=/tmp/asm_slm2 \
+        WARM_S=0.2 ./probe_slm 40 32 256 1
+    # kernels by mangled template args: enqueueILi<TILE_DW>ELi<ITEMS>ELi<MODE>E, MODE 0/1/2 = OWNED/REUSE/SLM

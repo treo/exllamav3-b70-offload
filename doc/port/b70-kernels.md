@@ -577,18 +577,24 @@ share a GEMV; above ~16 rows per expert switch to the DPAS path with M = 16/32 t
 two, the decode kernel with several token rows is usually better than XMX at N=16, so the tier
 boundary is a measured constant (`EXL3_MOE_B70_DPAS_T`, tentatively 16) rather than an inherited one.
 
-**TRAFFIC IS NOT A FIXED COST — superseded by `probe_slm` (`notes/b70/out_prefill_gemm.txt`).** The
-`ceil(rows/16)` re-read law above is an artifact of launching row-buckets at different times, not a memory
-system limit. Measured: 32 work-items reading the same 40 KiB tile **concurrently** deliver 1689 GB/s of unique
-bytes versus 1348 GB/s when every read is unique (re-use through the hierarchy is cheaper than no re-use, at
-100% L2 miss and ~20% L1 hit), while staging the tile into SLM first is **2.5–6× slower** than just re-reading
-it — the ISA shows the staged kernel issuing the same global staging read *plus* 80 `load.slm.d32x4` and 77
-`store.slm.d32x4` (1177 vs 719 instructions), and 128 KiB/group caps tiles at 4× the largest one wanted.
-So: map `(expert, column tile, k-slice)` to a work-group, map each **16-row slab to a work-item of that group**,
-read B globally and concurrently, and get the re-reads absorbed by the hierarchy with no staging pass and no
-group barrier. Full design in `doc/port/b70-prefill.md` §4a; the eligibility bar for this section (≈26 rows at
-the copy peak, ≈59 at the achieved GEMV rate) and the live-routing qualification numbers (124 of 512 experts
-≥ 26 rows carrying 94% of picks at R=2048) are in §4's correction above and `out_concurrency.txt`.
+**TRAFFIC MAY NOT BE A FIXED COST — but this is a HYPOTHESIS now, not a measurement
+(`notes/b70/out_prefill_gemm.txt`, with its own CONFIDENCE block).** What `probe_slm` settled is negative and
+useful: **SLM staging is 1.5–6.0× slower than reading the tile globally** (2382 instruction lines vs 1749;tructions; the staged
+body adds 80 `load.slm.d32x4` + 77 `store.slm.d32x4` on top of its global read, and 128 KiB/group caps tile
+size), so the "stage weights into SLM" design that this section's predecessor proposed is dead — do not write
+that kernel.
+
+What it did **not** settle is the positive claim I initially drew from it — that concurrent global re-reads of
+one tile are cheaper than unique reads (1689 vs 1348 GB/s of unique bytes). Reading the ISA again showed both
+bodies are dominated by scalar address arithmetic (149 `add`, 100 `shl` against 32 vector loads) and that the
+reuse mode's 32× higher per-iteration load count produced near-identical timings, i.e. the probe was
+math-bound, not memory-bound. So the `ceil(rows/16)` re-read law stands **until a real kernel bends it**: the
+hypothesis is that row-slabs of one expert scheduled *concurrently* (same work-group, slab index innermost in
+the grid order — llm-scaler rule 4) will cost far less than the additive E29 law measured with time-separated
+launches, and the test is `probe_gemm` at rows/expert 2–16 (verify) and 32–64 (prefill), scored on bytes moved
+per chunk. Design consequence either way: **map `(expert, column tile, k-slice)` to a work-group and each
+16-row slab to a work-item of that group, read B globally, no staging pass, no group barrier** — that ordering
+is what makes the dedupe possible if the hypothesis holds, and costs nothing if it does not.
 
 ## 5. Transforms, activation, quantisation
 

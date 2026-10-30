@@ -3,6 +3,26 @@ Weights shared across row-slabs: the cache hierarchy already does it, and SLM st
 The first measurement for the now-in-scope B70 prefill work (doc/port/b70-prefill.md §4 proposed a mechanism;
 this probe prices it, and the proposal does not survive).
 
+CONFIDENCE, stated up front because the two findings here are NOT equally solid.
+  SOLID - **SLM staging is the wrong mechanism.** Staging a tile into local memory and reading it back is
+  1.5-6.0x slower than letting items read it globally (1.52x at 20 KiB, 2.52x at 40, 6.02x at 80, 32 items/
+  group), the penalty grows with tile size, and the mechanism is visible in the matched ISA dump: all three
+  modes issue the same 80 `load.ugm.d32x4`, and the staged body adds 80 `load.slm.d32x4` + 89 `store.slm.*` on
+  top of them (2382 instruction lines vs 1749). See `out_prefill_slm.txt` for the matched sweep and
+  `asm_slm/` for the dumps. Nothing in that depends on the confound below, and it is enough to kill the §4
+  design as written.
+  NOT SETTLED - **"the hierarchy absorbs concurrent re-reads" (1689 vs 1348 GB/s of unique bytes).** I led
+  with this earlier today and it does not survive scrutiny of the ISA. In the reuse mode the address stream is
+  loop-invariant (the iteration index does not enter the address), and both bodies are dominated by scalar
+  address arithmetic rather than by memory - the global-reuse body carries 149 `add` and 100 `shl` against 32
+  vector loads. So the two modes differ by 32x in per-iteration load count (320 vs 10 vector loads) with
+  similar timings, which is what you would expect of a math-bound probe, not a memory-bound one. The
+  directional claim (re-reads of *simultaneously* touched bytes are cheap) is consistent with llm-scaler's
+  group-major rule 4 and worth testing, but this probe does not establish it and no design decision should
+  rest on the number. The clean test is `probe_gemm`, where the slabs are real DPAS work.
+  Practical consequence for the plan: prefill's reuse question is OPEN again, and the only thing settled is
+  that SLM staging is not the answer. §4a in b70-prefill.md is rewritten to say so.
+
 QUESTION. Prefill on the B70 stands or falls on one property: an expert's weight bytes must reach the math ONCE
 per chunk however many token rows hit that expert. Today's answer is row buckets, which E29 measured as
 additive in traffic (x2.00/x2.98/x3.96 at 32/48/64 rows), and at the measured prefill rows/expert (~105 for a
@@ -67,9 +87,10 @@ WHAT IT MEANS
 WHAT THIS DOES NOT ESTABLISH
   * It is a traffic/hierarchy probe, not a GEMM: no trellis unpack, no DPAS, no epilogue. The unpack ALU is
     where route R1 vs R2 will differ, and that is still unmeasured.
-  * It does not prove a real prefill kernel hits these rates; it proves the reuse mechanism is not the obstacle,
-    which is the question §4 posed. The next step is the actual kernel at rows/expert 32/64, scored on bytes
-    moved per chunk against the one-read ideal.
+  * It does not prove a real prefill kernel hits these rates, and per the CONFIDENCE block above the reuse
+    result is confounded by address-math dominance, so treat it as a hint to test in `probe_gemm` rather than
+    as a settled property. What is settled is the SLM penalty. Next step: the actual kernel at rows/expert
+    2-16 (verify shapes) and 32-64 (prefill), scored on bytes moved per chunk against the one-read ideal.
   * Concurrency realism: 64 groups x 40 KiB ~= 2.6 MiB of simultaneously-live region, comfortably inside L2 -
     which is what a real kernel would also have in flight. If a future kernel widened the per-group region or
     ran far more groups, the dedupe could stop being free; the sizes where it breaks are a cheap extension of

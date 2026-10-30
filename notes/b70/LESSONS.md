@@ -1251,10 +1251,15 @@ nothing that is the sole instance of a measurement.
     lane-strided indexing `p[j + li], p[j + ITEMS + li], ...` - lowered to 320 scalar `load.ugm.d32.a64`. I was
     partly measuring vectorisation, and reaching for a memory-hierarchy explanation of a codegen difference.
     Rewriting the loops lane-contiguously gave all three modes exactly 80 d32x4 loads and the comparison became
-    honest - the headline conclusion survived (concurrent global reuse is free, SLM staging is 2.5-6x worse), but
-    the intermediate numbers moved by 5-10% and, more importantly, the *reason* changed: the SLM penalty is
-    +458 instructions of extra on-chip traffic (89 `store.slm` + 80 `load.slm` on top of the 80 global loads)
-    plus occupancy, visible only in the dump. Rules: (1) when two kernels are compared on a memory question,
+    honest - the SLM conclusion survived (staging is 1.5-6x worse, and the reason is +458 instructions of extra
+    on-chip traffic: 89 `store.slm` + 80 `load.slm` on top of the 80 global loads, plus occupancy), visible only
+    in the dump. The *other* half did not: I had written that concurrent global reuse is therefore "free" at
+    1690 vs 1348 GB/s, and a second ISA read showed both bodies are dominated by scalar address arithmetic
+    (149 `add`, 100 `shl` against 32 vector loads) with the reuse mode doing 32x the loads per iteration for a
+    near-identical time - i.e. a math-bound probe, which cannot license a memory-hierarchy rate. Retracted to a
+    hypothesis for `probe_gemm` to test (see the CONFIDENCE block in `out_prefill_gemm.txt`); the lesson
+    generalizes past vectorization: matching ALU is not enough, you also have to prove the two modes are
+    bounded by the resource you are attributing the difference to. Rules: (1) when two kernels are compared on a memory question,
     prove from the ISA that they are equal on load width, load count, and scratch traffic - not from the source
     you meant; (2) `%scratchloc` is declared in every kernel on this target, so "there is a scratch reference"
     is not evidence of a spill - check for scratch ld/st, or you will explain your result with a thing that is

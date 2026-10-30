@@ -101,16 +101,25 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    fusion, where one group had to cover a whole expert's tiles).
 
 **4a. WHAT MEASUREMENT SAID (probe_slm, `notes/b70/out_prefill_gemm.txt`) — the SLM mechanism above is
-   refuted, and the replacement is cheaper than the proposal.** With identical ALU per dword and, after the ISA
-   showed the first comparison was scalar-vs-vector, identical `load.ugm.d32x4` widths in all three modes:
-     * reading the same bytes concurrently from **global** by all 32 items is *faster* than reading each byte
-       once (1689 vs 1348 GB/s of unique bytes at 40 KiB/group, 1581 vs 1130 at 80 KiB): L1/L2 absorb 31 of
-       every 32 copies, so the reuse prefill needs costs essentially nothing.
-     * **SLM staging is 1.44× / 2.51× / 6.03× slower** at 20 / 40 / 80 KiB per group, degrading as the staged
-       region grows — the occupancy signature of spending the 128 KiB/group SLM budget. The ISA gives the
-       mechanism: the same walk costs 1177 instructions instead of 719, because staging adds 89 `store.slm`
-       plus 80 `load.slm` on top of the 80 global loads it was meant to replace. No scratch traffic in any
-       mode, so this is not a spill story.
+   refuted outright; what replaces it is a HYPOTHESIS, not a measurement.** With identical ALU per dword and,
+   after the ISA showed the first comparison was scalar-vs-vector, identical `load.ugm.d32x4` widths in all
+   three modes:
+     * **SLM staging is 1.44× / 2.51× / 6.03× slower** than reading globally at 20 / 40 / 80 KiB per group,
+       degrading as the staged region grows. The ISA gives the mechanism: the same walk costs 1177 instructions
+       instead of 719, because staging adds 89 `store.slm` plus 80 `load.slm` on top of the 80 global loads it
+       was meant to replace. No scratch traffic in any mode, so this is not a spill story — and to keep the
+       accounting honest, the two 40 KiB bodies here spill comparably (256–320 B of `%scratch`, 10 scratch
+       loads / 8 stores each), so spills are not the differentiator either.
+     * I also wrote that concurrent global re-reads are *cheaper* than unique reads (1689 vs 1348 GB/s of
+       unique bytes at 40 KiB; 1581 vs 1130 at 80 KiB). **Retracted as a measurement** — see the CONFIDENCE
+       block in the artifact: both probe bodies turn out to be dominated by scalar address arithmetic (149
+       `add`, 100 `shl` against 32 vector loads) and the reuse mode does 32× the loads per iteration for a
+       near-identical time, which is math-bound behaviour, not memory-bound. It remains a reasonable
+       *hypothesis* (and matches llm-scaler's group-major rule 4), to be tested by `probe_gemm`.
+   Scope note on the refutation: the probe reads SLM with a per-lane strided vector pattern. A layout designed
+   for SLM broadcast — llm-scaler's linearized `asyncCopyTile<AOS,true>` layouts — might not show this, and
+   that is untested; what is tested is that *my* proposed staging shape is a non-starter, and the fact that
+   llm-scaler went to real trouble over AOS layout is consistent with SLM being easy to misuse.
    Design that follows: **(expert, column tile, k-slice) → work-group**, **(16-row slab) → work-item**, one
    launch per chunk, B read from global exactly as decode does it today. No staging pass. The E25c cap of 64
    work-items/group allows 1,024 rows of M coverage per group against the ~105 rows/expert measured, so the cap
@@ -153,3 +162,29 @@ amplification; (2) ~~the matched prefill baseline~~ **done for the CPU-split arm
 `-mcs` 256 / 384, above), still owed: an all-GPU control on Qwen3.8's shapes and a warm-placement repeat, since
 cold placement is known to be worth 1.6-1.8x on decode; (3) then R1-vs-R2 at fixed traffic, which §4 argues is
 the cheap part. Update §12's row when (1) lands.
+
+6. EXPERIMENT SPEC FOR `probe_gemm` (written so the next session implements it in one pass)
+   Rev L has NO bucket loop -- above 16 rows the engine buckets *launches* (additive law, `out_rows_gt16.txt`),
+   which is exactly why the buckets are temporally separated and cannot re-use. So the experiment is a grid
+   change, not new arithmetic. Base: `notes/b70/probe_dpas9.cpp`, whose decomposition is
+   `sub = gid & 1; tile = (gid>>1) % TN; ks; expert`.
+     * **Variant B (concurrent slabs).** Replace the `2` axis (the abandoned E25c dual-projection slot) with
+       `NSLAB`: `threads = TN * KS * NSLAB * E`, slab index varying FASTEST so that items differing only in slab
+       are adjacent and therefore co-resident. Row base per item = `slab * 16`. Pad `XA` to `NSLAB * 16` rows
+       with zeros so every item computes a full `MR=16` tile and no masking is needed in the inner loop; the
+       combine picks the slab owning each real row and reduces over `(ks, slab)`. `PART` gains the slab index.
+     * **Variant A (control, sequential buckets).** Same kernel, one item loops `for s in 0..NSLAB` over row
+       bases. This must reproduce the additive law if the law is real.
+     * **Scoring, in order of evidential weight.** (1) *Positive control:* B at `NSLAB=1` must reproduce rev L's
+       number within noise -- that isolates the reordering's own cost, and if it fails nothing else is
+       interpretable. (2) *Bend the law:* B at `NSLAB=2,4` (rows 32, 64) versus A at the same rows; A/B is the
+       traffic-amplification ratio, i.e. the thing §3 measured as 7.01x analytically. (3) *Bit-exactness* against
+       the host reference for rows 17..64 (`gate_gemv.py`'s oracle; a partial-ordering bug shows up here first).
+       (4) *ISA on both*, before comparing timings: equal `load.ugm.d32x4` counts, no scratch ld/st, accumulator
+       still in registers -- the mistake that made `probe_slm`'s first run meaningless (LESSONS 68), and
+       B's whole claim is that a register-resident accumulator plus co-resident slabs is cheaper than a re-read.
+     * Shapes: E in {8, 16, 32}, Qwen3.8@2.68 gate/up geometry (tn=40, k=4096), rows in {16, 32, 64}, KS swept
+       per cell because split-K trades against slabs for the same 2048 slots (`best_launch`'s tables). If B wins
+       at fixed rows, the winner is a *dispatch* change the engine can adopt without touching the arithmetic; if
+       B ties A, the additive law is real and prefill's traffic cost stands as §3 computed it -- also worth
+       knowing, because it settles the R1/R2 question by removing R2's main motivation.
