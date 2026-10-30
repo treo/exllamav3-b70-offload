@@ -34,6 +34,12 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | `plan_parent_budget.py` | the 3090's two bills — **capacity** (what must be resident) vs **traffic** (what a token streams) — plus the `P_order` vs `P_lpt` placement comparison behind `doc/port` §2.1a and gates E18/E19/E20 (`out_parent_budget.txt`) |
 | `plan_quant_scaling.py` | does §2.1a survive the bigger recipes: five Qwen3.8 checkpoints (2.05–6.05 bpw), capacity/residency/decode time per quant, against **newly measured** K = 4/5/6 tile rates (`out_quant_scaling.txt`) |
 | `plan_placement.py` | joins the safetensors census to the **real per-layer expert-selection counts** persisted by dynamic placement and answers, per model and per home-size: `h` (device-resident pick share), `\|res\|` (the migration set), one-time `fill` seconds, `σ`, and the CPU residue in ms/token (`out_placement.txt`) |
+| `probe_dpas4..dpas9.cpp` | the integer-DPAS decode lineage: rev G (tokens on M, experts in grid) → rev H (ESIMD `xmx::dpas` from registers) → rev I (`lsc` gather for B, ~2x) → rev J (transposed tiles, another 1.3-1.5x) → rev K (fusion-of-combine ablations) → **rev L (`probe_dpas9.cpp`): the clean main path and the kernel the close-out recommends the engine implement** (`out_dpas.txt`, `out_revl.txt`) |
+| `probe_permute.cpp` | what the intra-tile permuted device layout actually costs, on the whole 512 MiB resident set: device permute vs copy, host permute vs copy, and the readmit path (`out_permute.txt`) |
+| `probe_combine.cpp` | the two combine schedules **standalone** (no gemm ahead of them in the stream), plus a producer pass and a 32 MB eviction pass — the instrument that showed the merged combine's in-situ loss was not L2 state (`out_e25b_combine.txt`) |
+| `gate_dpas.py` | the exactness gate: 206 comparisons, 0 failures, 0 skips — dp4a and rev L on synthetic cases, native and parent-staged inputs with negative controls, the fused launch's two outputs, and **every shipped Qwen3.8 quantization (expert K = 2..6) dumped from real checkpoints** (`out_gate_dpas.txt`) |
+| `sweep_ks_grid.py` | per-KS cost for the fused and separate schedules across E = 2..96, carrying a self-warming anchor between cells → the joint (fusion, split-K) tables in `plan_decode_cost.best_launch()` (`out_ks_grid.txt`) |
+| `plan_decode_cost.py` | the measured B70 decode cost model that replaced `bytes / GB-per-second`: per-(expert, projection) costs by family and rows, the fused schedule, per-KS launch choice, the rows>16 bucket law, and D8's fill predicate (`out_decode_cost.txt`) |
 
 ## The measured facts that shape the design
 
@@ -53,6 +59,12 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | board power at idle (no context) | 14.6 W | — |
 | board power idle *with a live SYCL context* | 45.6 W | — |
 | power cap | 275 W (`power1_cap`), energy counter in µJ | — |
+| board power under **sustained decode** | **~285 W mean, 294–306 W peaks** at 97–100% compute, 54% of DRAM bandwidth — the part is power-capped, with ~1% clock droop; kernel time drifts **+0.5% over 150 s** | — |
+| idle clock, and why it matters | idles at **1200 MHz**, needs ~40 ms of continuous work to leave it: the same kernel reads 44.0 µs at 1200 MHz and 19.2 µs once ramped (**2.2–2.3x**), which explains the historic cross-window swings | — |
+| device L2 | **24 MiB** (`devinfo`) — quote working-set size next to any "effective GB/s"; an E=10 case is 5.9 MiB and its rate is partly cache | — |
+| quantization vs decode **time** | nearly free at small resident sets: K = 2 → 6 (3x bytes) costs **+3%** at rows=1; it costs VRAM, admission transfer and energy instead (`out_quant_ladder.txt`) | — |
+| when to fuse gate+up | two independent conditions, both implemented in `plan_decode_cost.best_launch()`: **(a)** the separate launches leave slots empty (gain 1.6–1.9x, gone at fill), and **(b)** the fused footprint `2·E·bytes` stays under L2 — between the crossovers (E ≈ 20–41 for gate at K=3) fusion **costs** up to 1.27x, because a fused launch holds both weight streams at once (`out_ks_grid.txt`) | — |
+| CPU home (`S_c`) regime | **compute-bound** on Qwen3.8 (L3 residency buys 15%, 37.9 GiB/s ceiling, 39.2 → 23.0 µs per assignment over b=1..16); **bandwidth-leaning** on GLM (68 GiB/s warm, saturates at ~8 threads) (`out_cpu_worker_calib.txt`, `out_glm_cpu_calib.txt`) |
 | `cudaHostRegister` on `sycl::malloc_host` memory | **fails** (`invalid argument`) | — |
 | `sycl::atomic_ref` (any scope) on a `register_host_memory` pointer | **device lost** (`UR_RESULT_ERROR_DEVICE_LOST`); plain stores and fenced volatile stores are fine | — |
 | engine in a child process, region registered in both | **works**: kernel payload visible to parent and to a 3090 DMA, 3090 memop visible to a kernel in the child | — |

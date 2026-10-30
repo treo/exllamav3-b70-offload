@@ -1140,6 +1140,20 @@ nothing that is the sole instance of a measurement.
     rather than naming a winner — `best_launch()` now flags INDIFFERENT when the runner-up is within 3%, because a
     decision table that ranks noise teaches the reader to trust it.
 
+58. **Fusion merges working sets, so its cache envelope is the union — and a "non-monotonic" anomaly is usually a
+    missing dimension, not noise.** Separate KS=2 beat fused KS=2 by 1.27x at E=32, reproducing to 1% across two
+    re-runs, while E=16 and E=64 showed no such effect. Reproducible + non-monotonic in the obvious axis is the
+    signal that a variable is missing, not that the instrument is flaky — so rather than theorise about waves I
+    computed the one thing the two schedules differ in besides thread count: bytes live at once. A fused launch
+    holds *both* projections' weight streams (2·E·b); two separate launches each hold one (E·b). With L2 = 24 MiB
+    and b = 0.585 MiB, fusion's advantage should end near E ≈ 20 and the penalty band should close near E ≈ 41 —
+    and the measured curve (fused wins at 10 and 16; separate wins at 20, 24, 32; indifferent at 64, 96) falls out
+    of those two numbers with no free parameters fitted to it. Habits. (1) On a non-monotonic result, hunt for the
+    second axis the candidates differ on instead of reaching for noise or wave-parity stories. (2) Keep occupancy
+    and locality as separate conditions in any rule: D8's fill test alone would have chosen fusion at E=32, where
+    it costs 27%. (3) Same root as LESSONS 55 — never reason about a kernel without its working-set size beside
+    it; the first time it corrected a *rate*, this time it corrected a *decision*.
+
 
 
 

@@ -143,31 +143,43 @@ KS_SEP = {
     2:  {1: {1: 8.225, 2: 4.975, 4: 3.525}, 8: {1: 8.975, 2: 5.675, 4: 4.200}, 16: {1: 9.575, 2: 5.875, 4: 4.450}},
     4:  {1: {1: 4.088, 2: 2.537, 4: 1.900}, 8: {1: 4.613, 2: 2.900, 4: 2.225}, 16: {1: 5.013, 2: 3.250, 4: 2.787}},
     10: {1: {1: 1.685, 2: 1.170, 4: 1.375}, 8: {1: 2.000, 2: 1.490, 4: 1.755}, 16: {1: 2.290, 2: 1.890, 4: 2.360}},
+    # E=16..64 measured at rows=1 only, to locate the fusion penalty band (out_ks_grid.txt); asking them for
+    # rows=8/16 raises rather than borrowing a neighbouring row count.
+    16: {1: {1: 1.159, 2: 1.403}},
+    20: {1: {1: 0.980, 2: 1.123}},
+    24: {1: {1: 0.910, 2: 0.952}},
     32: {1: {1: 1.258, 2: 1.005}, 8: {1: 1.594, 2: 1.448}, 16: {1: 1.878, 2: 1.794}},
+    64: {1: {1: 1.284, 2: 1.252}},
     96: {1: {1: 1.249, 2: 1.311}, 8: {1: 1.509, 2: 1.680}, 16: {1: 1.857, 2: 2.122}},
 }
 KS_FUSED = {
     2:  {1: {1: 8.800, 2: 5.850, 4: 4.750}, 8: {1: 9.800, 2: 6.650, 4: 5.350}, 16: {1: 10.500, 2: 6.900, 4: 5.700}},
     4:  {1: {1: 4.500, 2: 3.025, 4: 3.750}, 8: {1: 5.125, 2: 3.625, 4: 4.300}, 16: {1: 5.725, 2: 4.375, 4: 5.725}},
     10: {1: {1: 2.080, 2: 2.370, 4: 2.450}, 8: {1: 2.630, 2: 2.990, 4: 3.370}, 16: {1: 3.370, 2: 3.870, 4: 4.400}},
+    16: {1: {1: 2.856, 2: 2.175}},
+    20: {1: {1: 2.330, 2: 2.325}},
+    24: {1: {1: 2.262, 2: 2.279}},
     32: {1: {1: 2.609, 2: 2.544}, 8: {1: 3.044, 2: 3.241}, 16: {1: 3.775, 2: 3.956}},
+    64: {1: {1: 2.447, 2: 2.538}},
     96: {1: {1: 2.507, 2: 2.481}, 8: {1: 3.050, 2: 3.264}, 16: {1: 3.765, 2: 4.305}},
 }
+DEVICE_L2_MIB = 24.0      # `devinfo` -> global cache (L2): 24.0 MiB
 
 
-def best_launch(E, rows, tn=40, hw_threads=HW_THREADS):
+def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2_mib=DEVICE_L2_MIB):
     """Joint (fusion, split-K) choice: the measured schedule that minimises us per (expert, gate+up pair).
 
-    This is the executable form of D8 - the two levers are two sources of one resource (parallelism), so they are
-    chosen together, not in sequence. Returns (us_per_pair, fused, KS, note).
+    Two conditions, both measured (out_ks_grid.txt):
+      (a) OCCUPANCY - fusion buys concurrency, so it wins big only while the separate launches leave slots empty;
+      (b) CACHE  - a fused launch's weight footprint is the UNION of both projections' streams, so it loses its
+          locality advantage once 2*E*bytes > L2 while a single stream E*bytes still fits (the penalty band, up
+          to 1.27x the wrong way at E=32 here). Above the band for both shapes the levers wash.
+    Pass bytes_per_expert (per single projection, MiB) to apply (b); without it the choice is table-only, which
+    is correct at the measured E values and unguarded between them.
 
-    Refuses to invent: E must be one of the measured expert counts (nearest-below is used and flagged, never
-    interpolated on E, because the cost curve is dominated by grid occupancy which is a step function of waves);
-    rows must be a measured bucket.
+    Returns (us_per_pair, fused, KS, note). Refuses to invent: E uses the nearest measured point below and says
+    so; rows must be a measured bucket for that E.
     """
-    if rows not in (1, 8, 16):
-        raise ValueError(f"rows={rows} is not a measured bucket (1/8/16); above 16 use n_buckets() per D-rule "
-                         "on the rows=16 cost")
     es = sorted(KS_SEP)
     e_used, note = E, ""
     if E not in KS_SEP:
@@ -175,8 +187,19 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS):
             raise ValueError(f"E={E} is below the smallest measured expert count {es[0]}")
         e_used = max(e for e in es if e <= E)
         note = f"E={E} not measured; using nearest measured point below (E={e_used});"
+    if rows not in KS_SEP[e_used]:
+        raise ValueError(f"E={e_used} was measured at rows {sorted(KS_SEP[e_used])}, not rows={rows}; "
+                         "do not borrow a neighbouring row count")
     cands = [(2.0 * v, KS, False) for KS, v in KS_SEP[e_used][rows].items()] \
         + [(v, KS, True) for KS, v in KS_FUSED[e_used][rows].items()]
+    if bytes_per_expert:
+        one, both = e_used * bytes_per_expert, 2.0 * e_used * bytes_per_expert
+        if one <= l2_mib < both:
+            only = [c for c in cands if not c[2]]
+            if only:
+                cands, note = only, note + f" fused excluded: penalty band ({both:.1f} MiB pair > L2 {l2_mib}, single {one:.1f} fits);"
+        elif both > l2_mib:
+            note += f" both shapes exceed L2 ({both:.1f} MiB pair): levers within a few percent;"
     us, KS, fused = min(cands)
     grid = (2 * tn if fused else tn) * KS * 2 * e_used
     note += f" grid {grid} threads ({100.0 * grid / hw_threads:.0f}% of HW)"
@@ -194,6 +217,14 @@ def selftest_launch():
     assert best_launch(2, 1)[1] and best_launch(2, 1)[2] == 4, best_launch(2, 1)      # fused, KS=4
     assert best_launch(4, 1)[1] and best_launch(4, 1)[2] == 2, best_launch(4, 1)      # fused, KS=2
     assert not best_launch(32, 1)[1] and best_launch(32, 1)[2] == 2, best_launch(32, 1)  # separate, KS=2
+    assert best_launch(16, 1)[1], best_launch(16, 1)                                  # fused still wins at E=16
+    assert not best_launch(24, 1)[1], best_launch(24, 1)                              # penalty band by E=24
+    # the cache condition must reproduce the table's choice from bytes alone, at an unmeasured E
+    us_f, fused_f, _, n_f = best_launch(28, 1, bytes_per_expert=0.585)
+    assert not fused_f and "penalty band" in n_f, (us_f, fused_f, n_f)
+    # ...and must NOT exclude fusion where both shapes are cache-cold
+    _, _, _, n_cold = best_launch(64, 1, bytes_per_expert=0.585)
+    assert "penalty band" not in n_cold and "exceed L2" in n_cold, n_cold
     for bad in (0, 1):
         try:
             best_launch(bad, 1)
@@ -201,11 +232,11 @@ def selftest_launch():
         except ValueError:
             pass
     try:
-        best_launch(10, 32)
-        raise AssertionError("rows=32 should be refused; route it through n_buckets() instead")
+        best_launch(64, 8)          # E=64 measured at rows=1 only
+        raise AssertionError("E=64 rows=8 should be refused; it was never measured")
     except ValueError:
         pass
-    us, fused, KS, note = best_launch(24, 8)      # unmeasured E -> nearest below, flagged
+    us, fused, KS, note = best_launch(12, 8)      # unmeasured E -> nearest below, flagged
     assert fused and KS == 1 and "nearest measured point below" in note, (us, fused, KS, note)
     return True
 
@@ -338,6 +369,9 @@ def main():
     for E in sorted(KS_SEP):
         cells = []
         for r in (1, 8, 16):
+            if r not in KS_SEP[E]:
+                cells.append("      not measured")
+                continue
             us, fused, KS, n = best_launch(E, r)
             tag = "~tie" if "INDIFFERENT" in n else ""
             cells.append(f"{us:6.2f} {'fused' if fused else 'sep   '} KS={KS} {tag}")

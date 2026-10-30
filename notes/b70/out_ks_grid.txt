@@ -74,7 +74,46 @@ control. Holding KS fixed makes the total thread-slots equal by construction (se
    combine_both, when the fused schedule still paid two combines, so planners using them overstate B70 fused cost
    by up to 19% at rows=1. Refreshed in plan_decode_cost.py, together with the KS-keyed tables and a chooser.
 
+THE E=32 "ANOMALY" IS NOT AN ANOMALY - it is L2, and the rule needs a footprint term
+-------------------------------------------------------------------------------------
+The E=32 cell where separate beat fused by 1.27x reproduced to within 1% across two independent re-runs (sep
+KS=2 2.006 vs fused KS=2 2.528; sep KS=1 2.504 vs fused KS=1 2.61), so it was real - and E=16 and E=64 did NOT
+show it, which made it non-monotonic in E and immune to any occupancy explanation. Filling the gap (E=16/20/24/64
+measured at rows=1, all bit-exact, anchors 19.1-19.3):
+
+  E    matched-KS fused gain   fused footprint 2*E*0.585 MiB    single-launch footprint E*0.585 MiB
+  10   1.62x  (fused)                  11.7 MiB   < L2                    5.9 MiB
+  16   1.29x  (fused, at KS=2)         18.7 MiB   < L2                   18.8 MiB
+  20   0.84x  (SEPARATE wins)          23.4 MiB  ~= L2 (24 MiB)          11.7 MiB
+  24   0.81x  (SEPARATE wins)          28.1 MiB   > L2                   14.0 MiB
+  32   0.79x  (SEPARATE wins)          37.4 MiB   > L2                   18.8 MiB  <- each stream still fits
+  64   1.05x  (fused, marginally)      74.9 MiB   > L2                   37.4 MiB  <- neither fits
+  96   1.00x  (indifferent)           112.3 MiB   > L2                   56.2 MiB  <- neither fits
+
+One line explains the whole curve: **a fused launch's instantaneous weight footprint is the UNION of both
+projections' streams, while two separate launches each hold one stream.** With L2 = 24 MiB and 0.585 MiB of gate
+trellis per expert here:
+  * 2*E*b <= L2 (E <= ~20): fused enjoys cache reuse over both streams and wins on top of its fill advantage.
+  * E*b <= L2 < 2*E*b (E ~ 20-41): the penalty band. Separate keeps each stream cache-resident while fused
+    thrashes - worth up to 1.27x, and big enough to overturn a fusion decision made on occupancy alone.
+  * E*b > L2 (E > ~41): neither shape is cached, and the levers wash (+-6%) - which is exactly E=64/96.
+
+Restated D8, two conditions instead of one: fuse gate+up when (a) the separate launches do not fill the device -
+the occupancy term, unchanged - AND (b) the fused footprint stays under L2. Inside the penalty band prefer
+separate launches even though fusion would fill better; above the band the choice does not matter. Both terms are
+computable from what the engine already knows (tn, KS, E, bytes per expert, L2 size).
+
+Untested predictions this makes: the band should move with quantization (K=6 at 1.17 MiB/expert puts it at
+E ~ 10-20) and should narrow as rows grows (more compute per byte, less cache leverage). Each is a couple of runs
+of sweep_ks_grid.py.
+
+This is LESSONS 55 (never quote a rate without its working-set size) paying rent a second time: the curve looked
+non-monotonic only because one of the two shapes' footprints was being ignored.
+
 LIMITS OF THIS TABLE
+  * E coverage is now 2, 4, 10, 16, 20, 24, 32, 64, 96. The model tables (KS_SEP / KS_FUSED) carry the
+    2/4/10/32/96 cells over rows 1/8/16; the E=16/20/24/64 cells are rows=1 only and live here, because their
+    purpose was locating the fusion penalty band rather than populating the model.
   * E is experts-in-launch (the grid axis) - what the planners call `picks` when all owned experts run here.
     Fractional ownership means interpolating on E, which the chooser refuses to do silently: nearest measured E,
     flagged.
