@@ -1,0 +1,70 @@
+GLM@3.05 as a CPU home - measured, and a different regime from Qwen3.8
+======================================================================
+Why: the Qwen CPU-home calibration (out_cpu_worker_calib.txt) deliberately refused to lend its per-assignment
+costs to GLM, because GLM's experts are 6x bigger and its shape differs. GLM is also the profile with the largest
+CPU residue in the placement table (172-197 of 288 experts homed to CPU at b>=4), so it was the one measurement
+that could still move a placement verdict.
+
+Method: identical to the Qwen run - notes/bench_cpu_moe.py on real checkpoint tensors, layer 5, uniform-random
+routing, min-of-n after 20 warm-up calls, torch threads pinned to 1 so the kernel's thread argument controls
+parallelism. Two regimes by registered-expert count, since L3 is 64 MiB and one GLM expert block is 9.000 MiB:
+  COLD      --experts 64 (576 MiB >> L3)
+  RESIDENT  --experts 6  (54 MiB  < L3)
+Header printed for this checkpoint: isa avx2=True bw=False vnni=False vbmi=False | group(K)=2 planar(K)=1
+(H=4096-class, moe_intermediate_size 2048, topk 8, n_routed_experts 288.)
+
+us/call and the derived per-assignment cost, COLD regime (the planning regime):
+
+ rows  thr   us/call   us/token   us/assignment   distinct experts   GiB/s
+    1    4    2962.1     2962.1        370.3                7.5       23.89
+    1    8    1822.7     1822.7        227.8                7.5       38.83
+    1   16    1643.3     1643.3        205.4                7.5       43.07
+    2   16    3190.9     1595.5        199.4               14.4       42.69
+    4   16    5765.0     1441.3        180.2               25.7       42.12
+    8   16    9047.8     1131.0        141.4               40.0       41.72
+   16   16   13767.1      860.4        107.6               53.9       36.92
+   8    4   18451.6     2306.4        288.3               40.0       20.46
+  16    4   30536.1     1908.5        238.6               53.9       16.64
+reference single-thread copy of a 3.00 MiB block = 36.7 GB/s read+write.
+
+RESIDENT regime (--experts 6, for contrast): rows=1/16 thr 656.1 us, 82.0 us/assignment, 68.08 GiB/s; rows=16/16
+thr 6505.1 us. Note the distinct-expert count differs (4.7 vs 7.5), so the ratio is not a pure warm/cold
+comparison - read the RATE, which is what the comparison is about.
+
+WHAT IS DIFFERENT FROM QWEN
+
+1. GLM is much closer to bandwidth-bound. Cold rate 43.07 GiB/s (Qwen peaked at 37.9), and residency RAISES the
+   rate to 68.08 GiB/s (Qwen's did not rise at all - 34.8 warm vs 36.8 cold). So for GLM, cache residency is
+   worth something; for Qwen it was not, which is what "compute-bound" meant there.
+2. Thread returns saturate early: 4 -> 8 -> 16 threads buys 2962 -> 1822 -> 1643 us, i.e. 1.80x total (Qwen:
+   1242 -> 656 -> 392 = 3.17x). Past ~8 threads the CPU home adds little for GLM - consistent with hitting the
+   DRAM roof rather than the arithmetic roof. Planning consequence: for GLM, don't bid 16 cores at the CPU home
+   expecting Qwen-like scaling; use the 8-thread column.
+3. Per-assignment cost is 5.2x Qwen's at rows=1 (205.4 vs 39.2 us) for 6.1x the bytes per expert - slightly
+   sub-linear, i.e. the bigger experts are marginally more efficient per byte, as point 1 implies.
+
+DID THE OLD BYTE MODEL GET GLM RIGHT? Yes - which is why the placement table barely moved.
+    model term for one 9.000 MiB expert at CPU_RATE = 47.4 GiB/s:
+        9 * 1048576 / (47.4 * 1000) = 199.0 us
+    measured, 16 threads, rows=1:                              205.4 us  (+3.2%)
+So the byte-rate model that was badly wrong for Qwen (units and regime) was accurate to a few percent for GLM,
+because GLM really is near the bandwidth roof. Re-running plan_parent_budget.py with the measured per-assignment
+table changes GLM walls by <= 3% at b=1 (715 -> 738, 571 -> 589, 203 -> 203 us) and not at all at b=4/8 (2704,
+2159, 695, 4930, 3936, 1266 us identical), where the byte floor is the larger term in max(). No verdict changed.
+That is a satisfying outcome rather than a disappointing one: it means the inherited GLM rows can be trusted for
+the CPU leg, and the residual uncertainty in that profile is the 3090 parent leg (T_par swept 150/250/400 us
+because this box has no CUDA device to measure), not the CPU home.
+
+Planner wiring: CPU_ASGN_US is now keyed per profile ({"Qwen3.8@2.68": ..., "GLM@3.05": ...}) with a thread
+dimension, CPU_RATE_MEASURED per profile, and the UNCALIBRATED label path kept as a safety net for any future
+profile that has not been benched.
+
+Reproduce:
+    source notes/env.sh
+    G=/home/treo/projects/vendor/tabbyAPI/models/GLM-5.3-Flash-exl3@3.05bpw
+    python3 notes/bench_cpu_moe.py "$G" --layer 5 --experts 64 --rows 1,2,4,8,16 --threads 4,8,16 --iters 30
+    python3 notes/bench_cpu_moe.py "$G" --layer 5 --experts 6  --rows 1,2,4,8,16 --threads 4,8,16 --iters 30
+    python3 notes/b70/plan_parent_budget.py
+Note: bench_cpu_moe.py needed a one-line fix to read GLM's config (n_routed_experts, not num_experts); it now
+accepts either spelling and asserts if neither is present. There is still no --warm flag (the docstring mentions
+one that does not exist) - residency is produced by registering few enough experts to fit L3.

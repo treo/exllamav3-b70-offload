@@ -72,8 +72,9 @@ MODEL CHANGE ADOPTED (see plan_parent_budget.py): the CPU-home leg is booked as
      T_Sc(b, thr) = assignments x c(b, thr)          [ (token, expert) pairs x per-assignment cost ]
 
 with c() interpolated from the measured table above rather than derived from bytes / CPU_RATE, and the byte rate
-kept only as a floor (the max of the two). Profiles never benchmarked as a CPU home (GLM) keep the old byte model
-and are printed as UNCALIBRATED rather than being lent Qwen's numbers.
+kept only as a floor (the max of the two). GLM was initially left on the byte model and printed UNCALIBRATED,
+rather than being lent Qwen's numbers; it has since been measured in its own right (`out_glm_cpu_calib.txt`) and
+the tables are now keyed per profile.
 
 CAVEATS, stated so the numbers are not over-read
   * Uniform-random routing. Real routing is skewed, which REDUCES distinct experts and so makes the parent
@@ -96,12 +97,15 @@ these configurations S_c is not the binding leg - the parent leg (T_parent + S_g
 1.9x error in a non-binding term is invisible in the max().
 
 So the honest summary is: the input was wrong, the units were wrong, and the answer did not move - because the
-decision was made elsewhere. Where this correction WILL bite is any configuration that leans on the CPU home
-heavily: the profile with the largest CPU residue in the table is GLM (172-197 of 288 experts homed to CPU at
-b>=4, walls 1.3-5.4 ms/layer), and GLM has never been benchmarked as a CPU worker, so those rows are explicitly
-labelled UNCALIBRATED and were deliberately left on the old byte model rather than being lent Qwen's per-assignment
-costs. Calibrating GLM's shape (9 MiB/expert, topk=8, different K) is the next measurement that could change a
-placement verdict.
+decision was made elsewhere. Where this correction WOULD have bitten is any configuration leaning hard on the CPU
+home, and the profile with the largest CPU residue in the table is GLM (172-197 of 288 experts homed to CPU at
+b>=4, walls 1.3-5.4 ms/layer). I refused to lend Qwen's numbers to it, measured it separately
+(`out_glm_cpu_calib.txt`), and the prediction that it would matter turned out FALSE: GLM is near the bandwidth
+roof, so the byte model that was wrong in kind for Qwen was accurate to +3.2% for GLM (predicted 199.0 vs
+measured 205.4 us per assignment), GLM's walls moved <=3% at b=1 and not at all at b=4/8, and no verdict changed.
+Stating the miss explicitly: I wrote "this is the next measurement that could change a placement verdict" and it
+did not - which is the correct kind of outcome for a pre-registered check, and the reason the GLM rows can be
+trusted for the CPU leg.
 
 STALE ITEM FOUND WHILE DOING THIS, not yet fixed: rate_b = 292.0 is the B70 byte rate and dates from the pre-rev-J
 analysis. The adopted kernel measures 437-494 GB/s effective at rows=1-4 and 314 GB/s at rows=16 (out_revl.txt,

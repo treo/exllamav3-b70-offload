@@ -42,7 +42,7 @@ MODELS = {
                          union={1: 1.0, 2: 1.99, 4: 3.88, 8: 7.27, 16: 13.12, 32: 21.91}),
     "GLM@3.05": dict(dirname="GLM-5.3-Flash-exl3@3.05bpw", prof="3.05bpw",
                      E=288, eb=9.000, layers=42, topk=8, t0=None, rate_b=132.0, rate_g=936.0,
-                     calib=False,     # never benchmarked as a CPU worker: byte model retained, labelled below
+                     calib=True,      # measured as a CPU home too (out_glm_cpu_calib.txt) - see CPU_ASGN_US
                      union={1: 1.0, 2: 1.98, 4: 3.78, 8: 6.89, 16: 12.01, 32: 19.14}),
 }
 ROOT = "/home/treo/projects/vendor/tabbyAPI/models"
@@ -57,38 +57,50 @@ MIBS_PER_US = 1048.576 / 1000.0        # MiB served per us at 1 GB/s
 # experts, by kernel thread count. Replaces the old term(bytes, CPU_RATE) leg, which assumed 47.4 GiB/s and a
 # byte-bound regime that measurement says the worker never operates in.
 CPU_ASGN_US = {
-    4:  {1: 124.2, 2: 119.5, 4: 113.0, 8: 102.5, 16: 83.9},
-    8:  {1:  65.6, 2:  62.3, 4:  58.6, 8:  52.4, 16: 43.1},
-    16: {1:  39.2, 2:  35.1, 4:  32.0, 8:  28.4, 16: 23.0},
+    # Qwen3.8@2.68 (1.465 MiB/expert, topk 10, K=3): compute-bound.
+    "Qwen3.8@2.68": {
+        4:  {1: 124.2, 2: 119.5, 4: 113.0, 8: 102.5, 16: 83.9},
+        8:  {1:  65.6, 2:  62.3, 4:  58.6, 8:  52.4, 16: 43.1},
+        16: {1:  39.2, 2:  35.1, 4:  32.0, 8:  28.4, 16: 23.0},
+    },
+    # GLM@3.05 (9 MiB/expert, topk 8, moe_intermediate 2048): much closer to bandwidth-bound - 4 -> 8 -> 16
+    # threads buys only 1.8x (Qwen buys 3.2x), i.e. it hits the DRAM roof, and warm residency lifts the rate
+    # 1.6x where Qwen's does not move at all.
+    "GLM@3.05": {
+        4:  {1: 370.3, 2: 362.1, 4: 330.7, 8: 288.3, 16: 238.6},
+        8:  {1: 227.8, 2: 226.1, 4: 217.6, 8: 156.2, 16: 130.1},
+        16: {1: 205.4, 2: 199.4, 4: 180.2, 8: 141.4, 16: 107.6},
+    },
 }
-CPU_RATE_MEASURED = 37.9      # best observed GiB/s on expert bytes (cold, rows=2, 16 threads)
+CPU_RATE_MEASURED = {"Qwen3.8@2.68": 37.9, "GLM@3.05": 43.1}   # best observed GiB/s, cold
 CPU_THR = int(os.environ.get("CPU_THR", "16"))   # kernel threads the CPU worker is allowed
 
 
-def cpu_asgn_us(b, thr=16):
+def cpu_asgn_us(prof, b, thr=CPU_THR):
     """Measured us/assignment at batch b, log-interpolated in b between the measured points, and between the
     nearest measured thread counts. Extrapolation beyond rows=16 is refused rather than invented: at large b the
     cost per assignment should flatten towards the arithmetic roofline, but that has not been measured here."""
+    tbl_p = CPU_ASGN_US[prof]
     def interp(tbl, x):
         ks = sorted(tbl)
         if x <= ks[0]:
-            return tbl[ks[0]] * (x / ks[0]) ** 0.0          # below the smallest point: use it (conservative)
+            return tbl[ks[0]]
         if x > ks[-1]:
-            raise ValueError(f"batch {x} exceeds the measured range (max {ks[-1]}); extend out_cpu_worker_calib.txt")
+            raise ValueError(f"batch {x} exceeds the measured range (max {ks[-1]}); extend the cpu-home sweep")
         lo = max(k for k in ks if k <= x); hi = min(k for k in ks if k >= x)
         if lo == hi:
             return tbl[lo]
         w = (math.log(x) - math.log(lo)) / (math.log(hi) - math.log(lo))
         return tbl[lo] + w * (tbl[hi] - tbl[lo])
-    ts = sorted(CPU_ASGN_US)
-    if thr in CPU_ASGN_US:
-        return interp(CPU_ASGN_US[thr], b)
+    ts = sorted(tbl_p)
+    if thr in tbl_p:
+        return interp(tbl_p[thr], b)
     lo = max(t for t in ts if t <= thr) if min(ts) <= thr else ts[0]
     hi = min(t for t in ts if t >= thr) if max(ts) >= thr else ts[-1]
     if lo == hi:
-        return interp(CPU_ASGN_US[lo], b)
+        return interp(tbl_p[lo], b)
     w = (math.log(thr) - math.log(lo)) / (math.log(hi) - math.log(lo))
-    return interp(CPU_ASGN_US[lo], b) * (1 - w) + interp(CPU_ASGN_US[hi], b) * w
+    return interp(tbl_p[lo], b) * (1 - w) + interp(tbl_p[hi], b) * w
 
 
 def selftest():
@@ -150,7 +162,8 @@ def state_budget(cfg):
                 tok_kib=(n_full * kv_tok + n_mla * mla_tok) / 1024)
 
 
-def policy(lpt, counts, E, eb, cap_g, cap_b, rate_g, rate_b, tparent, topk, scale=1.0, b=None, thr=CPU_THR):
+def policy(lpt, counts, E, eb, cap_g, cap_b, rate_g, rate_b, tparent, topk, scale=1.0, b=None, thr=CPU_THR,
+           prof=None, rate_floor=37.9):
     """Assign every expert to one home; scale = distinct-experts multiplier for the batch.
 
     `b` is the batch (rows). When it is given, the CPU home is booked with the measured per-assignment cost
@@ -165,7 +178,7 @@ def policy(lpt, counts, E, eb, cap_g, cap_b, rate_g, rate_b, tparent, topk, scal
     def leg_c(us_bytes, asgn):
         if b is None:
             return us_bytes
-        return max(asgn * cpu_asgn_us(b, thr), us_bytes)
+        return max(asgn * cpu_asgn_us(prof, b, thr), us_bytes)
 
     bg = bb = bc = 0.0
     ac = 0.0
@@ -227,8 +240,9 @@ def main():
     print("\n" + "=" * 104)
     print("PLACEMENT: P_order (hottest->3090 first, the plan today) vs P_lpt (hot list, each expert to the")
     print("least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/rate_b, CPU leg)")
-    print(f"  CPU home (S_c): measured per-assignment cost at {CPU_THR} threads (out_cpu_worker_calib.txt)"
-          f" when the profile is calibrated; profiles without t0 fall back to bytes/{CPU_RATE} GiB/s, labelled")
+    print(f"  CPU home (S_c): measured per-assignment cost at {CPU_THR} threads, per profile"
+          f" (out_cpu_worker_calib.txt, out_glm_cpu_calib.txt); any profile without a measured table falls back"
+          f" to bytes/{CPU_RATE} GiB/s and says so")
     print(f"  {'model':13s} {'rows':>5s} {'T_par':>6s} {'S_g slots':>10s} {'P_order':>28s} {'P_lpt':>28s}  verdict")
     for name, m in MODELS.items():
         cnt = counts_for(m["prof"], m["E"])
@@ -239,14 +253,15 @@ def main():
                 for slots_g in (5.0, 30.0, 120.0):
                     cg = slots_g * m["eb"]
                     bb_ = b if m.get("calib") else None      # per-assignment cost measured for this profile only
-                    wo, go, so = policy(False, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], m["union"][b], b=bb_)
-                    wl, gl, sl = policy(True, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], m["union"][b], b=bb_)
+                    wo, go, so = policy(False, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], m["union"][b], b=bb_, prof=name, rate_floor=CPU_RATE_MEASURED.get(name, CPU_RATE))
+                    wl, gl, sl = policy(True, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], m["union"][b], b=bb_, prof=name, rate_floor=CPU_RATE_MEASURED.get(name, CPU_RATE))
                     f = lambda u, s: f"{u:6.0f} ({s[0]:3d}/{s[1]:3d}/{s[2]:3d})"
                     v = "lpt" if wl < wo - 1 else ("tie" if abs(wl - wo) <= 1 else "order")
                     print(f"  {name:13s} {b:5d} {tpar:6.0f} {slots_g:10.0f} {f(wo, so):>28s} {f(wl, sl):>28s}  {v}")
         print(f"  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through "
               f"the pick count feeding each home; "
-              f"{'CPU leg measured per-assignment' if m.get('calib') else 'CPU leg = bytes/' + str(CPU_RATE) + ' GiB/s (UNCALIBRATED)'})")
+              f"{'CPU home measured per-assignment' if m.get('calib') else 'CPU home = bytes/' + str(CPU_RATE) + ' GiB/s (UNCALIBRATED)'}"
+              f"; T_par swept because this box cannot measure the 3090 parent)")
 
 
 if __name__ == "__main__":

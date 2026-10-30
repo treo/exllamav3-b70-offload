@@ -47,7 +47,8 @@ def main():
     tc = cfg.get("text_config", cfg)
     H = tc["hidden_size"]
     I = tc["moe_intermediate_size"]
-    E_all = tc["num_experts"]
+    E_all = tc.get("num_experts") or tc.get("n_routed_experts")   # Qwen spells it one way, GLM the other
+    assert E_all, f"config has neither num_experts nor n_routed_experts: {sorted(tc)[:12]}"
     topk = a.topk or tc["num_experts_per_tok"]
     E = min(a.experts, E_all)
 

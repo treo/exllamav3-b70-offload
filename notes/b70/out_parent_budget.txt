@@ -37,7 +37,7 @@ GLM@3.05:  checkpoint 116.56 GiB, 45 layers, 288 experts/layer, expert block 9.0
 ========================================================================================================
 PLACEMENT: P_order (hottest->3090 first, the plan today) vs P_lpt (hot list, each expert to the
 least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/rate_b, CPU leg)
-  CPU home (S_c): measured per-assignment cost at 16 threads (out_cpu_worker_calib.txt) when the profile is calibrated; profiles without t0 fall back to bytes/47.4 GiB/s, labelled
+  CPU home (S_c): measured per-assignment cost at 16 threads, per profile (out_cpu_worker_calib.txt, out_glm_cpu_calib.txt); any profile without a measured table falls back to bytes/47.4 GiB/s and says so
   model          rows  T_par  S_g slots                      P_order                        P_lpt  verdict
   Qwen3.8@2.68      1    250          5            251 (  5/464/ 43)            251 (  5/446/ 61)  tie
   Qwen3.8@2.68      1    250         30            253 ( 29/464/ 19)            253 ( 29/425/ 58)  tie
@@ -48,32 +48,32 @@ least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/
   Qwen3.8@2.68      8    250          5            356 (  5/464/ 43)            317 (  5/436/ 71)  lpt
   Qwen3.8@2.68      8    250         30            314 ( 29/464/ 19)            278 ( 29/415/ 68)  lpt
   Qwen3.8@2.68      8    250        120            304 (119/393/  0)            299 (119/338/ 55)  lpt
-  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU leg measured per-assignment)
-  GLM@3.05          1    150          5            715 (  5/ 86/197)            782 (  5/ 86/197)  order
-  GLM@3.05          1    150         30            571 ( 30/ 86/172)            623 ( 30/ 86/172)  order
-  GLM@3.05          1    150        120            203 (120/ 86/ 82)            229 (120/ 86/ 82)  order
+  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU home measured per-assignment; T_par swept because this box cannot measure the 3090 parent)
+  GLM@3.05          1    150          5            738 (  5/ 86/197)            804 (  5/ 86/197)  order
+  GLM@3.05          1    150         30            589 ( 30/ 86/172)            641 ( 30/ 86/172)  order
+  GLM@3.05          1    150        120            203 (120/ 86/ 82)            235 (120/ 86/ 82)  order
   GLM@3.05          4    150          5           2704 (  5/ 86/197)           2955 (  5/ 86/197)  order
   GLM@3.05          4    150         30           2159 ( 30/ 86/172)           2355 ( 30/ 86/172)  order
   GLM@3.05          4    150        120            695 (120/ 86/ 82)            865 (120/ 86/ 82)  order
   GLM@3.05          8    150          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
   GLM@3.05          8    150         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
   GLM@3.05          8    150        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  GLM@3.05          1    250          5            715 (  5/ 86/197)            782 (  5/ 86/197)  order
-  GLM@3.05          1    250         30            571 ( 30/ 86/172)            623 ( 30/ 86/172)  order
-  GLM@3.05          1    250        120            303 (120/ 86/ 82)            299 (120/ 86/ 82)  lpt
+  GLM@3.05          1    250          5            738 (  5/ 86/197)            804 (  5/ 86/197)  order
+  GLM@3.05          1    250         30            589 ( 30/ 86/172)            641 ( 30/ 86/172)  order
+  GLM@3.05          1    250        120            303 (120/ 86/ 82)            300 (120/ 86/ 82)  lpt
   GLM@3.05          4    250          5           2704 (  5/ 86/197)           2955 (  5/ 86/197)  order
   GLM@3.05          4    250         30           2159 ( 30/ 86/172)           2355 ( 30/ 86/172)  order
   GLM@3.05          4    250        120            695 (120/ 86/ 82)            865 (120/ 86/ 82)  order
   GLM@3.05          8    250          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
   GLM@3.05          8    250         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
   GLM@3.05          8    250        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  GLM@3.05          1    400          5            715 (  5/ 86/197)            782 (  5/ 86/197)  order
-  GLM@3.05          1    400         30            571 ( 30/ 86/172)            623 ( 30/ 86/172)  order
-  GLM@3.05          1    400        120            453 (120/ 86/ 82)            449 (120/ 86/ 82)  lpt
+  GLM@3.05          1    400          5            738 (  5/ 86/197)            804 (  5/ 86/197)  order
+  GLM@3.05          1    400         30            589 ( 30/ 86/172)            641 ( 30/ 86/172)  order
+  GLM@3.05          1    400        120            453 (120/ 86/ 82)            450 (120/ 86/ 82)  lpt
   GLM@3.05          4    400          5           2704 (  5/ 86/197)           2955 (  5/ 86/197)  order
   GLM@3.05          4    400         30           2159 ( 30/ 86/172)           2355 ( 30/ 86/172)  order
   GLM@3.05          4    400        120            695 (120/ 86/ 82)            865 (120/ 86/ 82)  order
   GLM@3.05          8    400          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
   GLM@3.05          8    400         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
   GLM@3.05          8    400        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU leg = bytes/47.4 GiB/s (UNCALIBRATED))
+  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU home measured per-assignment; T_par swept because this box cannot measure the 3090 parent)
