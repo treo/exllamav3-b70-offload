@@ -142,7 +142,14 @@ GATE_TILES_N = {"Qwen3.8": 40}
 KS_SEP = {
     2:  {1: {1: 8.225, 2: 4.975, 4: 3.525}, 8: {1: 8.975, 2: 5.675, 4: 4.200}, 16: {1: 9.575, 2: 5.875, 4: 4.450}},
     4:  {1: {1: 4.088, 2: 2.537, 4: 1.900}, 8: {1: 4.613, 2: 2.900, 4: 2.225}, 16: {1: 5.013, 2: 3.250, 4: 2.787}},
+    # E=8/12/48/80 added to fill the ladder (out_ladder_fill.txt): between the original rungs, 91% of unmeasured
+    # cells had brackets recommending different schedules, which is the same as saying there was no defensible
+    # rule. Rows 2/4 are still absent everywhere - they were never measured at any E.
+    8:  {1: {1: 2.125, 2: 1.369, 4: 1.731, 8: 1.700}, 8: {1: 2.450, 2: 1.712, 4: 2.094, 8: 2.231},
+         16: {1: 2.750, 2: 2.088, 4: 2.750, 8: 3.031}},
     10: {1: {1: 1.685, 2: 1.170, 4: 1.375}, 8: {1: 2.000, 2: 1.490, 4: 1.755, 8: 2.055}, 16: {1: 2.290, 2: 1.890, 4: 2.360, 8: 3.005}},
+    12: {1: {1: 1.438, 2: 1.067, 4: 1.142, 8: 1.300}, 8: {1: 1.721, 2: 1.342, 4: 1.538, 8: 1.829},
+         16: {1: 1.992, 2: 1.771, 4: 2.058, 8: 2.604}},
     # E=16..64 rows=1 located the fusion penalty band (out_ks_grid.txt); rows=8/16 for the same E values were
     # measured to test whether that band depends on rows at all (out_fusion_rows.txt). Cells from both runs are
     # kept per-run as printed - the two runs of the SAME cell agree within 1.7%, which is why merging them is
@@ -155,14 +162,22 @@ KS_SEP = {
          16: {1: 1.496, 2: 1.696, 4: 2.052, 8: 2.977}},
     32: {1: {1: 1.258, 2: 1.005}, 8: {1: 1.594, 2: 1.448, 4: 1.502, 8: 2.086},
          16: {1: 1.878, 2: 1.794, 4: 2.220, 8: 3.311}},
+    48: {1: {1: 1.129, 2: 1.091, 4: 1.182, 8: 1.325}, 8: {1: 1.321, 2: 1.414, 4: 1.806, 8: 2.460},
+         16: {1: 1.669, 2: 1.880, 4: 2.510, 8: 4.005}},
     64: {1: {1: 1.284, 2: 1.252}, 8: {1: 1.530, 2: 1.622, 4: 1.948, 8: 2.565},
          16: {1: 1.873, 2: 2.090, 4: 2.667, 8: 4.009}},
+    80: {1: {1: 1.384, 2: 1.329, 4: 1.364, 8: 1.396}, 8: {1: 1.631, 2: 1.726, 4: 1.966, 8: 2.611},
+         16: {1: 2.113, 2: 2.125, 4: 2.681, 8: 3.926}},
     96: {1: {1: 1.249, 2: 1.311}, 8: {1: 1.509, 2: 1.680}, 16: {1: 1.857, 2: 2.122}},
 }
 KS_FUSED = {
     2:  {1: {1: 8.800, 2: 5.850, 4: 4.750}, 8: {1: 9.800, 2: 6.650, 4: 5.350}, 16: {1: 10.500, 2: 6.900, 4: 5.700}},
     4:  {1: {1: 4.500, 2: 3.025, 4: 3.750}, 8: {1: 5.125, 2: 3.625, 4: 4.300}, 16: {1: 5.725, 2: 4.375, 4: 5.725}},
+    8:  {1: {1: 2.475, 2: 3.025, 4: 2.638, 8: 2.725}, 8: {1: 2.975, 2: 3.663, 4: 3.312, 8: 3.712},
+         16: {1: 3.638, 2: 4.438, 4: 4.362, 8: 5.775}},
     10: {1: {1: 2.080, 2: 2.370, 4: 2.450}, 8: {1: 2.630, 2: 2.990, 4: 3.370, 8: 3.820}, 16: {1: 3.370, 2: 3.870, 4: 4.400, 8: 5.530}},
+    12: {1: {1: 1.908, 2: 1.992, 4: 2.108, 8: 2.358}, 8: {1: 2.408, 2: 2.625, 4: 2.975, 8: 3.625},
+         16: {1: 3.033, 2: 3.450, 4: 3.958, 8: 5.400}},
     16: {1: {1: 2.856, 2: 2.175}, 8: {1: 3.263, 2: 2.925, 4: 3.256, 8: 4.050},
          16: {1: 3.862, 2: 3.606, 4: 4.219, 8: 6.812}},
     20: {1: {1: 2.330, 2: 2.325}, 8: {1: 2.920, 2: 3.035, 4: 3.395, 8: 4.365},
@@ -171,8 +186,12 @@ KS_FUSED = {
          16: {1: 3.325, 2: 3.742, 4: 5.029, 8: 8.463}},
     32: {1: {1: 2.609, 2: 2.544}, 8: {1: 3.044, 2: 3.241, 4: 3.919, 8: 5.056},
          16: {1: 3.775, 2: 3.956, 4: 5.166, 8: 8.894}},
+    48: {1: {1: 2.527, 2: 2.623, 4: 2.750, 8: 2.840}, 8: {1: 3.215, 2: 3.419, 4: 3.973, 8: 5.452},
+         16: {1: 3.867, 2: 4.235, 4: 5.702, 8: 9.015}},
     64: {1: {1: 2.447, 2: 2.538}, 8: {1: 2.939, 2: 3.263, 4: 4.050, 8: 5.583},
          16: {1: 3.578, 2: 4.211, 4: 5.875, 8: 8.969}},
+    80: {1: {1: 2.581, 2: 2.534, 4: 2.625, 8: 2.714}, 8: {1: 3.058, 2: 3.241, 4: 4.055, 8: 5.716},
+         16: {1: 3.758, 2: 4.240, 4: 5.894, 8: 8.904}},
     96: {1: {1: 2.507, 2: 2.481}, 8: {1: 3.050, 2: 3.264}, 16: {1: 3.765, 2: 4.305}},
 }
 DEVICE_L2_MIB = 24.0      # `devinfo` -> global cache (L2): 24.0 MiB
@@ -190,42 +209,68 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2
     Pass bytes_per_expert (per single projection, MiB) to apply (b); without it the choice is table-only, which
     is correct at the measured E values and unguarded between them.
 
-    Returns (us_per_pair, fused, KS, note). Refuses to invent: E uses the nearest measured point below and says
-    so; rows must be a measured bucket for that E.
+    Returns (us_per_pair, fused, KS, note). Refuses to invent: `rows` must be a measured bucket; an unmeasured E
+    is BRACKETED by the two measured E values around it, and the bracket must agree - see the P4 rule below.
     """
     es = sorted(KS_SEP)
-    e_used, note = E, ""
-    if E not in KS_SEP:
+
+    def _at(e_used):
+        """Best measured (us_per_pair, KS, fused) at one measured E, with that E's own cache arithmetic."""
+        if rows not in KS_SEP[e_used]:
+            raise ValueError(f"E={e_used} was measured at rows {sorted(KS_SEP[e_used])}, not rows={rows}; "
+                             "do not borrow a neighbouring row count")
+        c = [(2.0 * v, KS, False) for KS, v in KS_SEP[e_used][rows].items()] \
+            + [(v, KS, True) for KS, v in KS_FUSED[e_used][rows].items()]
+        w = ""
+        if bytes_per_expert:
+            one, both = e_used * bytes_per_expert, 2.0 * e_used * bytes_per_expert
+            if one <= l2_mib < both:
+                w += (f"; cache warning: fused footprint {both:.1f} MiB exceeds L2 {l2_mib:.0f} while one stream "
+                      f"({one:.1f} MiB) still fits - fusion is penalised in this band at K=3/K=6, but the sign "
+                      f"near the edges is not predictable from bytes alone")
+                if enforce_cache_rule:
+                    only = [x for x in c if not x[2]]
+                    if only:
+                        c = only
+                        w += "; EXCLUDED fused shapes (enforce_cache_rule=True)"
+            elif both > l2_mib:
+                w += f" both shapes exceed L2 ({both:.1f} MiB pair): levers within a few percent;"
+        return min(c), w
+
+    # P4 (was an open planning decision): how to price an E that was never measured. The old rule quietly used
+    # the nearest point BELOW, which biases toward fusing - the wrong direction, because the fusion PENALTY grows
+    # with E (2*E*bytes against a 24 MiB L2) while the fusion GAIN shrinks with it, and the measured asymmetry is
+    # lopsided: a missed gain costs up to 1.85x less than an incurred penalty (0.76x at E=32 rows=1).
+    # New rule: evaluate both bracketing measured points. Agree -> use it, say so. Disagree -> take the larger-E
+    # recommendation (penalty-averse) and name the disagreement so the caller can see it is an interpolation.
+    if E in KS_SEP:
+        (us, KS, fused), note = _at(E)
+        e_ref = E
+    else:
         if E < es[0]:
             raise ValueError(f"E={E} is below the smallest measured expert count {es[0]}")
-        e_used = max(e for e in es if e <= E)
-        note = f"E={E} not measured; using nearest measured point below (E={e_used})"
-    if rows not in KS_SEP[e_used]:
-        raise ValueError(f"E={e_used} was measured at rows {sorted(KS_SEP[e_used])}, not rows={rows}; "
-                         "do not borrow a neighbouring row count")
-    cands = [(2.0 * v, KS, False) for KS, v in KS_SEP[e_used][rows].items()] \
-        + [(v, KS, True) for KS, v in KS_FUSED[e_used][rows].items()]
-    if bytes_per_expert:
-        one, both = e_used * bytes_per_expert, 2.0 * e_used * bytes_per_expert
-        if one <= l2_mib < both:
-            # Warn, do not exclude. The band is real at K=3 (measured: fused up to 1.27x worse in it), and it
-            # gets deeper as bits per weight grow (K=6: 1.6-1.9x, out_fusion_penalty_k.txt) - but it does NOT
-            # predict the sign near the edges: K=2 at E=32 sits in the band by this arithmetic and fusion still
-            # WON there by 1.32x. So the byte test is a flag for the caller, and only `enforce_cache_rule` (which
-            # should be set only where a measurement backs it) drops fused candidates.
-            note += (f"; cache warning: fused footprint {both:.1f} MiB exceeds L2 {l2_mib:.0f} while one stream "
-                     f"({one:.1f} MiB) still fits - fusion is penalised in this band at K=3/K=6, but the sign "
-                     f"near the edges is not predictable from bytes alone")
-            if enforce_cache_rule:
-                only = [c for c in cands if not c[2]]
-                if only:
-                    cands = only
-                    note += "; EXCLUDED fused shapes (enforce_cache_rule=True)"
-        elif both > l2_mib:
-            note += f" both shapes exceed L2 ({both:.1f} MiB pair): levers within a few percent;"
-    us, KS, fused = min(cands)
-    grid = (2 * tn if fused else tn) * KS * 2 * e_used
+        e_lo = max(e for e in es if e <= E)
+        e_hi = min((e for e in es if e >= E), default=None)
+        e_ref = e_lo
+        lo, wlo = _at(e_lo)
+        if e_hi is None or e_hi == e_lo:
+            (us, KS, fused), note = lo, f"E={E} above the measured ladder; held at E={e_lo}" + wlo
+        else:
+            hi, whi = _at(e_hi)
+            if (lo[1], lo[2]) == (hi[1], hi[2]):
+                (us, KS, fused), note = lo, (f"E={E} bracketed by measured E={e_lo}/{e_hi}, which agree "
+                                             f"({'fused' if lo[2] else 'separate'} KS={lo[1]})") + wlo
+            else:
+                (us, KS, fused) = hi
+                e_ref = e_hi      # the grid figure must describe the rung actually taken, not the lower one
+                note = (f"E={E} bracketed by measured E={e_lo}/{e_hi} which DISAGREE "
+                        f"(E={e_lo}: {'fused' if lo[2] else 'separate'} KS={lo[1]} at {lo[0]:.2f} us; "
+                        f"E={e_hi}: {'fused' if hi[2] else 'separate'} KS={hi[1]} at {hi[0]:.2f} us); "
+                        f"took the larger-E choice, which is penalty-averse") + whi
+    grid = (2 * tn if fused else tn) * KS * 2 * e_ref
     note += f" grid {grid} threads ({100.0 * grid / hw_threads:.0f}% of HW)"
+    cands = [(2.0 * v, k, False) for k, v in KS_SEP[e_ref][rows].items()] \
+        + [(v, k, True) for k, v in KS_FUSED[e_ref][rows].items()]
     alt = sorted(c for c in cands if c[0] > us)
     if alt and (alt[0][0] - us) / us < 0.03:
         a = alt[0]
@@ -274,8 +319,22 @@ def selftest_launch():
     assert "INDIFFERENT" not in note64, note64
     us16, fused16, ks16, note16 = best_launch(16, 8)
     assert not fused16 and ks16 == 1 and "INDIFFERENT" in note16, (us16, fused16, ks16, note16)
-    us, fused, KS, note = best_launch(12, 8)      # unmeasured E -> nearest below, flagged
-    assert fused and KS == 1 and "nearest measured point below" in note, (us, fused, KS, note)
+    us, fused, KS, note = best_launch(14, 8)      # unmeasured E, bracketed by the measured E=12 and E=16
+    # E=12 (added by out_ladder_fill.txt) says fused KS=1 at 2.408 us; E=16 says separate KS=1 at 2.900. The P4
+    # rule must take the LARGER-E recommendation and say so. That this assertion had to flip is the point: the
+    # old nearest-below rule returned whatever the lower rung said, silently.
+    assert not fused and KS == 1 and "DISAGREE" in note and "penalty-averse" in note, (us, fused, KS, note)
+    assert "grid 1280" in note, note              # 40 tiles x KS 1 x 2 x E=16: the rung actually taken
+    _u, _f, _k, _n = best_launch(3, 1)            # brackets E=2/E=4: both fuse, but at KS=4 vs KS=2 -> disagree
+    assert _f and _k == 2 and "DISAGREE" in _n, (_u, _f, _k, _n)
+    _u, _f, _k, _n = best_launch(9, 1)            # brackets E=8/E=10: fused KS=1 at both -> agree, and says so
+    assert _f and _k == 1 and "which agree" in _n, (_u, _f, _k, _n)
+    # Bracket disagreement, measured over every unmeasured E in 2..99 at rows 1/8/16: 243 of 267 cells (91%) before
+    # the ladder was filled, 165 of 255 (65%) after adding E=8/12/48/80. Interpolating between rungs is only
+    # defensible once the rungs are close, and the remaining 65% is the honest statement of how coarse the ladder
+    # still is - which is why the default is penalty-averse rather than optimistic.
+    _u, _f, _k, _n = best_launch(200, 8)          # above the ladder: no upper bracket exists, hold and say so
+    assert "above the measured ladder" in _n, _n
     return True
 
 
@@ -406,9 +465,18 @@ def layer_us(picks, rows, scale=1.0, kernel=None, K=3):
     ks = fams if kernel is None else (kernel,)
     best = None
     for k in ks:
-        t = sum(per_proj_us(rows, k, p, K) for p in PROJS) * picks * scale
+        try:
+            t = sum(per_proj_us(rows, k, p, K) for p in PROJS) * picks * scale
+        except ValueError:
+            # The family cannot serve this shape at all - dp4a above 16 rows (never measured) or a gather-family
+            # recipe above K_LIMIT_GATHER (its unpack needs 3K+16 <= 32 bits). Skipping is the right response:
+            # the alternatives are measured, and the old behaviour of letting the exception escape turned an
+            # infeasible candidate into a crash the first time a corrected union pushed rows/expert past 16.
+            continue
         if best is None or t < best[0]:
             best = (t, k)
+    if best is None:
+        raise ValueError(f"no measured kernel serves rows={rows} K={K}: {ks}")
     return best
 
 

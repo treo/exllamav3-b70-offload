@@ -34,6 +34,7 @@ import json
 import math
 import os
 import random
+import statistics
 
 MODELS = {
     "Qwen3.8@2.68": dict(dirname="Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8", prof="2.68bpw",
@@ -47,6 +48,73 @@ MODELS = {
 }
 ROOT = "/home/treo/projects/vendor/tabbyAPI/models"
 VRAM_GIB, CPU_RATE, GIB = 24.0, 47.4, 2**30
+# Where the per-expert selection profiles come from. Defaults to the engine's own cache; B70_PROFILE_DIR points it
+# at a live trace converted by notes/b70/analyze_live_trace.py --emit-profile, which is how the plan's routing
+# assumptions get tested against measured ones rather than argued about (out_live_trace.txt).
+PROF_DIR = os.path.expanduser(os.environ.get("B70_PROFILE_DIR", "~/.cache/exllamav3/expert_stats"))
+# `legacy` keeps the hand-transcribed union multipliers; the default recomputes them from whichever profile
+# PROF_DIR holds (B70_UNION=legacy restores the old numbers for comparison).
+UNION_MODE = os.environ.get("B70_UNION", "from_profile")
+
+
+def layer_profiles(sub, E):
+    """Normalized per-expert pick shares, ONE VECTOR PER LAYER, from whichever profile PROF_DIR holds."""
+    vecs = []
+    for f in glob.glob(os.path.join(PROF_DIR, "*.json")):
+        d = json.load(open(f))
+        if sub in str(d.get("model_dir", "")) and isinstance(d.get("layers"), dict):
+            L = d["layers"]
+            if all(len(v) == E for v in L.values()):
+                for v in L.values():
+                    s = float(sum(v))
+                    if s > 0:
+                        vecs.append([x / s for x in v])
+            if vecs:
+                break
+    if not vecs:
+        raise SystemExit(f"no profile for {sub}/{E} in {PROF_DIR}")
+    return vecs
+
+
+def mixture_counts(sub, E):
+    """Expected pick share per expert index, averaged over the profile's LAYERS (for placement, where one
+    vector over experts is what the model consumes).
+
+    The original `counts_for` returned layer 0's array and every consumer treated it as 'the' distribution. On a
+    live trace that turned out to be badly unrepresentative - layer 0 of Qwen3.8@2.68 touched 289 of 512 experts
+    in 1,920 picks with top-10 mass 0.177, while other layers are far more concentrated - so a single layer's
+    shape biased every batch-scaling number downstream of it.
+
+    IMPORTANT: the average is only valid for LINEAR consumers like this one. Distinct-expert counts are concave
+    in the distribution, so averaging distributions first OVERSTATES them (measured: 22.8x vs 10.9x at b=32 on
+    one profile). Anything computing a union must use `union_mult` over `layer_profiles`.
+    """
+    vecs = layer_profiles(sub, E)
+    return [sum(v[i] for v in vecs) / len(vecs) for i in range(E)], len(vecs)
+
+
+def hit_rate(vecs, n_res):
+    """Share of picks served by the n_res hottest experts, averaged over layers - the way the engine actually
+    places them (each layer keeps its OWN resident set).
+
+    Computing it from a layer-mean distribution instead is systematically pessimistic, because a globally
+    chosen top-N is a worse selector than N per-layer top-Ns: on Qwen3.8@2.68 the per-layer value is 99.8% at
+    n_res=256 while the mixture-based one reads a few points lower, and the difference lands entirely on the
+    CPU home's pick count (measured effect: 6.05 bpw throughput moved 344 -> 197 t/s at b=16 before this
+    function existed). Live anchor: notes/b70/out_live_trace.txt residency-curve table.
+    """
+    return sum(sum(sorted(v, reverse=True)[:n_res]) for v in vecs) / len(vecs)
+
+
+def union_mult(vecs, b, topk):
+    """Expected distinct experts touched by b concurrent sequences, as a multiplier on topk, computed PER LAYER
+    and averaged: expert e is missed with probability (1-p_e)^(b.topk) under independent draws, so
+    E[distinct] = sum_e 1-(1-p_e)^(b.topk). The closed form deliberately matches what the plan's hard-coded
+    multipliers were built from (popularity x independence); notes/b70/analyze_live_trace.py checked that
+    assumption against a real trace - measured random-window unions and this formula agree to ~1.5% on the same
+    layer, so whatever gap remains against the plan's numbers IS the profile, not the math."""
+    n = b * topk
+    return statistics.mean(sum(1.0 - (1.0 - pi) ** n for pi in v) / topk for v in vecs)
 MIBS_PER_US = 1048.576 / 1000.0        # MiB served per us at 1 GB/s
 
 # --- measured parent (3090) legs, out_parent_leg.txt ------------------------------------------------------
@@ -66,6 +134,73 @@ PARENT_FLOOR_US = {
     (1, 4096): 122.0, (2, 4096): 129.0, (4, 4096): 144.0, (8, 4096): 176.0, (16, 4096): 238.0,
     (1, 16384): 133.0, (2, 16384): 151.0, (4, 16384): 181.0, (8, 16384): 247.0, (16, 16384): 371.0,
 }
+
+
+# Measured INSIDE the engine (notes/bench_engine_step.py -> out_engine_step.txt): the 3090's own DEVICE time per
+# MoE layer at b=1, ctx 4096, with the routed experts served elsewhere, i.e. the work that stays on the parent no
+# matter where the experts live. Profiled kernel buckets, `device_total - expert_bucket`, which is routing-
+# independent so the harness's synthetic input distribution does not bias it.
+#   2.05 bpw: 141.9 us/layer   (device 267.2, expert 125.3; hyper-connections alone are 81.8 of the 141.9)
+#   2.68 bpw: 195.6 us/layer   (device 284.8, expert  89.2; hyper-connections 82.8)
+# Neither of the two previously contested estimates was right: the bottom-up microbench floor said 122 for 2.68
+# (it had no term for hyper-connections and over-priced attention 3x) and the window-calibrated figure said 259
+# (it folds in stalls and per-token overheads the parent does not have to pay). See LESSONS 61 for why the two
+# differed at all, and out_engine_step.txt section 3 for the reconciliation.
+PARENT_ENGINE_US = {"2.05bpw": 141.9, "2.68bpw": 195.6}
+PARENT_ENGINE_HEAD_US_PER_LAYER = 14.0    # Qwen3.5 control: generator 196.9 vs forward-only 182.6 us/layer
+
+
+# What the shipping path (3090 + CPU expert split) ACTUALLY costs per layer today, measured end to end with the
+# real generator on real text (notes/bench_live_trace.py -> out_engine_step.txt). "Converged" = second pass
+# through the same placement-profile directory, i.e. after the dynamic placement has warmed; the first pass was
+# 1.6-1.8x slower (2.68: 649.4 -> 357.1 us/layer), which is the plan's "churn unmeasured" row finally measured.
+# The split size is whatever fits in 24 GiB, NOT a tuned choice: 256 of 512 for 2.05, 384 for 2.68, 448 for the
+# heavier quants (those three are badly VRAM-starved and their numbers should not be read as a CPU-path optimum).
+PARENT_TODAY_US = {
+    "2.05bpw": dict(us_layer=290.2, tps=71.8, mcs=256, thr=15),
+    "2.68bpw": dict(us_layer=357.1, tps=58.3, mcs=384, thr=15),
+    "4.05bpw": dict(us_layer=820.9, tps=25.4, mcs=448, thr=16),   # single pass only, not converged
+    "5.05bpw": dict(us_layer=962.1, tps=21.7, mcs=448, thr=16),   # single pass only, not converged
+    "6.05bpw": dict(us_layer=1109.6, tps=18.8, mcs=448, thr=16),  # single pass only, not converged
+}
+
+
+def parent_engine_us(prof, b, ctx, calibrated_at_b1, calibrated_here):
+    """Engine-mode parent term: LEVEL measured at b=1/ctx 4096, SHAPE from the calibrated model.
+
+    Only b=1 at ctx 4096 is measured, so the batch and context dependence cannot come from data. Rather than
+    invent one, this rescales the calibrated model's own growth curve so that it passes through the measurement:
+        parent(b, ctx) = measured_1x4k * calibrated(b, ctx) / calibrated(1, 4k)
+    The shape is defensible (per-token work is ~linear in b; attention is ~linear in b*ctx; hyper-connections are
+    per-token) while the LEVEL, which is where the two earlier estimates disagreed, is measured. Callers must
+    print that this is an anchored extrapolation, not a measurement, for every cell except b=1/ctx=4096.
+    """
+    if prof not in PARENT_ENGINE_US:
+        raise KeyError(f"no engine-measured parent term for {prof}; "
+                       f"measured: {sorted(PARENT_ENGINE_US)}")
+    scale = calibrated_here / calibrated_at_b1 if calibrated_at_b1 else 1.0
+    return PARENT_ENGINE_US[prof] * scale, scale
+
+
+def parent_us(prof, b, ctx):
+    """Parent non-expert us/layer, best available: LEVEL engine-measured at b=1/ctx 4096 (PARENT_ENGINE_US),
+    SHAPE from the microbench floor table (which has real b and ctx cells). Returns (us, provenance).
+
+    Why split level from shape: the engine measurement is the only figure that includes what the bottom-up floor
+    omitted (hyper-connections ~83 us/layer, exl3_mgemm density), but it exists at exactly one (b, ctx). The floor
+    table has the grid but is 0.62x on level. Anchoring one to the other is honest if it is labelled, which the
+    provenance string does. A profile with no engine measurement keeps the floor alone and says so.
+    """
+    floor_here, used = parent_floor_us(b, ctx)
+    if prof not in PARENT_ENGINE_US:
+        return floor_here, f"microbench floor (no engine measurement for {prof})"
+    anchor = PARENT_ENGINE_US[prof] * floor_here / PARENT_FLOOR_US[(1, 4096)]
+    tag = "engine-measured level x measured shape"
+    if used != (b, ctx):
+        tag += f" (floor shape taken at b={used[0]},ctx={used[1]})"
+    if (b, ctx) != (1, 4096):
+        tag += " [anchored, not measured]"
+    return anchor, tag
 
 
 def parent_floor_us(b, ctx):
@@ -144,13 +279,9 @@ def selftest():
 
 
 def counts_for(sub, E):
-    for f in glob.glob(os.path.expanduser("~/.cache/exllamav3/expert_stats/*.json")):
-        d = json.load(open(f))
-        if sub in str(d.get("model_dir", "")) and isinstance(d.get("layers"), dict):
-            L = d["layers"]
-            if len(L[sorted(L)[0]]) == E:
-                return list(L[sorted(L)[0]])
-    raise SystemExit(f"no profile for {sub}/{E}")
+    """Representative per-expert pick shares. Delegates to mixture_counts: it used to return layer 0's array, and
+    a live trace showed layer 0 is not representative (see mixture_counts)."""
+    return mixture_counts(sub, E)[0]
 
 
 def census(dirname):
@@ -278,15 +409,23 @@ def main():
           f" to bytes/{CPU_RATE} GiB/s and says so")
     print(f"  {'model':13s} {'rows':>5s} {'ctx':>6s} {'T_par':>6s} {'S_g slots':>9s} {'P_order':>28s} {'P_lpt':>28s}  verdict")
     for name, m in MODELS.items():
-        cnt = counts_for(m["prof"], m["E"])
+        cnt, nlay = mixture_counts(m["prof"], m["E"])
+        vecs = layer_profiles(m["prof"], m["E"])
         cap_b = 31.9 * 1024 / m["layers"]
+        uni = m["union"]
+        if UNION_MODE != "legacy":
+            uni = {b: union_mult(vecs, b, m["topk"]) for b in (1, 2, 4, 8, 16, 32)}
+            print(f"  {name}: union multiplier on topk - inherited {m['union'][8]:.2f}x at b=8 / "
+                  f"{m['union'][16]:.2f}x at b=16 / {m['union'][32]:.2f}x at b=32  vs  recomputed per layer "
+                  f"from {PROF_DIR} ({nlay} layers): {uni[8]:.2f}x / {uni[16]:.2f}x / {uni[32]:.2f}x "
+                  f"[{UNION_MODE}]")
         # Measured profiles get the parent floor from out_parent_leg.py (per batch and context) and the measured
         # fused-kernel rate for GPU-homed experts; unmeasured ones keep the old t0 sweep so the gap is visible.
         ctxs = (4096, 16384) if m.get("calib") else (None,)
         for ctx in ctxs:
             for b in (1, 4, 8, 16):
                 if ctx:
-                    tpar, used = parent_floor_us(b, ctx)
+                    tpar, used = parent_us(m["prof"], b, ctx)
                 else:
                     tpar, used = (m["t0"] or 250.0), None
                 for slots_g in (5.0, 30.0, 120.0):
@@ -295,13 +434,14 @@ def main():
                     per = PARENT_EXPERT_GBPS if m.get("calib") else None
                     args = dict(b=bb_, prof=name, rate_floor=CPU_RATE_MEASURED.get(name, CPU_RATE),
                                 parent_expert_rate=per)
-                    wo, go, so = policy(False, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], m["union"][b], **args)
-                    wl, gl, sl = policy(True, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], m["union"][b], **args)
+                    wo, go, so = policy(False, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], uni[b], **args)
+                    wl, gl, sl = policy(True, cnt, m["E"], m["eb"], cg, cap_b, m["rate_g"], m["rate_b"], tpar, m["topk"], uni[b], **args)
                     f = lambda u, s: f"{u:6.0f} ({s[0]:3d}/{s[1]:3d}/{s[2]:3d})"
                     v = "lpt" if wl < wo - 1 else ("tie" if abs(wl - wo) <= 1 else "order")
                     cx = f"{ctx:6d}" if ctx else "     -"
                     print(f"  {name:13s} {b:5d} {cx} {tpar:6.0f} {slots_g:8.0f} {f(wo, so):>28s} {f(wl, sl):>28s}  {v}"
-                          + (f"   [floor at measured b={used[0]},ctx={used[1]}]" if used and used != (b, ctx) else ""))
+                          + (f"   [{used}]" if isinstance(used, str) else
+                             (f"   [floor at measured b={used[0]},ctx={used[1]}]" if used and used != (b, ctx) else "")))
         print(f"  (cells are wall us/layer, then expert slots on 3090/B70/CPU. "
               f"{'parent floor = measured non-expert cost (out_parent_leg.txt); parent expert bytes charged at the' if m.get('calib') else 'T_par swept: this profile has no measured parent leg'}"
               f"{' measured fused-kernel rate (190 GB/s), not a byte rate' if m.get('calib') else ''}; "

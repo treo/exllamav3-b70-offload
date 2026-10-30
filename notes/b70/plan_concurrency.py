@@ -62,9 +62,10 @@ CALIB = {"Qwen3.8": 250.0}          # measured T_layer at b=1, us (doc/prep); GL
 #   floor      - the measured route: use the composed floor from the 3090 benches (attention + streamed
 #                weights + state traffic). Excludes those overheads, so it is a LOWER bound on parent time and
 #                the t/s it prints is an upper bound on what the box can do.
-# Switch with B70_PARENT_MODEL=floor. Only measured to b=16, so larger rows fall back to `calibrated` and are
-# marked with '~' in the binds column.
-PARENT_MODEL = os.environ.get("B70_PARENT_MODEL", "calibrated")
+# Switch with B70_PARENT_MODEL=calibrated|floor|engine. `engine` (the default) uses the measured level for the
+# profiles bench_engine_step.py covers and falls back to `calibrated` elsewhere, marking those rows '=' in the
+# binds column; `floor` is only measured to b=16 and marks rows beyond it '~'.
+PARENT_MODEL = os.environ.get("B70_PARENT_MODEL", "engine")
 
 
 def union_at(cnt, E, topk, rows, rng_seed=5, trials=400):
@@ -97,7 +98,10 @@ def main():
         topk = tc.get("num_experts_per_tok") or tc.get("topk")
         eb = cat["routed"] / nl / E / 2**20
         st = ppb.state_budget(cfg)
-        cnt = pq.counts_for(prof, E)
+        cnt = ppb.counts_for(prof, E)          # per-layer profile, layer-mean vector (supersedes
+                                               # pq.counts_for, which returned layer 0 and ignored
+                                               # B70_PROFILE_DIR)
+        vecs = ppb.layer_profiles(prof, E)
         if cnt is None:
             continue
         tot = sum(cnt) or 1.0
@@ -106,7 +110,8 @@ def main():
                  - st["lin_mib"] / 1024 - 1.5)
         cap_b = 31.9 * 2**30 / nl
         n_res = min(E, int(sg * 2**30 / (eb * 2**20) / nl) + int(cap_b / (eb * 2**20)))
-        h = sum(order[:n_res]) / tot
+        h = ppb.hit_rate(vecs, n_res)          # per-layer: each layer keeps its own resident set
+        _h_mix = sum(order[:n_res]) / tot       # mixture-based value, kept only for the print below
         rd_l = cat["read"] / nl / 2**20                      # MiB/layer, batch-independent
         state_l = st["lin_mib"] / nl * 2                     # MiB/layer/sequence, read + write
         # st["tok_kib"] is ALREADY summed over the full/MLA layers, so per-layer is /nl - dividing by
@@ -121,6 +126,14 @@ def main():
         # comparison is fixed + streamed weights, not tp(b) with KV/state included.
         floor_meas = ppb.PARENT_FLOOR_US[(1, 4096)]
         floor_model = fixed + us(rd_l + 1 * (state_l + kv_l), ppb.PARENT_STREAM_GBPS)
+        if PARENT_MODEL == "engine":
+            td = ppb.PARENT_TODAY_US.get(lab + "bpw")
+            print(f"   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 "
+                  f"({ppb.PARENT_ENGINE_US.get(lab + 'bpw', 'n/a')} us/layer of parent device work, "
+                  f"out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). "
+                  f"Today's shipping path (3090 + CPU split, real text, converged) measured "
+                  f"{td['us_layer']:.1f} us/layer = {td['tps']:.1f} tok/s with -mcs {td['mcs']}"
+                  if td else f"   PARENT MODEL = engine: no measurement for {lab}; using the calibrated model (=)")
         print(f"parent model cross-check at b=1/ctx=4096: this planner's non-expert figure {floor_model:.0f} us vs "
               f"the measured floor {floor_meas:.0f} us (out_parent_leg.txt) -> {floor_model / floor_meas:.2f}x. "
               f"The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + "
@@ -130,6 +143,8 @@ def main():
               f"for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. "
               f"Streamed reads charged at {ppb.PARENT_STREAM_GBPS:.0f} GB/s (measured), not the 936 spec figure.")
         print(f"Qwen3.8 {lab} bpw: eb {eb:.3f} MiB, h {h*100:.1f} %, parent bill "
+              f"(h {h*100:.1f}% per-layer; a mixture-based estimate would read {_h_mix*100:.1f}%, and that deficit "  # noqa: E501
+              f"is the pessimism this avoids) "
               f"{rd_l:.0f} MiB/layer weights + {state_l:.1f} state + {kv_l:.1f} KV per sequence-layer; "
               f"fixed overhead {fixed:.0f} us"
               + ("   PARENT MODEL = measured floor: ms/step and tok/s are UPPER BOUNDS; rows above the "
@@ -144,13 +159,33 @@ def main():
         base = None
         band = pq.BANDS[bandk]
         for rows in (1, 2, 4, 8, 16, 32, 64, 128, 256):
-            u = union_at(cnt, E, topk, rows)
+            # Distinct experts touched by `rows` concurrent sequences, computed PER LAYER and averaged.
+            # The old call fed union_at a single distribution (layer 0 of the profile, then the layer mean
+            # after counts_for changed), and either way mixing layers first OVERSTATES the union because
+            # distinct-count is concave in the distribution - measured 22.8x vs 10.9x at b=32 on one
+            # profile (out_live_trace.txt). ppb.union_mult applies the closed form per layer.
+            u = ppb.union_mult(vecs, rows, topk) * topk
             dev_mib = u * h * eb
             rate = pq.interp(band, dev_mib, 1)      # diagnostic only now: footprint, not a rate driver
-            if PARENT_MODEL == "floor" and rows <= 16:
+            if PARENT_MODEL == "engine":
+                # level from the engine measurement, shape from the calibrated curve (only b=1/ctx 4096 measured)
+                cal_b1 = fixed + us(rd_l + 1 * (state_l + kv_l), ppb.PARENT_STREAM_GBPS)
+                cal_here = fixed + us(rd_l + rows * (state_l + kv_l), ppb.PARENT_STREAM_GBPS)
+                try:
+                    tp, _sc = ppb.parent_engine_us(lab + "bpw", rows, CTX, cal_b1, cal_here)
+                    pmark = "" if (rows == 1 and CTX == 4096) else "^"
+                except KeyError:
+                    tp = cal_here
+                    pmark = "="          # no engine measurement for this profile: calibrated model, labelled
+            elif PARENT_MODEL == "floor" and rows <= 16:
                 tp, pmark = ppb.parent_floor_us(rows, CTX)[0], ""
-            else:
+            elif PARENT_MODEL == "floor":
+                # above the measured b range the floor has no cell, so this row falls back to the calibrated
+                # model and says so - the mark must NOT appear in calibrated mode, where every row would carry
+                # it meaninglessly (it used to, which read as "these rows are suspect" rather than "this row is")
                 tp, pmark = fixed + us(rd_l + rows * (state_l + kv_l), ppb.PARENT_STREAM_GBPS), "~"
+            else:
+                tp, pmark = fixed + us(rd_l + rows * (state_l + kv_l), ppb.PARENT_STREAM_GBPS), ""
             # Measured decode cost, priced PER EXPERT at the row count that expert actually sees. One step's
             # `rows` tokens make rows*topk selections spread over union(rows) touched experts, so the average
             # per-expert row count is rows*topk/union - the "rows/exp" column below - NOT the global row count.
@@ -205,7 +240,10 @@ numbers support; a single chunk-wide GEMM is not.
         tc = cfg.get("text_config", cfg)
         E = tc.get("n_routed_experts") or tc.get("num_experts")
         topk = tc.get("num_experts_per_tok") or tc.get("topk")
-        cnt = pq.counts_for(prof, E)
+        cnt = ppb.counts_for(prof, E)          # per-layer profile, layer-mean vector (supersedes
+                                               # pq.counts_for, which returned layer 0 and ignored
+                                               # B70_PROFILE_DIR)
+        vecs = ppb.layer_profiles(prof, E)
         if cnt is None:
             continue
         tot = sum(cnt) or 1.0

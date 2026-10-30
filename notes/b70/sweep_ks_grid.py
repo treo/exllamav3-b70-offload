@@ -38,15 +38,24 @@ ANCHORS = 6000              # anchor reps; must carry enough work to ramp the cl
 ANCHOR_SPREAD = 10.0          # percent
 
 
+LAST_ERR = [""]          # why the most recent probe run failed, for the cell line to report
+
+
 def run(binary, args, warm):
     env = dict(os.environ)
     env["WARM_S"] = str(warm)
-    p = subprocess.run([binary] + args, capture_output=True, text=True, env=env)
+    try:
+        p = subprocess.run([binary] + args, capture_output=True, text=True, env=env)
+    except OSError as exc:                                    # missing/non-executable binary
+        LAST_ERR[0] = f"exec: {exc}"
+        return None
     if p.returncode != 0:
+        LAST_ERR[0] = f"rc={p.returncode} {(p.stderr or '').strip()[-90:]}"
         return None
     for line in p.stdout.splitlines():
         if line.startswith("revL ks"):
             return float(re.search(r":\s+([\d.]+) us", line).group(1))
+    LAST_ERR[0] = "no timing line in stdout (did the probe change its print?)"
     return None
 
 
@@ -86,7 +95,7 @@ def main():
     print(f"# sweep_ks_grid: bin={a.bin} warm={a.warm}s anchor_reps={a.anchor_reps}")
     print(f"{'E':>4} {'rows':>5} {'KS':>3} | {'sep/exp':>8} {'fused/exp':>10} {'fuse gain':>9} | "
           f"{'threads sep':>11} {'fused':>7} | exact")
-    results = {}
+    results, failed = {}, []
     for E in [int(x) for x in a.es.split(",")]:
         gd, ud = dirs[str(E)]
         for R in [int(x) for x in a.rows.split(",")]:
@@ -112,9 +121,15 @@ def main():
                                        for g, w in zip(got, (r[:, :R, :] for r in ref))) else "NO"
                 except Exception as e:
                     okx = f"chk:{type(e).__name__}"
+                # A failed cell must never print as a number. Printing 0.000 for "the probe did not run" is how
+                # a missing oneAPI runtime once produced a full table of confident zeros.
+                if sep is None or fus is None or anc is None:
+                    failed.append((E, R, KS, LAST_ERR[0]))
+                    print(f"{E:4d} {R:5d} {KS:3d} | FAILED {LAST_ERR[0][:70]}")
+                    continue
                 results[(E, R, KS)] = (sep, fus, gain, anc)
-                print(f"{E:4d} {R:5d} {KS:3d} | {sep if sep else 0:8.3f} {fus if fus else 0:10.3f} "
-                      f"{gain if gain else 0:8.3f}x | {tn*KS*2*E:11d} {2*tn*KS*2*E:7d} | {okx}   anchor={anc}")
+                print(f"{E:4d} {R:5d} {KS:3d} | {sep:8.3f} {fus:10.3f} {gain:8.3f}x | "
+                      f"{tn*KS*2*E:11d} {2*tn*KS*2*E:7d} | {okx}   anchor={anc}")
     print("\n# best schedule per (E, rows). UNITS MATTER: the separate column is us per (expert, SINGLE"
           "\n# projection), the fused column is us per (expert, gate+up PAIR), so the comparison is"
           "\n# 2*sep/expert vs fused/expert - which is what the gain column already does correctly.")
@@ -129,6 +144,12 @@ def main():
             thr = (2 * tn if best[2] == "fused" else tn) * best[1] * 2 * E
             print(f"   E={E:3d} rows={R:2d}: best {best[2]:5s} KS={best[1]} {best[0]:.3f} us per (expert, pair), "
                   f"grid {thr:6d} ({100.0*thr/HW_THREADS:5.1f}% of HW)")
+
+
+    if failed:
+        print(f"\n# {len(failed)} CELL(S) FAILED - the table above is incomplete, do not transcribe it as "
+              f"data. First failure: {failed[0]}")
+        sys.exit(1)
 
 
 def np_load(p):

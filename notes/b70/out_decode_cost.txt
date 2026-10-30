@@ -41,12 +41,16 @@ joint (fusion, split-K) choice - us per (expert, gate+up pair), from measured ce
     E               rows=1               rows=8              rows=16
     2           4.75 fused KS=4            5.35 fused KS=4            5.70 fused KS=4 
     4           3.02 fused KS=2            3.62 fused KS=2            4.38 fused KS=2 
+    8           2.48 fused KS=1            2.98 fused KS=1            3.64 fused KS=1 
    10           2.08 fused KS=1            2.63 fused KS=1            3.37 fused KS=1 
+   12           1.91 fused KS=1            2.41 fused KS=1            3.03 fused KS=1 
    16           2.17 fused KS=2       2.90 sep    KS=1 ~tie      3.52 sep    KS=1 ~tie
    20          1.96 sep    KS=1           2.58 sep    KS=1           3.23 sep    KS=1 
    24          1.82 sep    KS=1           2.38 sep    KS=1           2.99 sep    KS=1 
    32          2.01 sep    KS=2           2.90 sep    KS=2           3.59 sep    KS=2 
+   48          2.18 sep    KS=2           2.64 sep    KS=1           3.34 sep    KS=1 
    64       2.45 fused KS=1 ~tie           2.94 fused KS=1            3.58 fused KS=1 
+   80       2.53 fused KS=2 ~tie           3.06 fused KS=1            3.76 fused KS=1 
    96       2.48 fused KS=2 ~tie      3.02 sep    KS=1 ~tie      3.71 sep    KS=1 ~tie
 
 families, per (expert, all three projections):

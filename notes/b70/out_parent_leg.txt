@@ -55,6 +55,14 @@ Expert *bytes* are synthetic (rand_experts at K=3); shapes, counts and the kerne
    modelled, so this is a floor). The headline is the SHAPE: the parent does not stay at ~250 us as batch grows,
    it goes to ~1.4-1.6 ms/layer at b=16, and essentially all of that growth is the expert leg, not attention.
 
+   CORRECTED BY out_engine_step.txt (this composition was profiled against microbenches, then against the engine):
+   the parent's measured non-expert DEVICE work is 195.6 us/layer on 2.68 and 141.9 on 2.05, i.e. this floor is
+   0.62x of the truth, and the closeness to 250 was a coincidence of two offsetting errors - it omitted
+   hyper-connections (`hc_mix.cu`: gr_dots/gr_finalize/hc_apply, ~83 us/layer, in no model in this plan) while
+   over-pricing attention 3x (SDPA proxy 9.9 us/layer vs the engine's measured 3.4). Meanwhile the whole step
+   today - parent + the CPU expert home + sampler + head, real text, converged placement - measures 357.1 us/layer
+   (58.3 tok/s), so 250 was not a generous window either. Charge `PARENT_ENGINE_US`, not this section's sum.
+
 CONSEQUENCES FOR THE PLANNER (applied in plan_parent_budget.py)
   * rate_g 936 -> 860 for streamed non-expert bytes (measured best-of-N).
   * The parent's own expert work is charged at the measured kernel rate (~190 GB/s, the midpoint of the flat

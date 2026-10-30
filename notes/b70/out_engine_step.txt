@@ -1,0 +1,159 @@
+The parent's real per-layer decode cost, measured inside the engine - and the 83 us/layer nobody modelled
+=============================================================================================================
+P1 of the plan's remaining list. Two numbers claimed to be the 3090's non-expert cost per MoE layer at b=1:
+**122 us**, composed bottom-up from separate microbenches (out_parent_leg.txt), and **257 us**, what the planner
+gets after calibrating a `fixed` overhead so the parent bill reproduces the inherited ~250 us/layer window.
+LESSONS 61 recorded that single-stream t/s differs 2.1x depending on which is used, and that no further
+micro-benchmarking could settle it, because the disputed part was precisely what the floor declined to model.
+
+It was settled by measuring the engine's own step. Instruments (both new, both in-tree):
+  notes/bench_engine_step.py  - times `model.forward` decode at b=1 and buckets DEVICE time by kernel name, so the
+                                parent's own work separates from whatever runs the experts.
+  notes/bench_live_trace.py   - the real generator (prefill + greedy decode of real text), per-token expert sets,
+                                placement-migration counters.
+  notes/b70/run_home_matrix.sh, notes/b70/run_mcpa_arms.sh, notes/b70/run_mcpa_migration.sh - the arm scripts.
+Checkpoint Qwen3.8@2.05 / @2.68 with `--moe_cpu_split` (mandatory: these checkpoints do not fit in 24 GiB), ctx
+4096, b=1. Control: Qwen3.5-35B-A3B@3bpw, which fits entirely on the GPU, so it has no CPU leg to obscure things.
+
+1. THE DECOMPOSITION (device time, us per layer; `expert` = routed-expert + split/handoff kernels)
+
+  model / config                              wall    device  expert   gemm  hyperconn  attn  linstate  norm
+  Qwen3.5@3bpw, every expert on the GPU       222.0    179.7    75.5     73.0      7.5     7.0      7.2    9.4
+  Qwen3.5@3bpw, -mcs 128 -mcpa                227.3    187.1    79.0     71.1      ~7      ~7       ~7     ~9
+  Qwen3.8@2.05, -mcs 256                      375.4    267.2   125.3     40.6     81.8     3.3      9.7    5.9
+  Qwen3.8@2.68, -mcs 384                      634.2    284.8    89.2     93.0     82.8     3.4      9.8    5.9
+
+  **Parent non-expert device work = device - expert = 141.9 us/layer (2.05), 195.6 us/layer (2.68), 104.2 for the
+  Qwen3.5 control.** These are routing-independent: the non-expert kernels do not care which experts were picked,
+  which is why passing synthetic token ids (bench_engine_step's input) does not bias section 1's numbers - see
+  section 4 for where that shortcut DID bias a conclusion.
+
+  Cross-window warning, measured: re-running the identical Qwen3.5 all-GPU config later gave wall 182.6 -> 222.0
+  us/layer (22%) while its device total moved only 186.9 -> 179.7 (4%). On this box the engine-step WALL is not
+  comparable across windows (shared render node, host contention); the DEVICE bucket sums are. Quote device
+  figures, or quote wall with its window.
+
+2. THE 83 us/LAYER THAT NO MODEL IN THE PLAN CONTAINED
+   The `other` bucket is 81.8-82.8 us/layer on Qwen3.8 (7.5 on Qwen3.5, which does not use the feature). It is one
+   thing: **hyper-connections**. The kernels are `gr_dots_kernel2` (26.7 us/layer), `gr_finalize_kernel2` (28.6)
+   and `hc_apply_kernel` (4.9) from exllamav3/exllamav3_ext/hc_mix.cu + modules/hyperconnections.py - the
+   `hc_mult` residual-stream machinery. Neither the bottom-up floor (attention + streamed weights + recurrent
+   state) nor the planner's byte model has a term for it. It is ~42% of the parent's non-expert work on 2.05 and
+   ~43% on 2.68, and at ~14 us per call for tens of KB of fp32 streams per token it is nowhere near
+   bandwidth-bound - the calls are simply expensive at b=1. Two consequences: a bytes-per-layer prediction for
+   this architecture will be ~80 us/layer low in a component that **offloading experts cannot touch**, and the
+   single-stream ceiling is set by it (see section 6).
+
+3. RECONCILIATION (Qwen3.8@2.68, b=1, ctx 4096)
+     bottom-up floor         122 us/layer  = 0.62x the measured 195.6. Missing hyper-connections (~83) and light
+                                           on the dense projections; meanwhile its ATTENTION term was too high -
+                                           the engine's own attention averages 3.4 us/layer over the 48 layers,
+                                           where the SDPA proxy used in the floor said 9.9 (3x pessimistic). The
+                                           errors partly cancelled, which is why the floor looked respectable.
+     window-calibrated       259 us/layer  = 1.32x the parent's own measured work, i.e. too high as a model of
+                                           what the parent must do - yet too LOW as a model of what a step costs
+                                           today: the real generator on real text measures 357.1 us/layer
+                                           (58.3 tok/s) with sampler and lm_head included.
+     measured (this file)    195.6 us/layer of parent non-expert device work; 357.1 us/layer end to end today.
+   So the plan was wrong in both directions at once: it over-charged the parent's *obligatory* work and
+   under-charged the parent's *actual* step. Both errors flattered the CPU home and understated the case for an
+   asynchronous worker, which is what sections 4-6 quantify.
+
+4. CAVEAT THAT CHANGED A CONCLUSION MID-FLIGHT: SYNTHETIC INPUTS ARE NOT NEUTRAL FOR EVERY KERNEL
+   bench_engine_step.py feeds random token ids. Device buckets are unaffected (section 1 stands), but WALL time
+   is not: uniform-random routing spreads picks over all 512 experts, so with `-mcs 384` about 75% of the picks
+   land on the CPU and the measured wall (634 us/layer) is dominated by that leg. Real text routes to the ~24
+   experts holding half the picks, most of them GPU-resident, and the same model with the same split measures
+   357.1 us/layer. The "349 us/layer of exposed stall" I first read out of (wall - device) was therefore an
+   artifact of the input distribution, not a property of the shipping path. A synthetic input is only neutral for
+   the kernels that ignore it - routing is not one of them.
+
+5. TODAY'S SHIPPING BASELINE, AND WHAT WARMING IT IS WORTH
+   Real text, real generator, two passes through one placement-profile directory (Qwen3.8, -mct 15, ctx 4096):
+     2.68, -mcs 384:  pass 1  649.4 us/layer (32.1 tok/s)   ->  pass 2  357.1 us/layer (58.3 tok/s)
+     2.05, -mcs 256:  pass 1  388.7 us/layer (53.6 tok/s)   ->  pass 2  290.2 us/layer (71.8 tok/s)
+   **Dynamic placement learning is worth 1.6-1.8x on decode.** That is the plan's "churn itself unmeasured and
+   unmeasurable offline" row, measured: churn is observable, it is large, and any A/B of worker designs that does
+   not equalise profile warmth is comparing warm-up curves, not designs. (Architecture section 12 predicted the
+   row was unmeasurable offline; it is measurable online with two passes, which is the cheap way.)
+
+   Pinned arena (`-mcpa`) is the clearest lesson in this file, because my first read of it was wrong in a
+   instructive way. Over 192-token passes it looks clearly harmful:
+     2.05: 71.8 -> 63.0 tok/s      2.68: 58.3 -> 48.8      Qwen3.5: 126.9 -> 82.1 (reproducing the recorded
+                                                              acceptance figure ~100 -> ~78, port-acceptance E6)
+   So I wrote "-mcpa costs decode 12-35%" and moved on. Doubling the horizon and reading the ENGINE'S OWN
+   migration counters instead of only the token rate (notes/b70/run_mcpa_migration.sh) inverts the conclusion:
+     plain  -mcs 256, 384 tokens:  0 promotions CPU->GPU, 0 demotions, 10 sweeps -> 50.0 then 64.5 tok/s
+     -mcpa  -mcs 256, 384 tokens:  3,689 promotions (pass 1), 1,194 (pass 2), 796 sweeps -> 53.2 then 64.6 tok/s
+   **Without the pinned arena hot experts cannot migrate to the GPU at all - measured zero promotions across 48
+   layers - and with it thousands move.** The throughput penalty is the price of that mobility and it is paid up
+   front: by pass 2 (384 tokens) the two arms are equal (64.5 vs 64.6). A 192-token A/B publishes the cost and
+   misses the benefit, because the mechanism's latency is longer than the comparison.
+   Two consequences. (1) For the plan: any worker design, CPU or B70, is judged wrongly if the arm is shorter
+   than the placement adaptation time - equalise warmth AND horizon. (2) For the trace instrument: a live
+   permutation makes the snapshot-diff trace attribute picks to the wrong experts (diversity inflated - visible
+   as "half of picks" jumping from 23.8 to 42.0 in the same config), so bench_live_trace.py now counts permutation
+   changes and refuses to stay quiet about them; every trace quoted in out_live_trace.txt came from a plain (non
+   `-mcpa`) arm where the permutation provably never moved.
+
+6. SYNCHRONIZATION IS THE EXPENSIVE PART - AND IT HAS A PRICE PER DELEGATED SHARD
+   Qwen3.8@2.68, same process, same tokens:
+     generator, pipelined (expert work overlaps later layers):  359.7 us/layer
+     model.forward, synchronized per token:                     542.8 us/layer  -> +183.1 us/layer
+   Qwen3.8@2.05 (half as much delegated): 291.8 -> 336.0, i.e. +44.3 us/layer. So the cost of waiting scales with
+   how much is delegated, and at the delegation fraction a capacity-starved config actually uses it is enormous.
+   This prices the architecture's "completion by pinned flag, never .wait()" rule ~25x above the 24 us-vs-5-8 us
+   round-trip comparison it was originally justified with: a B70 engine that joined per token would hand back more
+   than the card saves, because the B70's whole expert leg for the same layer is 36-45 us/layer.
+   Adjacent control on the CPU home: with the worker pinned to 16 logical processors, raising `-mct` from 16 to 32
+   moved 2.05 real-text decode from 315.5 to 574.3 us/layer (1.82x WORSE). The right setting is below the pin set
+   (15 on this box, leaving one core for GPU<->CPU traffic), and any knob that scales threads must be clamped to
+   the LP allocation rather than defaulted to nproc.
+
+7. THE CEILING THIS IMPLIES (and what to attack next)
+   With experts on a B70 and the parent doing only its own measured work, b=1 decode is bounded by
+   parent non-expert + head/sampler: 2.05 141.9 + ~14 -> ~133 tok/s, 2.68 195.6 + ~14 -> ~100 tok/s, against
+   today's measured 71.8 and 58.3 -> a **1.4-1.8x single-stream win that does not depend on any B70 speed
+   assumption at all** (the card is 3-5x below the binding leg at b=1). Beyond that win, the next lever is not
+   the card and not the experts: it is `hc_mix.cu`, whose ~83 us/layer is the largest single non-expert item on
+   this architecture, followed by the dense `exl3_mgemm` projections (40.6-93.0 us/layer, which the 2.68 recipe
+   pays nearly 2.3x more of than 2.05 - a quantisation effect on the NON-expert weights worth its own probe).
+   The head/sampler figure (~14 us/layer equivalent) is from the Qwen3.5 control only: for Qwen3.8 the two-pass
+   subtraction is contaminated by pipelining (section 6), which is why the control model exists.
+
+8. MATCHED-BATCH BASELINE: TODAY'S CPU PATH DOES NOT SCALE WITH CONCURRENCY
+   `bench_live_trace.py --jobs N` runs N sessions through one generator (distinct prompt windows; the instrument
+   refuses identical sessions because they would measure union(1) and call it union(N)). Qwen3.8@2.68, -mcs 384,
+   -mct 15, real text, aggregate tokens/s over all sessions:
+        b=1        b=2        b=4        b=8       b=16
+      58.3       33.2       33.3       32.5       33.1   tok/s
+   Throughput FALLS 43% going from one session to two and then is flat to b=16: batch buys nothing on this path.
+   The routing measurement says why the work grows (union per layer 9.9 -> 18.2 across two sessions -> 45.9
+   across six, out_live_trace.txt section 8) while the home that serves it cannot - 15 CPU threads are already the
+   constraint at b=1. Two caveats kept visible: this is one split size (384 of 512, the smallest that loads in
+   24 GiB) and one box, and the acceptance-era figure of ~100 tok/s was a shallower split on a model whose experts
+   fit; it is NOT evidence that a better-tuned CPU split scales, only that this one - the one a 36 GiB expert set
+   is forced into - does not. It is also why out_throughput_report.txt can now quote gains at matched batch.
+   (The engine steps sequences one at a time, so these numbers are aggregate throughput, not a per-step batching
+   study; see out_live_trace.txt section 9.)
+
+9. STILL UNMEASURED
+   * ctx dependence of the parent term (everything here is ctx 4096). The components argue for weak dependence -
+     engine attention is 3.4 us/layer at 4k - but "argue" is not "measure".
+   * b > 1 device decomposition. Matched-batch THROUGHPUT baselines are measured now (section 8); what is not
+     measured is the kernel bucket split at b>1, so the planner's engine mode borrows the calibrated model's
+     SHAPE and re-anchors its LEVEL to these b=1 measurements (`parent_engine_us`), marking every such cell `^`.
+   * GLM's parent leg (42 layers, 9 MiB/expert, no measurement anywhere).
+   * The 4.05/5.05/6.05 baselines in PARENT_TODAY_US are single-pass at -mcs 448 (VRAM-forced, 64 experts on the
+     GPU). They are NOT tuned CPU-path numbers and must never be used as the denominator of a B70 gain claim;
+     that is recorded in plan_parent_budget.py's own comment and repeated in out_throughput_report.txt.
+
+Reproduce:
+    source notes/env.sh
+    python3 notes/bench_engine_step.py -m <ckpt> -mcs 256 -mct 15 -cs 8192 --ctx 4096 --tokens 48
+    python3 notes/bench_live_trace.py  -m <ckpt> -mcs 256 -mct 15 --decode 192 --out /tmp/trace.json
+    bash notes/b70/run_home_matrix.sh          # arms x 2 passes; -mct 15
+    bash notes/b70/run_mcpa_arms.sh            # -mcpa arms + the Qwen3.5 device buckets
+    bash notes/b70/run_mcpa_migration.sh       # promotion/demotion counters
+  Splits below ~256 (2.05) / ~384 (2.68) / ~448 (4.05+) fail with "Insufficient VRAM in split for model and
+  cache": the split is chosen by what fits, which is exactly why section 8's last bullet exists.

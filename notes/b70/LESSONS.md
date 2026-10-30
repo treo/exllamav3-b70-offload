@@ -1225,6 +1225,67 @@ nothing that is the sole instance of a measurement.
     printed interface - and when an assertion fails on brand-new data, check the assertion before suspecting the
     data, because the data is the one thing in the commit that was just measured twice.
 
+63. **Recompute the statistic per unit; never collapse the distribution first.** The planners took `counts_for()`
+    = *layer 0's* expert-selection array and treated it as "the routing distribution" for every batch-scaling
+    number. A live trace showed how bad that proxy was (layer 0 of Qwen3.8@2.68 touched 289 of 512 experts in
+    1,920 picks, top-10 mass 0.177, while other layers are far more peaked) - and then my first repair introduced
+    a second, subtler error: averaging the 48 normalized per-layer vectors into one distribution. That is valid
+    for *linear* functionals of p (expected picks per expert index) and wrong for two things I immediately used it
+    for: (a) distinct-expert counts, which are concave in p, so the collapsed vector over-predicted union(32) by
+    2.2x (22.8x vs the per-layer mean 10.9x, measured against the trace itself: 10.3x), and (b) residence hit
+    rate, an ORDER statistic - the engine keeps the hottest N experts *per layer*, and a globally chosen top-N is
+    strictly worse than 48 per-layer top-Ns, so the mixture read h = 74.5% where the per-layer value is 99.3% for
+    6.05 bpw. Downstream, that single mis-aggregation moved 6.05's b=16 throughput by 6.6x (874 vs 132 t/s) and
+    re-labelled which home binds. Rule: when replacing a scalar input with a distribution over units, ask "is the
+    derived functional linear in it?" - if it is a union, a maximum, a top-N or any order statistic, evaluate per
+    unit and average the RESULTS. Corollary worth keeping: the failure surfaced as a *crash first* (`rows=22.1 is
+    above 16, where dp4a was never measured`), because the corrected union pushed rows-per-expert past the
+    measured range for the first time; a guard that has never fired is not evidence the path is unreachable, and
+    `layer_us()` was letting one infeasible candidate family abort the whole search instead of being skipped.
+
+64. **A measurement is only valid for the population it was taken from, and "the routing distribution" is not one
+    population.** The plan's `union(rows)` multipliers reproduced the engine's stored profile to within 1-8% - the
+    transcription was faithful and the independence math checks out to ~1.5% against Monte Carlo on real data. The
+    live trace nevertheless lands at 10.3x vs 21.9x for b=32: half the work the plan expected the card and CPU to
+    do at batch. Cause: the stored profile accumulates across sessions, so it is roughly the distribution an
+    *operator's mixed traffic* sees, while a 192-token single-user stream is far more concentrated (half its
+    picks fall in 23 of 512 experts). Neither is "the" truth: for a batch of concurrent unrelated users the plan
+    is about right, for a batch drawn from similar sessions the plan is 2x pessimistic, and the difference is a
+    deployment fact, not a modelling error. Two rules: state which population a measured input represents before
+    plugging it in, and where the answer is regime-dependent, make the regime a scheduling lever rather than an
+    assumption - here, session affinity (keep one session's tokens on the worker that already holds its narrow
+    expert set) converts the pessimistic case into the optimistic one, and is a better outcome than picking
+    either number. Also note the direction of the original doubt: architecture.md section 12 guessed "expect
+    h_live < h_profile"; measured, h_live is *higher* (99.8% at 50% residence) and the profile's flaw was in its
+    tail shape, not its concentration. Being wrong about the direction of a predicted bias is survivable; never
+    having measured it is not.
+
+65. **A wrapper that forwards CLI flags must declare them all, and a filtered background arm must prove it ran.**
+    `bench_live_trace.py` owns `-m/--model_dir` and forwards `--moe_cpu_split`-style flags to the engine. When a
+    matrix arm passed `-mcpa`, argparse read it as `-m cpa` and overwrote the model path: the load died with
+    `FileNotFoundError: 'cpa/config.json'`. Two things made that expensive instead of trivial. (1) The arm runner
+    piped each run through `grep` to keep the log small, so the traceback never reached the file and the arms
+    simply printed nothing - a rerun of the LESSONS 52 failure with a new mask. (2) The whole first matrix had
+    silently skipped its `-mcpa` arms, and I had already concluded from the surviving arms that the pinned arena
+    was irrelevant. Rules now enforced in-tree: any script that forwards engine flags uses
+    `parse_known_args()` and treats leftovers as fatal (with the `-mcpa -> -m cpa` trap spelled out in the error);
+    every background arm asserts its OUTPUT FILE exists (`[ -s file ] || echo "arm failed"`), because a 4-second
+    arm in a 6-minute matrix is the tell; and a run that prints nothing is a crashed run.
+
+66. **Judge an adaptive design by its mechanism and on its own horizon, not by the nearest scalar.** My first
+    read of `--moe_cpu_pinned_arena` was "costs decode 12-35%": at 192 tokens, 2.05 went 71.8 -> 63.0 tok/s, 2.68
+    58.3 -> 48.8, Qwen3.5 126.9 -> 82.1 (the last reproducing a recorded acceptance figure, which made it feel
+    settled). Reading the ENGINE'S OWN counters at 384 tokens inverted it: plain mode performs **0 promotions and
+    0 demotions** across 48 layers - hot experts cannot migrate to the GPU at all without the pinned arena - while
+    `-mcpa` performs 3,689, and by pass 2 the throughputs are equal (64.5 vs 64.6 tok/s). The mechanism needs a
+    horizon longer than the comparison I ran, so the metric I chose could only ever report the cost. Two rules:
+    when a design's benefit comes from adaptation, measure an adaptation counter (promotions, swaps, cache fill)
+    alongside the latency metric; and run the arm at least as long as the mechanism's settling time - here, the
+    placement learning curve is itself worth 1.6-1.8x (pass 1 -> pass 2), so any short A/B compares warm-up
+    schedules, not designs. Related trap in the same report: a "7-93x gain" that came from comparing a measured
+    b=1 baseline to modelled b>1 throughput. A gain is only meaningful at matched batch; where the matched
+    baseline is unmeasured, print absolute numbers and say so.
+
 
 
 

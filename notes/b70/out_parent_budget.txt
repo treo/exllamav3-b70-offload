@@ -39,53 +39,55 @@ PLACEMENT: P_order (hottest->3090 first, the plan today) vs P_lpt (hot list, eac
 least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/rate_b, CPU leg)
   CPU home (S_c): measured per-assignment cost at 16 threads, per profile (out_cpu_worker_calib.txt, out_glm_cpu_calib.txt); any profile without a measured table falls back to bytes/47.4 GiB/s and says so
   model          rows    ctx  T_par S_g slots                      P_order                        P_lpt  verdict
-  Qwen3.8@2.68      1   4096    122        5            125 (  5/464/ 43)            125 (  5/446/ 61)  tie
-  Qwen3.8@2.68      1   4096    122       30            135 ( 29/464/ 19)            132 ( 29/425/ 58)  lpt
-  Qwen3.8@2.68      1   4096    122      120            159 (119/393/  0)            147 (119/346/ 47)  lpt
-  Qwen3.8@2.68      4   4096    144        5            190 (  5/464/ 43)            170 (  5/437/ 70)  lpt
-  Qwen3.8@2.68      4   4096    144       30            196 ( 29/464/ 19)            183 ( 29/416/ 67)  lpt
-  Qwen3.8@2.68      4   4096    144      120            286 (119/393/  0)            239 (119/338/ 55)  lpt
-  Qwen3.8@2.68      8   4096    176        5            356 (  5/464/ 43)            318 (  5/436/ 71)  lpt
-  Qwen3.8@2.68      8   4096    176       30            314 ( 29/464/ 19)            288 ( 29/415/ 68)  lpt
-  Qwen3.8@2.68      8   4096    176      120            442 (119/393/  0)            354 (119/338/ 55)  lpt
-  Qwen3.8@2.68     16   4096    238        5            643 (  5/464/ 43)            574 (  5/436/ 71)  lpt
-  Qwen3.8@2.68     16   4096    238       30            567 ( 29/464/ 19)            520 ( 29/415/ 68)  lpt
-  Qwen3.8@2.68     16   4096    238      120            719 (119/393/  0)            560 (119/338/ 55)  lpt
-  Qwen3.8@2.68      1  16384    133        5            136 (  5/464/ 43)            136 (  5/446/ 61)  tie
-  Qwen3.8@2.68      1  16384    133       30            146 ( 29/464/ 19)            143 ( 29/425/ 58)  lpt
-  Qwen3.8@2.68      1  16384    133      120            170 (119/393/  0)            158 (119/346/ 47)  lpt
-  Qwen3.8@2.68      4  16384    181        5            193 (  5/464/ 43)            192 (  5/437/ 70)  lpt
-  Qwen3.8@2.68      4  16384    181       30            233 ( 29/464/ 19)            220 ( 29/416/ 67)  lpt
-  Qwen3.8@2.68      4  16384    181      120            323 (119/393/  0)            276 (119/338/ 55)  lpt
-  Qwen3.8@2.68      8  16384    247        5            356 (  5/464/ 43)            318 (  5/436/ 71)  lpt
-  Qwen3.8@2.68      8  16384    247       30            345 ( 29/464/ 19)            320 ( 29/415/ 68)  lpt
-  Qwen3.8@2.68      8  16384    247      120            513 (119/393/  0)            425 (119/338/ 55)  lpt
-  Qwen3.8@2.68     16  16384    371        5            643 (  5/464/ 43)            574 (  5/436/ 71)  lpt
-  Qwen3.8@2.68     16  16384    371       30            567 ( 29/464/ 19)            520 ( 29/415/ 68)  lpt
-  Qwen3.8@2.68     16  16384    371      120            852 (119/393/  0)            693 (119/338/ 55)  lpt
+  Qwen3.8@2.68: union multiplier on topk - inherited 7.27x at b=8 / 13.12x at b=16 / 21.91x at b=32  vs  recomputed per layer from /home/treo/projects/pdc/exllamav3/notes/b70/profiles/live (48 layers): 4.98x / 7.56x / 10.60x [from_profile]
+  Qwen3.8@2.68      1   4096    196        5            197 (  5/464/ 43)            197 (  5/450/ 57)  tie   [engine-measured level x measured shape]
+  Qwen3.8@2.68      1   4096    196       30            204 ( 29/464/ 19)            203 ( 29/429/ 54)  tie   [engine-measured level x measured shape]
+  Qwen3.8@2.68      1   4096    196      120            225 (119/393/  0)            217 (119/349/ 44)  lpt   [engine-measured level x measured shape]
+  Qwen3.8@2.68      4   4096    231        5            237 (  5/464/ 43)            236 (  5/450/ 57)  tie   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      4   4096    231       30            259 ( 29/464/ 19)            256 ( 29/429/ 54)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      4   4096    231      120            326 (119/393/  0)            302 (119/349/ 44)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      8   4096    282        5            292 (  5/464/ 43)            291 (  5/454/ 53)  tie   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      8   4096    282       30            329 ( 29/464/ 19)            324 ( 29/432/ 51)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      8   4096    282      120            439 (119/393/  0)            400 (119/352/ 41)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68     16   4096    382        5            396 (  5/464/ 43)            395 (  5/457/ 50)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68     16   4096    382       30            452 ( 29/464/ 19)            445 ( 29/435/ 48)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68     16   4096    382      120            620 (119/393/  0)            560 (119/354/ 39)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      1  16384    213        5            215 (  5/464/ 43)            215 (  5/450/ 57)  tie   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      1  16384    213       30            222 ( 29/464/ 19)            221 ( 29/429/ 54)  tie   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      1  16384    213      120            242 (119/393/  0)            235 (119/349/ 44)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      4  16384    290        5            296 (  5/464/ 43)            295 (  5/450/ 57)  tie   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      4  16384    290       30            319 ( 29/464/ 19)            315 ( 29/429/ 54)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      4  16384    290      120            386 (119/393/  0)            362 (119/349/ 44)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      8  16384    396        5            405 (  5/464/ 43)            405 (  5/454/ 53)  tie   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      8  16384    396       30            443 ( 29/464/ 19)            437 ( 29/432/ 51)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68      8  16384    396      120            553 (119/393/  0)            513 (119/352/ 41)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68     16  16384    595        5            609 (  5/464/ 43)            608 (  5/457/ 50)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68     16  16384    595       30            666 ( 29/464/ 19)            658 ( 29/435/ 48)  lpt   [engine-measured level x measured shape [anchored, not measured]]
+  Qwen3.8@2.68     16  16384    595      120            833 (119/393/  0)            773 (119/354/ 39)  lpt   [engine-measured level x measured shape [anchored, not measured]]
   (cells are wall us/layer, then expert slots on 3090/B70/CPU. parent floor = measured non-expert cost (out_parent_leg.txt); parent expert bytes charged at the measured fused-kernel rate (190 GB/s), not a byte rate; CPU home measured per-assignment; streamed reads at 860 GB/s measured)...
-  GLM@3.05          1   4096    122        5            738 (  5/ 86/197)            807 (  5/ 86/197)  order
-  GLM@3.05          1   4096    122       30            589 ( 30/ 86/172)            654 ( 30/ 86/172)  order
-  GLM@3.05          1   4096    122      120            382 (120/ 86/ 82)            315 (120/ 86/ 82)  lpt
-  GLM@3.05          4   4096    144        5           2704 (  5/ 86/197)           2966 (  5/ 86/197)  order
-  GLM@3.05          4   4096    144       30           2159 ( 30/ 86/172)           2403 ( 30/ 86/172)  order
-  GLM@3.05          4   4096    144      120           1127 (120/ 86/ 82)           1070 (120/ 86/ 82)  lpt
-  GLM@3.05          8   4096    176        5           4930 (  5/ 86/197)           5407 (  5/ 86/197)  order
-  GLM@3.05          8   4096    176       30           3936 ( 30/ 86/172)           4379 ( 30/ 86/172)  order
-  GLM@3.05          8   4096    176      120           1969 (120/ 86/ 82)           1951 (120/ 86/ 82)  lpt
-  GLM@3.05         16   4096    238        5           8593 (  5/ 86/197)           9425 (  5/ 86/197)  order
-  GLM@3.05         16   4096    238       30           6860 ( 30/ 86/172)           7634 ( 30/ 86/172)  order
-  GLM@3.05         16   4096    238      120           3363 (120/ 86/ 82)           3400 (120/ 86/ 82)  order
-  GLM@3.05          1  16384    133        5            738 (  5/ 86/197)            807 (  5/ 86/197)  order
-  GLM@3.05          1  16384    133       30            589 ( 30/ 86/172)            654 ( 30/ 86/172)  order
-  GLM@3.05          1  16384    133      120            393 (120/ 86/ 82)            326 (120/ 86/ 82)  lpt
-  GLM@3.05          4  16384    181        5           2704 (  5/ 86/197)           2966 (  5/ 86/197)  order
-  GLM@3.05          4  16384    181       30           2159 ( 30/ 86/172)           2403 ( 30/ 86/172)  order
-  GLM@3.05          4  16384    181      120           1164 (120/ 86/ 82)           1070 (120/ 86/ 82)  lpt
-  GLM@3.05          8  16384    247        5           4930 (  5/ 86/197)           5407 (  5/ 86/197)  order
-  GLM@3.05          8  16384    247       30           3936 ( 30/ 86/172)           4379 ( 30/ 86/172)  order
-  GLM@3.05          8  16384    247      120           2040 (120/ 86/ 82)           1951 (120/ 86/ 82)  lpt
-  GLM@3.05         16  16384    371        5           8593 (  5/ 86/197)           9425 (  5/ 86/197)  order
-  GLM@3.05         16  16384    371       30           6860 ( 30/ 86/172)           7634 ( 30/ 86/172)  order
-  GLM@3.05         16  16384    371      120           3496 (120/ 86/ 82)           3400 (120/ 86/ 82)  lpt
+  GLM@3.05: union multiplier on topk - inherited 6.89x at b=8 / 12.01x at b=16 / 19.14x at b=32  vs  recomputed per layer from /home/treo/projects/pdc/exllamav3/notes/b70/profiles/live (42 layers): 6.08x / 10.24x / 15.96x [from_profile]
+  GLM@3.05          1   4096    122        5            960 (  5/ 86/197)            992 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          1   4096    122       30            815 ( 30/ 86/172)            842 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          1   4096    122      120            348 (120/ 86/ 82)            388 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          4   4096    144        5           3368 (  5/ 86/197)           3484 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          4   4096    144       30           2859 ( 30/ 86/172)           2956 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          4   4096    144      120           1222 (120/ 86/ 82)           1364 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          8   4096    176        5           5658 (  5/ 86/197)           5865 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          8   4096    176       30           4803 ( 30/ 86/172)           4977 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          8   4096    176      120           2053 (120/ 86/ 82)           2307 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05         16   4096    238        5           9527 (  5/ 86/197)           9876 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05         16   4096    238       30           8087 ( 30/ 86/172)           8381 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05         16   4096    238      120           3457 (120/ 86/ 82)           3884 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          1  16384    133        5            960 (  5/ 86/197)            992 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          1  16384    133       30            815 ( 30/ 86/172)            842 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          1  16384    133      120            348 (120/ 86/ 82)            388 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          4  16384    181        5           3368 (  5/ 86/197)           3484 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          4  16384    181       30           2859 ( 30/ 86/172)           2956 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          4  16384    181      120           1222 (120/ 86/ 82)           1364 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          8  16384    247        5           5658 (  5/ 86/197)           5865 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          8  16384    247       30           4803 ( 30/ 86/172)           4977 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05          8  16384    247      120           2053 (120/ 86/ 82)           2307 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05         16  16384    371        5           9527 (  5/ 86/197)           9876 (  5/ 86/197)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05         16  16384    371       30           8087 ( 30/ 86/172)           8381 ( 30/ 86/172)  order   [microbench floor (no engine measurement for 3.05bpw)]
+  GLM@3.05         16  16384    371      120           3457 (120/ 86/ 82)           3884 (120/ 86/ 82)  order   [microbench floor (no engine measurement for 3.05bpw)]
   (cells are wall us/layer, then expert slots on 3090/B70/CPU. parent floor = measured non-expert cost (out_parent_leg.txt); parent expert bytes charged at the measured fused-kernel rate (190 GB/s), not a byte rate; CPU home measured per-assignment; streamed reads at 860 GB/s measured)...

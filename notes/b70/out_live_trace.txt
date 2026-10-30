@@ -1,0 +1,137 @@
+Live routing beats the plan's profile by 2x at batch - and the planner had a second, self-inflicted error on top
+=================================================================================================================
+P2 of the plan's remaining list. Architecture section 12 flagged the concentration inputs (`h`, `sigma`,
+`union(rows)`, "spanning ~ 1 whenever a residue exists") as coming from "decayed cumulative profiles (dust counts
+of 1e-27)" and labelled them **"upper bounds, not promises"**, to be closed by "E14 (fresh trace)" and "E13 (real
+co-occurrence trace)". Both are now measured, on five Qwen3.8 quants, and the closure has an uncomfortable shape:
+the plan's *math* survives almost untouched and its *input* does not.
+
+How the trace was obtained without touching the engine: the CPU-split modules already maintain a raw per-expert
+selection histogram (`_split_hist`, updated by the routing path). Snapshot it after every generated token and diff
+-> that token's exact expert set per layer. Audit: 91,680 picks recorded against 92,160 expected (0.995), so the
+extraction is complete; `_split_hist` holds DECAYED counts, so the per-token set is taken as the top-`topk`
+positive diffs (modal positive count = 10 = config topk) rather than "the positives", which decay makes fragile.
+Instruments: notes/bench_live_trace.py (generate real text, trace it), notes/b70/analyze_live_trace.py (the
+decomposition below), notes/b70/run_home_matrix.sh etc. Prompt is repeated REFERENCE_TEXT (772 tokens), 192-384
+greedy decode tokens, one B70-less configuration per arm.
+
+1. CONCENTRATION IS EXTREME, AND IDENTICAL ACROSS QUANTS
+     quant   experts covering half the picks   effective support exp(H)   experts ever seen in 192 tokens
+     2.05                    24.2                          101.3                        208.0  of 512
+     2.68                    23.5                          100.1                        205.7
+     4.05                    23.7                          100.4                        205.1
+     5.05                    23.2                           98.9                        203.7
+     6.05                    23.3                           99.1                        203.9
+   Half of all picks go to ~5% of the experts. Quantisation does not move routing at all (same router, ~same
+   logits), which is itself the correction of a claim this chapter published yesterday - see section 5.
+
+2. THE union(rows) DECOMPOSITION - four ways, one dataset (2.68; the other four quants agree to ~1)
+       b   consecutive    random   indep(empirical)   planner   consecutive/planner   indep/planner
+       1          9.9       9.9            10.0          10.0              0.99x            1.00x
+       2         17.8      18.1            18.4          19.9              0.89x            0.93x
+       4         30.0      31.5            32.2          38.8              0.77x            0.83x
+       8         48.0      51.3            52.6          72.7              0.66x            0.72x
+      16         72.9      78.1            78.9         131.2              0.56x            0.60x
+      32        103.5     110.4           109.7         219.1              0.47x            0.50x
+  * `random` = b tokens sampled from the session; `indep(empirical)` = Monte Carlo drawing b tokens of topk
+    DISTINCT experts from the layer's own measured frequencies. They track each other to ~1%, and the closed form
+    `sum_e 1-(1-p_e)^(b.topk)` tracks the Monte Carlo to ~1.5% too (checked per layer on layer 0: model 154.6 vs
+    MC 154.6/157.2 at b=32). **So the independence approximation the plan uses is fine.**
+  * The plan's number is ~2x the truth at b=32. Since the math checks out, the entire gap is the **input
+    distribution** - the profile the plan was built from is far flatter than what a session actually routes.
+  * Temporal locality is real but small: consecutive 103.5 vs random 110.4 at b=32 (~6%). Batch scaling is not
+    rescued by "consecutive tokens reuse experts"; it is rescued by the distribution being peaked.
+  * Session-position check (union(32) by third of the session): first 106.6, middle 100.7, last 104.6 - flat, so
+    this is not "my trace is too short and would broaden with exposure". Whole session still touches only ~206 of
+    512 experts per layer.
+
+3. WHICH POPULATION? (the caveat that stops this becoming a 2x victory lap)
+  The stored profile accumulates across sessions and models, so it approximates **an operator's mixed traffic**;
+  my trace is **one user, one prompt, one session**. For b CONCURRENT unrelated users the plan's flatter
+  distribution is roughly the right input; for b tokens drawn from similar sessions it is ~2x pessimistic. That is
+  a deployment fact, not a modelling error - and the response is a scheduler lever, not a number: **session
+  affinity** (keep a session's tokens on the worker that already holds its narrow expert set) converts the
+  pessimistic regime into the measured one. A second consequence: with h_live = 99.8% at 256 resident experts per
+  layer, the CPU home receives almost no picks in the measured regime, which is why the plan's "CPU-bound"
+  verdicts evaporate in section 4.
+     residency curve (mean over layers of the per-layer top-N mass, 2.68): N=128 -> 93.88%, N=256 -> 99.83%,
+     N=384 -> 100.00%. Note the direction versus the plan's own prediction: section 12 guessed "expect h_live <
+     h_profile"; measured, h_live is at least as good, and the profile's defect is in its TAIL, not its peak.
+
+4. THE SELF-INFLICTED ERROR FOUND WHILE DOING THIS (worth more than the routing result)
+  `counts_for()` in the planners returned **layer 0's** array and every consumer treated it as "the" distribution.
+  Layer 0 of 2.68 touched 289 of 512 experts in 1,920 picks (top-10 mass 0.177) - wildly atypical. My first fix
+  (collapse the 48 per-layer vectors into one) was wrong in the other direction, because two of the consumers are
+  not linear in p:
+    * distinct-expert counts (concave): the collapsed vector said union(32) = 22.75x topk where the per-layer mean
+      says 10.56x and the trace says 10.35x - a 2.2x overstatement manufactured while fixing a 1x error;
+    * residence hit rate (an ORDER statistic - each layer keeps its OWN resident set): the mixture read h = 74.5%
+      for 6.05 bpw where the per-layer value is 99.3%, and that single number moved the quant's b=16 throughput
+      6.6x (132 vs 874 t/s) and re-labelled which home binds.
+  Fixed now: `layer_profiles()` + per-layer `union_mult()` + per-layer `hit_rate()`, with the mixture kept only for
+  the linear consumers, and `counts_for()` documented as delegating to the mixture. LESSONS 63.
+
+5. WHAT THAT CHANGES IN THE CHAPTER'S PUBLISHED CONCLUSIONS (all retracted in-tree, same day)
+  * **"6.05 bpw is CPU-bound from b=2; the CPU home caps it at ~300-430 t/s"** - artifact. With per-layer hit rate
+    the CPU leg is 0-2 us/layer instead of 292-2212, and 6.05 tracks every other quant (878 t/s at b=16, 1305 at
+    b=32). Nothing was capping 6.05 except a bad input vector.
+  * **"At b>=16 routing concentration outranks bits: 5.05 beats 2.05 because its union is narrower (94.8 vs
+    107.1 at b=16)"** - artifact of the same two defects. Measured live, every quant's union(16) is 75.1-75.9 and
+    every quant's throughput at b=16 is 878-886 t/s: **routing is quant-independent, so no quant wins on routing.**
+  * "Batch is the real variable: Qwen3.8 margin 4.9x -> 1.3x -> 0.5x over b=1->4->8" - the decay was over-predicted
+    by roughly 2x at b>=16; with the measured distribution the margin holds up much further out.
+  * What SURVIVES: at b=1 the parent binds and the quant/card choices are invisible (unchanged, and now anchored
+    to a measured parent term - out_engine_step.txt); the independence approximation is sound; the residency
+    strategy of keeping ~50% of experts hot is nearly optimal (99.8% hit).
+
+6. HOW THE PLANNER NOW RUNS THIS
+    python3 notes/b70/analyze_live_trace.py /tmp/trace.json --emit-profile /tmp/lp/live_2.68bpw.json
+    B70_PROFILE_DIR=/tmp/lp2 python3 notes/b70/plan_concurrency.py      # live routing where traced
+    B70_UNION=legacy python3 notes/b70/plan_concurrency.py              # old multipliers, for the diff
+  `counts_for()` honours B70_PROFILE_DIR and prefers a live profile over the engine's stored one (built
+  deterministically - a directory holding both for one model would otherwise let glob order decide). Current
+  live-vs-planner union multipliers printed by the planner itself: 2.68 -> 4.98/7.56/10.60 at b=8/16/32 against
+  the inherited 7.27/13.12/21.91; GLM stays on its stored profile (6.08/10.24/15.96 per-layer recomputed) because
+  GLM has never been traced - the one profile the plan still has not verified.
+
+7. WHAT WOULD MAKE THIS ROBUST ENOUGH TO STOP ARGUEING ABOUT
+  * Multiple domains and lengths: this is one prompt (repeated) per quant. The peakiness may be genre-dependent,
+    and code/text/long-context sessions could differ.
+  * Concurrent sessions: measure union(b) across *simultaneous* streams (the deployment quantity) rather than
+    approximating it with independence over a single-session distribution. The trace format supports it; the
+    harness needs a multi-job generator.
+  * GLM: same treatment, one afternoon of runs.
+  * Longer horizons: 192-384 tokens is a short session. The position check says flat within a session, but exposure
+    does eventually reach the tail (206 of 512 experts seen) - the question the plan should ask is how h and
+    union(32) evolve over 10^4 tokens, which is exactly what the stored profile claims to know.
+8. APPENDED AFTER MEASUREMENT, NOT MODELLING: WHICH POPULATION? (the section-3 caveat, resolved)
+   Six traced sessions exist for Qwen3.8@2.68's router: five quants on the prose corpus (routing is
+   quant-independent, so they are effectively five independent prose sessions) plus one session prompted with C++
+   source (a different domain). Drawing one token from each and counting distinct experts per layer:
+       b=1   prose 9.9      code 9.9
+       b=2   same prose session, 2 consecutive tokens ....... 17.8
+             two different prose sessions ........................ 18.2   (+2%)
+             prose + code, i.e. different DOMAINS ................ 19.6   (+10%)
+       b=3   prose + code + 2.05-quant .......................... 27.7
+       b=6   all six sessions ................................... 45.9   (planner for b~6: ~57, i.e. 0.81x)
+   * Pooling unrelated sessions broadens union by ~2%; pooling domains by ~10%; the planner's inflation is ~19%
+     at b=6 and ~2x by b=32, and it GROWS with b. So the "one session vs mixed traffic" worry is real but an
+     order of magnitude too small to explain the gap: the profile's tail is simply flatter than any real
+     distribution, of any population, on this model.
+   * Independence itself is validated out in the cross-session regime, not just in theory: the closed form on the
+     measured single-session distribution gave 32.2 at b=4 where six-session draws give 32.1 (b=2: 18.4 vs 18.2).
+     Conclusion: keep the plan's math, replace its input.
+   * Code-domain routing is measurably broader (half the picks in 28.4 experts vs 23.5 in prose; effective
+     support 121 vs 100) and the same configuration decoded 34.0 tok/s vs the converged prose 58.3 - a domain
+     effect on throughput as well as on routing, driven by the extra experts a mixed workload touches. Deployment
+     estimates for a code-heavy product should use the broader distribution, which means re-tracing on the real
+     workload rather than re-tuning the model.
+
+9. WHY "CONCURRENT SESSIONS" COULD NOT BE MEASURED THE OBVIOUS WAY
+   `--jobs 4` runs four sessions in one generator, but the engine steps sequences one at a time (the per-token
+   histogram diff for a step with four live sessions contained exactly 10 experts - one sequence's worth), so the
+   snapshot trick measures union(1) and labels it union(4). The instrument now says so instead of publishing it:
+   the concurrency arm's value is the THROUGHPUT at batch (aggregate tokens/s with b sessions live), which is what
+   the section-2 baseline of out_throughput_report.txt needs, and the union came from pooling traces offline
+   instead. The aggregate decode throughputs from those arms (b=1/2/4/8/16 = 58.3/33.2/33.3/32.5/33.1 tok/s)
+   are in out_engine_step.txt section 8 and are the matched-batch baseline of out_throughput_report.txt.
