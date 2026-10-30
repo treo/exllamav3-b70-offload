@@ -19,7 +19,8 @@ see `SPREAD`. Cost is per weight, not per byte: these are the same weights at an
 
 Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X, rev H, and
 rev I = probe_dpas6.cpp, the current fastest at every measured point). Dispatch is by recipe as well as rows:
-the DPAS families require K <= 5, so denser recipes fall back to dp4a.
+the GATHER-family DPAS revisions (G/H/I) require K <= 5, so for those denser recipes fall back to dp4a; the
+transposed family (rev J/L) does not - it serves K = 2..6 verified, 2..16 compiled.
 
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 

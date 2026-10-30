@@ -21,7 +21,8 @@ see `SPREAD`. Cost is per weight, not per byte: these are the same weights at an
 
 Provenance: notes/b70/out_gemv.txt (rev C / KCONST), notes/b70/out_dpas.txt (rev F, rev G, DPAS_X, rev H, and
 rev I = probe_dpas6.cpp, the current fastest at every measured point). Dispatch is by recipe as well as rows:
-the DPAS families require K <= 5, so denser recipes fall back to dp4a.
+the GATHER-family DPAS revisions (G/H/I) require K <= 5, so for those denser recipes fall back to dp4a; the
+transposed family (rev J/L) does not - it serves K = 2..6 verified, 2..16 compiled.
 Usage: python3 plan_decode_cost.py           # prints the tables and the dispatch
 """
 
@@ -70,7 +71,9 @@ DPAS_GATHER = {          # us per (expert, gate/up projection); rows=2 interpola
 }
 DPAS_GATHER_DOWN_FACTOR = {1: 1.16, 2: 1.25, 4: 1.29, 8: 1.47, 16: 1.67}
 MEASURED_ROWS_GATHER = (1, 4, 8, 16)
-K_LIMIT_GATHER = 5       # rev G/H/I unpack needs K <= 5; the 6.05 bpw recipe has no DPAS path
+K_LIMIT_GATHER = 5       # rev G/H/I ONLY: their unpack reads 4 windows from one 32-bit word (3K+16<=32). Rev J/L
+                         # reads K dwords per column group and serves the dense recipes - K=6 measured bit-exact
+                         # on real data (out_quant_ladder.txt), so 6.05 bpw is NOT a dp4a-only recipe any more.
 
 # Fifth family, current best: rev J (probe_dpas7.cpp) - transposed tiles, so a column's ring words are plain
 # register rows and the shift amounts are compile-time constants. No iselect (rev H), no gather (rev I).
@@ -87,6 +90,19 @@ DPAS_TRANSPOSED = {      # us per (expert, gate/up projection); rows=2 interpola
     16: 2.02,
 }
 DPAS_TRANSPOSED_DOWN_FACTOR = {1: 1.11, 2: 1.20, 4: 1.29, 8: 1.38, 16: 1.51}
+
+# WHAT THESE PER-EXPERT NUMBERS DO AND DO NOT ENCODE (both learned after the tables were written).
+#  * Cost per WEIGHT, not per byte - and the quantization ladder confirms it: across K = 2..6 (0.39 -> 1.17
+#    MiB/expert) rows=1 time moves 17.2 -> 17.7 us (+3%) at fixed weight count (out_quant_ladder.txt). So one
+#    table serves every recipe, which is why the model never needed a K dimension.
+#  * Derived at E=10, where a launch's fixed cost is spread over only 10 experts. Measured per-expert cost at
+#    E=96 is 1.25 us (rows=1) and 1.86 us (rows=16) against these 1.40 / 2.02 (out_egrid.txt), so the table is
+#    ~10-20% PESSIMISTIC for large resident sets and correct-to-conservative at small ones. Not adjusted: the
+#    E=10 numbers come from certified windows, the E=96 ones from a window whose anchor read 23.8 us (unhealthy,
+#    shared render node), so revising them now would trade a small conservatism for an uncontaminated error.
+#  * The "437 GB/s ~ 90% of the memory wall" framing attached to rev J is partly L2 bandwidth: L2 is 24 MiB and
+#    an E=10 set is 5.9 MiB, re-read every timed iteration. DRAM-regime rates are the large-E ones
+#    (E=96: 492 GB/s at rows=1, 287-292 at rows=16).
 
 # Sixth family, and the fastest at every row count: E25a - gate+up in ONE launch at KS=1, down separate at
 # KS=1. Grid-level fusion costs no extra registers (a thread still serves one projection), so unlike E29's row
@@ -157,9 +173,9 @@ def n_buckets(rows):
 def per_proj_us(rows, kernel, proj="gate_proj", K=3):
     """us per (expert, proj) at `rows`. Raises for rows outside the measured range.
 
-    The DPAS families cannot serve K > K_LIMIT_GATHER (their unpack reads four windows from one 32-bit
-    funnel-shifted word, which needs 3K + 16 <= 32), so for those recipes dispatch() falls back to dp4a
-    rather than extrapolating.
+    The GATHER-family revisions (G/H/I) cannot serve K > K_LIMIT_GATHER: their unpack reads four windows from one
+    32-bit funnel-shifted word, which needs 3K + 16 <= 32, so for those recipes dispatch() falls back to dp4a
+    rather than extrapolating. dpas_transposed (rev J/L) is not subject to that bound and is certified to K = 6.
 
     Above BUCKET_ROWS the cost follows the measured additive bucket law, not an extrapolation of the rows
     curve: the engine runs ceil(rows/16) launches over the same experts and each re-streams the weights.
@@ -182,7 +198,8 @@ def per_proj_us(rows, kernel, proj="gate_proj", K=3):
         return DPAS_REG[rows] * (DPAS_REG_DOWN_FACTOR[rows] if proj == "down_proj" else 1.0)
     if kernel == "dpas_gather":
         if K > K_LIMIT_GATHER:
-            raise ValueError(f"K={K} has no DPAS path (limit {K_LIMIT_GATHER}); use dp4a")
+            raise ValueError(f"K={K} has no GATHER-family path (limit {K_LIMIT_GATHER}); "
+                             "use dpas_transposed (rev J/L, certified to K=6) or dp4a")
         return DPAS_GATHER[rows] * (DPAS_GATHER_DOWN_FACTOR[rows] if proj == "down_proj" else 1.0)
     if kernel == "dpas_transposed":
         # Rev J is compiled for K_MIN..K_MAX (2..16) and its unpack reads K dwords per column group, so unlike

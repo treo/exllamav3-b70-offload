@@ -630,8 +630,15 @@ measured rate curve at the matched footprint:
   6.13 → 9.43 µs across rows 1→16, giving **layer time 61.6 µs at b=1** (from 114.6 with rev G+X, 117.1 with
   rev H+X, 173.1 at rows 16) — ~4× inside the 250 µs measured parent window, and 318 GB/s effective against
   the 484–674 GB/s ceilings, i.e. the first kernel here within ~1.5× of the memory wall. **The surviving
-  exception is the recipe:** the DPAS families' unpack needs 3K + 16 ≤ 32, so K > 5 (the 6.05 bpw recipe) has
-  no DPAS path and falls back to dp4a at roughly 2× the cost. The ISA census that anchored the path here (once
+  exception is the recipe:** ~~the DPAS families' unpack needs 3K + 16 ≤ 32, so K > 5 (the 6.05 bpw recipe) has
+  no DPAS path and falls back to dp4a at roughly 2× the cost~~ **corrected: that bound belongs to revs G/H/I only**
+  (they extract four windows from one 32-bit funnel-shifted word). Rev J/L reads K dwords per column group from
+  the transposed tile, so it serves the dense recipes: **K = 6 (the 6.05 bpw recipe) is measured bit-exact on real
+  checkpoint data** at rows 1/8/16, and the whole quantization ladder K = 2..6 costs +3% time for 3× the bytes
+  (`out_quant_ladder.txt`) — which is also direct evidence for the cost model's premise that cost is per weight,
+  not per byte. The kernel compiles for K = 2..16 but K > 6 has no checkpoint here to verify against, so K > 6 is
+  declared, not certified. The dense recipes still cost their extra bytes in VRAM capacity, admission transfer and
+  energy — just not in decode latency. The ISA census that anchored the path here (once
   `NEO_CACHE_PERSISTENT=0` let the dumps happen):
   rev G+X 906 static instructions, 48 `store.slm.d32`, 108 syncs, 11 spill references; rev H+X 591, **0 SLM
   stores, 20 syncs, 0 spills**. Rev H's largest opcode class is `mov` (141), i.e. moving products into the DPAS
