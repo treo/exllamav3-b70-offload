@@ -226,3 +226,48 @@ Reproduce: for k in 0 2 3 4 5 6; do icpx -fsycl -O2 -DGEMV_KCONST=$k -o /tmp/pgK
 (0 = runtime-K baseline). Cases: dump_gemv_case.py /tmp/rc_K<k>_gate 10 16 0 --with-reference
 --ckpt Qwen3.8-Flash-Next-exl3-<recipe>. argv order for probe_gemv is CASE order reps rows impl ks -
 misordering it produced a spurious column of FAIL results in this very session, so it is worth stating.
+
+================================================================================
+REV C UNDER IGC (ISA census: NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 on -DGEMV_KCONST=3, case
+/tmp/gemv_dpE10, rows=1 ks=4). The dp4a path is 48 % data routing, and dp4a does not thread its accumulator.
+================================================================================
+This was prompted by the question "if we applied all the loading optimizations to rev C, could it win rows=1
+again?" Two dp4a-bearing entries were censused (simd32 entry_0042 and entry_0036 - two instantiations of the
+same GEMV variant, agreeing within 1 %). The dump also contains several multi-kiloline simd16 entries full of
+`lsc_load.slm`; those belong to other variants and are deliberately NOT attributed here.
+
+    static slots 1322 / 1318:  mov 387/391, add 265/262, shr 175/174, mul 78/73, lsc_load 72/72,
+                               goto 67/67, dp4a 64/64, shl 54/54, or 42/42
+    dp4a 64 | arithmetic (mul+mulh+mad) ~100 | routing (mov/shl/shr/or/logic) ~638 = 48 % of the loop
+
+Two findings invisible from the source:
+
+1. dp4a lowers WITHOUT its accumulator: `dp4a V0378 0x0:d V0379 V0376` then `add acc acc V0378`. IGC passes
+   an immediate zero and adds separately, so each dot costs two instructions. 265 add against 64 dp4a is
+   consistent with that plus address arithmetic and the cross-lane reduction.
+2. Half the stream assembles dp4a operands. Per loaded dword: three `shr` (>>8, >>16, >>24) then four
+   subcomponent `mov` into one register region (V0377(0,0)<4> ...), i.e. extracted nibbles are re-packed
+   byte by byte before the dot can consume them. The dots themselves are ~5 % of the loop.
+
+Does that make loading optimizations viable for rev C? Quantified: no. 64 dp4a x 4 MACs maps to 256 weights,
+giving roughly 5 instructions per weight against rev J's measured 74 instructions per 256-weight tile (0.29) -
+a 17x instruction differential, consistent with the ~7x differential in measured non-byte cost (rev C ~43 us
+of fixed+arithmetic from the K-sweep fit; rev J 6.2 us of per-tile work above its 7.8 us floor).
+
+The routing is removable in principle - store weights pre-expanded to one byte each so a loaded dword feeds
+dp4a untouched - but at K = 3 that triples weight bytes, and rev C's bytes already move at its own measured
+marginal rate of 694 GB/s (8.19 MB over 11.8 us, from the K-sweep above). So 6.14 MB -> 18.4 MB buys ~+17.7 us
+of traffic to save at most the ~20 us the routing represents: a wash, and still ~3x off rev J. Removing the
+dp4a+add split might add 10-20 % of the loop IF a hardware accumulate form exists; no builtin used here
+produced one, so that remains speculation rather than a lead.
+
+The generalizable lesson, now supported from three independent directions in E24: operand routing is this
+device's recurring cost - rev H's iselect cascade (+86 % when doubled), rev I's gathers (~2x better still),
+rev C's mov/shr re-packing (48 % of its loop). Rev J is the only kernel that escapes it, and it escapes because
+the LAYOUT removes it rather than the code. That is an argument for accepting the intra-tile permute on general
+grounds, not merely for one kernel's speed.
+
+Reproduce the rev C census:
+    icpx -fsycl -O2 -DGEMV_KCONST=3 -o /tmp/pgK3 probe_gemv.cpp
+    NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=$PWD/isa_revC /tmp/pgK3 /tmp/gemv_dpE10 0 3 1 1 4
+    grep -c "\bdp4a\b" isa_revC/*.isaasm        # the GEMV entries are the simd32 ones, 64 dp4a each

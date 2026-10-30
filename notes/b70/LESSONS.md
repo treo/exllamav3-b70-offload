@@ -924,6 +924,13 @@ nothing that is the sole instance of a measurement.
     code with `-ffp-contract=off`. And when adopting such a rule, re-check that already-certified kernels are
     unaffected instead of assuming they were lucky: rebuilding revs I/J with the flag off gave byte-identical
     output, which is what makes the earlier verification durable rather than accidental.
+45. **A check that prints a failure but exits 0 is decoration, not a gate.** The markdown table validator I
+    run before every commit prints `BAD <file> <line>` when a row's column count disagrees with its table, but
+    it always exited 0 — so `python3 check && git add -A && git commit` sailed straight through and committed a
+    row that had lost a cell separator (the same edit that swallowed the neighbouring row's opening cell). The
+    rule: any check wired into a commit path must exit nonzero on failure, and a check that cannot fail the
+    chain should not be described to myself as protection. Cost here was one amend; the class of bug is the one
+    that silently reaches the repo.
 
 
 
