@@ -1054,7 +1054,7 @@ nothing that is the sole instance of a measurement.
     warm-up mainly prevents a throwaway first round; several timed rounds are what make the estimate stable, and
     both are needed.
 
-55. **Quote achieved bandwidth together with the working-set size, or you will mistake L2 for DRAM — and the
+54. **Quote achieved bandwidth together with the working-set size, or you will mistake L2 for DRAM — and the
     cache-residency self-check is free.** The chapter's headline rate ("437 GB/s ≈ 90 % of the 484 GB/s stream
     slope, so the streaming path is at the wall") came from an E=10 case whose weights are 5.9 MiB against a
     24 MiB L2, measured by re-reading those same tensors thousands of times. Running the quantization ladder made
@@ -1071,7 +1071,7 @@ nothing that is the sole instance of a measurement.
     measuring the host, not the device — check it whenever per-launch work grows (bigger E, bigger rows, fused
     multi-projection grids).
 
-54. **This box's benchmark GPU is shared with the desktop, and the anchor is the detector.** A batch whose anchor
+55. **This box's benchmark GPU is shared with the desktop, and the anchor is the detector.** A batch whose anchor
     (rev I gate rows=1, healthy 19.4 us) could not get below 20.6 us across six interleaved samples, with one
     43.7 us outlier, was not a thermal mystery: `fuser -v /dev/dri/renderD128` shows firefox holding the same
     render node as the probes (plus the niri compositor on the card). Every absolute figure in this chapter was
@@ -1084,6 +1084,20 @@ nothing that is the sole instance of a measurement.
     captured alongside the numbers so a future reader can tell a contaminated batch from a clean one. Until then,
     the close-out's absolute decode figures carry a shared-device asterisk even though the protocol (warm
     continuous work, round-robin arms, anchor) limits the damage.
+
+56. **State an operational rule together with the parameter range it was measured over, or it will be applied
+    outside that range — usually by you.** "Fusion and split-K are substitutes, so fuse at KS=1" was a fair
+    reading of the E=10 data (there, fused KS=2 cost +7%) and it sat in the decision table as if it were general.
+    The low-E sweep says otherwise: at E=2 the best schedule is fused *and* KS=4 (9.7 us, against 17.6 fused KS=1
+    and 14.1 separate KS=4). The two levers are not substitutes in general; they are two sources of one scarce
+    resource, and at low E neither alone is enough. What was wrong was not the measurement but the FORM of the
+    claim: it named the knobs instead of what the knobs buy. Three habits. (1) While a rule rests on one operating
+    point, write the point into the rule ("at E=10 …") until a sweep earns the right to drop it — a scoped claim
+    is falsifiable, an unscoped one is merely confident. (2) Prefer rules phrased over the underlying quantity:
+    here, gemm grid occupancy (~0.6–0.8 × HW_THREADS) predicts the optimum at E=2, 4, 10 and the indifference at
+    E=96, including the two cells that break the knob-level rule. (3) When a rule is superseded, keep the old
+    wording and what it got wrong in the same cell (done in close-out D8), because the next reader — often me —
+    remembers the stale version and needs to know which memory to discard.
 
 
 

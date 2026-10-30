@@ -1,0 +1,72 @@
+Low-E grid (E = 2, 4): fusion pays MORE as the grid empties, and the real rule couples fusion with split-K
+============================================================================================================
+The last corner of the E-grid gap ("X/EPT=1 was validated at E=10"). Cases dumped at E=2 and E=4 (gate + up, K=3,
+same tk/tn as everything else), rev L (/tmp/revL9), rows 1/8/16 and, at rows=1, KS = 1/2/4.
+
+WINDOW WARNING FIRST: the anchor read 44.0 us at the start of this batch and 25.8 us at the end (healthy 19.4),
+so absolute us here are inflated by an unknown, drifting amount - firefox shares the render node (LESSONS 54).
+Everything read below is a RATIO measured between adjacent runs of the same cell, which is the comparison this
+box can still support.
+
+ E rows KS | gemm threads | separate  fused  fuse gain | single-proj (gate/up)
+  2   1  1 |          320 |     32.6   17.6    1.85x   |   16.3 / 16.3
+  2   1  2 |          640 |     19.9   11.3    1.76x   |   10.0 /  9.9
+  2   1  4 |         1280 |     14.1    9.7    1.45x   |    7.1 /  7.0
+  2   8  1 |          320 |     36.0   19.5    1.85x   |   18.0 / 18.0
+  2  16  1 |          320 |     38.2   21.1    1.81x   |   19.1 / 19.1
+  4   1  1 |          640 |     32.7   17.9    1.83x   |   16.4 / 16.3
+  4   1  2 |         1280 |     20.3   12.1    1.68x   |   10.2 / 10.1
+  4   1  4 |         2560 |     15.1   14.8    1.02x   |    7.5 /  7.6
+  4   8  1 |          640 |     36.7   20.5    1.79x   |   18.4 / 18.3
+  4  16  1 |          640 |     40.6   22.8    1.78x   |   20.5 / 20.1
+
+1. One expert per thread is fine at low E too (the D4 question). E=2 and E=4 behave like scaled versions of E=10;
+   nothing about the layout breaks when the grid is only 320-640 threads. The concern that motivated this batch -
+   that a tiny grid might make the expert-grid port pathological - did not materialise.
+
+2. Fusion pays more the emptier the device is, exactly as D8 predicts: 1.78-1.85x at E=2/4 rows 8/16 and rows=1
+   KS=1, against 1.35-1.63x at E=10 and ~1.0x at E=96. Fusion is a parallelism purchase, and the parallelism is
+   scarcer at low E.
+
+3. THE NEW PART - fusion and split-K are not either/or. At E=2 the best schedule is fused AND KS=4 (9.7 us),
+   not fused KS=1 (17.6) and not separate KS=4 (14.1): split-K buys 2.3x at E=2 while fusion buys a further 1.45x
+   on top. The E25a phrasing ("they are substitutes, so fuse at KS=1") was an E=10 artifact: at E=10, KS=2 fused
+   cost +7%, because KS=1 fused had ALREADY filled the grid.
+
+4. What actually predicts all of it is a target grid occupancy, reached from either lever:
+      threads = tiles_n_effective x KS x 2 x E        (tiles_n_effective = tn separate, 2*tn fused)
+   every measured optimum lands in the 1280-1600 band (~0.6-0.8 x 2048 slots):
+      E=2  fused KS=4 -> 1280  (best, 9.7)     E=2  fused KS=2 -> 640   (under-filled, 11.3)
+      E=4  fused KS=2 -> 1280  (best, 12.1)    E=4  fused KS=4 -> 2560  (over-subscribed, 14.8)
+      E=10 fused KS=1 -> 1600  (best, 20.7)    E=10 fused KS=2 -> 3200  (+7%, measured in E25a)
+      E=96 separate KS=1 -> 7680 (already 3.75 waves; neither lever helps, out_egrid.txt)
+   Restated rule (amends D8): choose KS and fusion JOINTLY so the gemm grid lands in ~0.6-0.8 x HW_THREADS,
+   preferring fusion when both fillers achieve the same occupancy, since it also removes a launch and gives
+   combine_both its single-combine schedule. Below the band, raise KS before considering fusion; above it, stop
+   splitting and consider unfusing.
+
+5. Rows behaves as expected (per-expert cost rises slowly with rows at fixed E), and gate/up remain symmetric
+   (16.3/16.3, 10.0/9.9, 20.5/20.1), which is the null check that the fused grid's projection split is balanced.
+
+6. CORRECTNESS at low E: the fused outputs left on disk are bit-exact for BOTH projections at E=2 and E=4
+   (gate vs the gate reference, `_p2` vs the up reference). Checked from files, no device work. Note the trap I
+   walked into on the first pass: comparing the gate dir's `_p2` against the *gate* directory's `y_ref.npy` reports
+   WRONG, because `_p2` is the up projection's result. Any fused-output comparison must pair each buffer with the
+   reference of the tensor it actually is - which is why `gate_dpas.py` keeps the two refs explicit instead of
+   globbing a directory.
+
+WHAT THIS DOES NOT YET CHANGE IN THE PLANNERS. plan_decode_cost.py collapses each family's table to "best KS per
+rows" at E=10 and exposes should_fuse(tn, KS, E), which encodes the old exclusive form of the rule. Implementing
+rule 4 needs the per-KS cost table (currently not stored: KS is optimised away inside the measurement), so the
+change is: measure and store us per (expert, rows, KS) for the fused and separate schedules at one E, then let the
+planner pick the (fusion, KS) pair that lands nearest the band without exceeding it. Doing that under a
+contaminated window would bake the contamination into the model, so it waits for an anchor-healthy batch.
+
+Reproduce:
+    python3 notes/b70/dump_gemv_case.py /tmp/lo_e2_gate 2 16 0 --with-reference
+    python3 notes/b70/dump_gemv_case.py /tmp/lo_e2_up   2 16 0 --with-reference --proj up_proj
+    WARM_S=2 /tmp/revL9 /tmp/lo_e2_gate 2 1 4                       # single projection, E=2, rows=1, KS=4
+    WARM_S=2 /tmp/revL9 /tmp/lo_e2_gate 2 1 4 native /tmp/lo_e2_up  # fused
+    anchor / contamination check:
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2                # 19.4 us when quiet and ramped
+      fuser -v /dev/dri/renderD128
