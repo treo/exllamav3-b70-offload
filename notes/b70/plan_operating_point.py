@@ -32,6 +32,7 @@ import glob
 import json
 import os
 import random
+import sys
 
 # out_rates_footprint.txt, measured: (footprint MiB, scattered GB/s, clustered GB/s)
 BANDS = {
@@ -156,12 +157,19 @@ def main():
             if tiles_n and rr in (1, 2, 4, 8, 16):
                 try:
                     j_us, j_shape, j_ks, j_note = pdc.layer_us_joint(
-                        dev, rr, tiles_n, eb / 3.0, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
-                except ValueError:
+                        dev, rr, tiles_n, eb / 3.0,
+                        1.0 if pdc.GATE_GEOM.get(name.split("@")[0], "qwen38") != "qwen38"
+                        else pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))),
+                        geom=pdc.GATE_GEOM.get(name.split("@")[0], "qwen38"))
+                except ValueError as exc:
                     # The joint tables cover the cells that were measured (rows 1/8/16, E 2..96). Outside them we
                     # fall back to the older per-projection tables rather than borrowing a neighbouring row count
                     # or expert count - which is what out_fusion_penalty_k.txt showed is unsafe to guess about.
+                    # The reason is PRINTED: a silent fallback hid a geometry-wiring bug here for a full run,
+                    # and "the model disagreed with itself between two code paths" is undiagnosable otherwise.
                     j_us = None
+                    print(f"    note: joint dispatch unavailable at rows={rr}, picks={dev:.1f} ({exc}); "
+                          f"using the per-projection tables", file=sys.stderr)
                 if j_us is not None and j_us < us_layer:
                     us_layer, kern = j_us, f"joint-{j_shape}-KS{j_ks}"
                     fused_any = True
@@ -181,8 +189,11 @@ def main():
         us1, kern1 = pdc.layer_us(d1 * h, 1, pdc.scale_from_eb(eb, bpw_note))
         if tiles_n:
             try:
-                j1, sh1, ks1, _n1 = pdc.layer_us_joint(d1 * h, 1, tiles_n, eb / 3.0,
-                                                       pdc.scale_from_eb(eb, bpw_note))
+                j1, sh1, ks1, _n1 = pdc.layer_us_joint(
+                    d1 * h, 1, tiles_n, eb / 3.0,
+                    1.0 if pdc.GATE_GEOM.get(name.split("@")[0], "qwen38") != "qwen38"
+                    else pdc.scale_from_eb(eb, bpw_note),
+                    geom=pdc.GATE_GEOM.get(name.split("@")[0], "qwen38"))
             except ValueError:
                 j1 = None
             if j1 is not None and j1 < us1:

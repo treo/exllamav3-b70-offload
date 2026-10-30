@@ -52,8 +52,8 @@ GLM@3.05:  topk=8 (config.json), expert block 9.000 MiB, 288 experts/layer, 42 M
     4    30.2       21.4     192.2M      no    220       489   3.8x    259     20.52      ?
     8    55.1       39.0     351.1M      no    239       893   6.9x    296     37.50      ?
    16    96.1       68.1     612.6M      no    253      1558  12.0x    304     65.42      ?
-  fusion/split-K (D8 joint rule): not evaluated - no measured gate geometry for this model
-  b=1: 42 layers x 124 us = 5.20 ms/token of B70 time (50.9 MiB/layer read while doing 5.7 expert-projection-layers of work; dispatch picks dpas_transposed)
+  fusion/split-K (D8 joint rule): joint table consulted where a gate geometry is measured (gate tiles_n=128); the choice is (fused?, KS) together, not fuse-at-KS=1
+  b=1: 42 layers x 83 us = 3.48 ms/token of B70 time (50.9 MiB/layer read while doing 5.7 expert-projection-layers of work; dispatch picks joint-separate-KS4)
   upper bound if this card owned every pick: 534 us/layer
 
 Reading it:

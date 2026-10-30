@@ -1,0 +1,55 @@
+GLM gate geometry and the joint (fusion, split-K) grid that goes with it - fusion is a wash here, and the reason is the shape
+============================================================================================================
+Geometry measured off the checkpoint (dump_gemv_case.py, layer 3 - GLM's MoE layers start at 3): k=4096,
+n=2048, tiles=(256,128), 3.0 MiB per expert per projection at K=3, i.e. 5.1x Qwen3.8's gate bytes and
+tiles_n = 128 vs 40. Consequence for the dispatch rule: a SEPARATE gate launch over 10 experts already puts
+128 x 2 x 10 = 2,560 threads on a 2,048-slot device, so D8's fill condition - the reason fusing pays
+1.13-1.85x on Qwen3.8 - never fires for GLM. This is why 'not evaluated - no measured gate geometry' was
+worth closing: the plan prescribes two cards for exactly this model.
+
+Cells: 2 E x 3 rows x {sep,fused} x KS 1/2/4; anchor 19.0-19.2 us in every cell; every cell bit-exact.
+Command:
+  python3 notes/b70/dump_gemv_case.py /tmp/glm_e{10,32}_gate E 16 3 --with-reference --ckpt 'GLM-5.3-Flash-exl3@3.05bpw'
+  python3 notes/b70/dump_gemv_case.py /tmp/glm_e{10,32}_up    E 16 3 --with-reference --ckpt ... --proj up_proj
+  python3 notes/b70/sweep_ks_grid.py --bin $PWD/notes/b70/probe_dpas9 --es 10,32 --rows 1,8,16 --ks 1,2,4 \
+      --dirs-template '/tmp/glm_e{E}_gate:/tmp/glm_e{E}_up' --warm 2
+
+# sweep_ks_grid: bin=/home/treo/projects/pdc/exllamav3/notes/b70/probe_dpas9 warm=2.0s anchor_reps=6000
+   E  rows  KS |  sep/exp  fused/exp fuse gain | threads sep   fused | exact
+  10     1   1 |    7.000     13.610    1.029x |        2560    5120 | yes   anchor=19.1
+  10     1   2 |    6.110     12.730    0.960x |        5120   10240 | yes   anchor=19.1
+  10     1   4 |    6.020     13.240    0.909x |       10240   20480 | yes   anchor=19.1
+  10     8   1 |    8.110     17.170    0.945x |        2560    5120 | yes   anchor=19.1
+  10     8   2 |    7.680     16.930    0.907x |        5120   10240 | yes   anchor=19.1
+  10     8   4 |    7.675     17.470    0.879x |       10240   20480 | yes   anchor=19.0
+  10    16   1 |   11.305     21.720    1.041x |        2560    5120 | yes   anchor=19.2
+  10    16   2 |    9.240     18.530    0.997x |        5120   10240 | yes   anchor=19.2
+  10    16   4 |   10.445     23.180    0.901x |       10240   20480 | yes   anchor=19.4
+  32     1   1 |    6.323     12.600    1.004x |        8192   16384 | yes   anchor=19.1
+  32     1   2 |    6.373     12.559    1.015x |       16384   32768 | yes   anchor=19.2
+  32     1   4 |    6.469     12.550    1.031x |       32768   65536 | yes   anchor=19.2
+  32     8   1 |    8.406     16.416    1.024x |        8192   16384 | yes   anchor=19.2
+  32     8   2 |    7.655     15.569    0.983x |       16384   32768 | yes   anchor=19.1
+  32     8   4 |    8.772     17.578    0.998x |       32768   65536 | yes   anchor=19.0
+  32    16   1 |   10.212     19.091    1.070x |        8192   16384 | yes   anchor=19.1
+  32    16   2 |    9.631     19.253    1.000x |       16384   32768 | yes   anchor=19.2
+  32    16   4 |   11.128     23.631    0.942x |       32768   65536 | yes   anchor=19.1
+
+# best schedule per (E, rows). UNITS MATTER: the separate column is us per (expert, SINGLE
+# projection), the fused column is us per (expert, gate+up PAIR), so the comparison is
+# 2*sep/expert vs fused/expert - which is what the gain column already does correctly.
+   E= 10 rows= 1: best sep   KS=4 12.040 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 10 rows= 8: best sep   KS=4 15.350 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 10 rows=16: best sep   KS=2 18.480 us per (expert, pair), grid   5120 (250.0% of HW)
+   E= 32 rows= 1: best fused KS=4 12.550 us per (expert, pair), grid  65536 (3200.0% of HW)
+   E= 32 rows= 8: best sep   KS=2 15.309 us per (expert, pair), grid  16384 (800.0% of HW)
+   E= 32 rows=16: best fused KS=1 19.091 us per (expert, pair), grid  16384 (800.0% of HW)
+
+READING IT: sep wins 4 of 6 cells and the two 'fused' wins are 3-7%, i.e. inside/near the tie band, so the
+GLM dispatch is: do not fuse gate+up; run them as two launches with KS=2 (rows>=16) or KS=4 (rows<=8).
+Absolute costs are 5x Qwen's per expert, matching bytes rather than weights - at this shape the card is
+closer to its DRAM limit, which is also why extra split-K stops paying past KS=4.
+
+WIRED: plan_decode_cost.GATE_TILES_N['GLM']=128, GATE_GEOM={'GLM':'glm'}, and the joint tables KS_SEP_GLM /
+KS_FUSED_GLM behind best_launch(..., geom='glm'); plan_operating_point.py passes geom per model, so GLM's
+dispatch line no longer prints 'not evaluated'.

@@ -133,7 +133,10 @@ HW_THREADS = 2048        # B70 slots reported by the probe banner (32 Xe cores x
 # Qwen3.8 gate/up is n=640 -> tiles_n = 640/16 = 40 (notes/b70/out_gemv.txt; /tmp/gemv_R64 meta tk=160 tn=40).
 # Models are absent until their projection widths are actually read from a checkpoint dump - a missing entry
 # means "fusion not evaluated", and planners must say so rather than guess.
-GATE_TILES_N = {"Qwen3.8": 40}
+GATE_TILES_N = {"Qwen3.8": 40, "GLM": 128}      # GLM: tiles=(256,128) at k=4096, n=2048
+# Which joint table a model uses. Distinct from tiles_n because the SHAPE differs, not just the
+# tile count: same E means different bytes, different threads and a different fill situation.
+GATE_GEOM = {"Qwen3.8": "qwen38", "GLM": "glm"}
 
 # --- per-KS launch tables (out_ks_grid.txt; measured in a certified-healthy window, anchor 19.0-19.3 us on all
 # 27 cells, every fused cell bit-exact for both projections at KS = 2/4/8) ------------------------------------
@@ -194,11 +197,57 @@ KS_FUSED = {
          16: {1: 3.758, 2: 4.240, 4: 5.894, 8: 8.904}},
     96: {1: {1: 2.507, 2: 2.481}, 8: {1: 3.050, 2: 3.264}, 16: {1: 3.765, 2: 4.305}},
 }
+# GLM-5.3-Flash geometry (k=4096, n=2048, tiles_n=128, 3.0 MiB per expert per projection at K=3) - the second
+# geometry the plan needs, measured because Qwen's numbers do NOT transfer: GLM's experts are 5x the bytes, and
+# tiles_n=128 means a SEPARATE gate launch at 10 experts already puts 2,560 threads on a 2,048-slot device, so
+# the fill condition that makes fusion pay on Qwen (1.13-1.85x) is absent from the start. Measured result: fusion
+# is a wash for GLM (0.88-1.07x, mostly inside the tie band) and the lever that works is split-K on separate
+# launches. Units as elsewhere: sep = us per (expert, single projection); fused = us per (expert, gate+up pair).
+# Source: /tmp sweep on /tmp/glm_e{10,32}_{gate,up} (dump_gemv_case.py layer 3 - GLM's MoE layers start at 3, not
+# 0, which is what the first attempt's KeyError was telling me), anchor 19.0-19.2 us in every cell, every cell
+# bit-exact. Committed output: out_glm_geometry.txt.
+KS_SEP_GLM = {
+    4:  {1: {1: 6.513, 2: 4.612, 4: 4.925}, 8: {1: 7.800, 2: 5.963, 4: 6.487},
+         16: {1: 9.025, 2: 7.550, 4: 8.675}},
+    6:  {1: {1: 4.875, 2: 5.558, 4: 4.733}, 8: {1: 6.342, 2: 7.050, 4: 7.175},
+         16: {1: 7.483, 2: 8.633, 4: 8.950}},
+    10: {1: {1: 7.000, 2: 6.110, 4: 6.020}, 8: {1: 8.110, 2: 7.680, 4: 7.675},
+         16: {1: 11.305, 2: 9.240, 4: 9.700}},
+    16: {1: {1: 6.141, 2: 6.353, 4: 6.616}, 8: {1: 7.916, 2: 8.244, 4: 8.856},
+         16: {1: 9.387, 2: 9.809, 4: 11.137}},
+    32: {1: {1: 7.354, 2: 6.633, 4: 6.486}, 8: {1: 9.062, 2: 7.655, 4: 8.772},
+         16: {1: 10.212, 2: 9.631, 4: 11.128}},
+}
+KS_FUSED_GLM = {
+    4:  {1: {1: 9.125, 2: 11.650, 4: 11.750}, 8: {1: 12.000, 2: 12.700, 4: 14.400},
+         16: {1: 15.100, 2: 16.000, 4: 18.350}},
+    6:  {1: {1: 14.083, 2: 12.467, 4: 13.217}, 8: {1: 17.967, 2: 14.600, 4: 16.267},
+         16: {1: 20.883, 2: 16.900, 4: 21.700}},
+    10: {1: {1: 13.610, 2: 12.730, 4: 13.240}, 8: {1: 17.170, 2: 16.930, 4: 17.470},
+         16: {1: 21.720, 2: 18.530, 4: 19.400}},
+    16: {1: {1: 12.356, 2: 12.600, 4: 12.875}, 8: {1: 15.769, 2: 16.038, 4: 17.587},
+         16: {1: 19.637, 2: 19.262, 4: 23.569}},
+    32: {1: {1: 14.446, 2: 13.682, 4: 12.550}, 8: {1: 18.099, 2: 15.883, 4: 17.578},
+         16: {1: 19.091, 2: 19.253, 4: 23.631}},
+}
+TABLES = {"qwen38": (KS_SEP, KS_FUSED), "glm": (KS_SEP_GLM, KS_FUSED_GLM)}
+
+# GLM's down_proj is the TRANSPOSED orientation (k=2048, n=4096, tiles_n=256) against the gate's (k=4096,
+# n=2048, tiles_n=128) at identical bytes, so its cost is not the gate's. Measured ratio down/gate per
+# (rows, KS) at E=10 - probe_dpas9 on /tmp/glm_e10_down, rc checked, 3 reps, WARM_S=2:
+#   rows=1: 0.853 / 0.972 / 1.101 (KS 1/2/4)   rows=8: 0.940 / 1.038 / 1.296   rows=16: 0.846 / 1.168 / 1.557
+# For comparison Qwen's DPAS_DOWN_FACTOR is 1.11 / 1.38 / 1.51 (rows 1/8/16, KS collapsed): GLM's down is
+# CHEAPER than its gate at KS=1 and only rises above it when split-K stretches the taller, narrower tile.
+DOWN_RATIO_GLM = {1: {1: 0.853, 2: 0.972, 4: 1.101},
+                  8: {1: 0.940, 2: 1.038, 4: 1.296},
+                  16: {1: 0.846, 2: 1.168, 4: 1.557}}
+
+
 DEVICE_L2_MIB = 24.0      # `devinfo` -> global cache (L2): 24.0 MiB
 
 
 def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2_mib=DEVICE_L2_MIB,
-                enforce_cache_rule=False):
+                enforce_cache_rule=False, geom="qwen38", return_detail=False):
     """Joint (fusion, split-K) choice: the measured schedule that minimises us per (expert, gate+up pair).
 
     Two conditions, both measured (out_ks_grid.txt):
@@ -212,15 +261,16 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2
     Returns (us_per_pair, fused, KS, note). Refuses to invent: `rows` must be a measured bucket; an unmeasured E
     is BRACKETED by the two measured E values around it, and the bracket must agree - see the P4 rule below.
     """
-    es = sorted(KS_SEP)
+    SEP, FUSED = TABLES[geom]
+    es = sorted(SEP)
 
     def _at(e_used):
         """Best measured (us_per_pair, KS, fused) at one measured E, with that E's own cache arithmetic."""
-        if rows not in KS_SEP[e_used]:
-            raise ValueError(f"E={e_used} was measured at rows {sorted(KS_SEP[e_used])}, not rows={rows}; "
+        if rows not in SEP[e_used]:
+            raise ValueError(f"E={e_used} was measured at rows {sorted(SEP[e_used])}, not rows={rows}; "
                              "do not borrow a neighbouring row count")
-        c = [(2.0 * v, KS, False) for KS, v in KS_SEP[e_used][rows].items()] \
-            + [(v, KS, True) for KS, v in KS_FUSED[e_used][rows].items()]
+        c = [(2.0 * v, KS, False) for KS, v in SEP[e_used][rows].items()] \
+            + [(v, KS, True) for KS, v in FUSED[e_used][rows].items()]
         w = ""
         if bytes_per_expert:
             one, both = e_used * bytes_per_expert, 2.0 * e_used * bytes_per_expert
@@ -243,7 +293,7 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2
     # lopsided: a missed gain costs up to 1.85x less than an incurred penalty (0.76x at E=32 rows=1).
     # New rule: evaluate both bracketing measured points. Agree -> use it, say so. Disagree -> take the larger-E
     # recommendation (penalty-averse) and name the disagreement so the caller can see it is an interpolation.
-    if E in KS_SEP:
+    if E in SEP:
         (us, KS, fused), note = _at(E)
         e_ref = E
     else:
@@ -269,13 +319,15 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2
                         f"took the larger-E choice, which is penalty-averse") + whi
     grid = (2 * tn if fused else tn) * KS * 2 * e_ref
     note += f" grid {grid} threads ({100.0 * grid / hw_threads:.0f}% of HW)"
-    cands = [(2.0 * v, k, False) for k, v in KS_SEP[e_ref][rows].items()] \
-        + [(v, k, True) for k, v in KS_FUSED[e_ref][rows].items()]
+    cands = [(2.0 * v, k, False) for k, v in SEP[e_ref][rows].items()] \
+        + [(v, k, True) for k, v in FUSED[e_ref][rows].items()]
     alt = sorted(c for c in cands if c[0] > us)
     if alt and (alt[0][0] - us) / us < 0.03:
         a = alt[0]
         note += (f"; INDIFFERENT - {'' if a[2] else 'sep '}KS={a[1]} "
                  f"{'fused ' if a[2] else ''}at {a[0]:.2f} is within 3% (measurement noise floor)")
+    if return_detail:          # e_used lets geometry-native callers price the OTHER projections from the same
+        return us, fused, KS, note.strip(), e_ref   # rung without re-deriving the bracket rule
     return us, fused, KS, note.strip()
 
 
@@ -335,6 +387,19 @@ def selftest_launch():
     # still is - which is why the default is penalty-averse rather than optimistic.
     _u, _f, _k, _n = best_launch(200, 8)          # above the ladder: no upper bracket exists, hold and say so
     assert "above the measured ladder" in _n, _n
+    assert best_launch(10, 1, tn=128, geom="glm")[1] is False, "GLM at 10 experts must NOT fuse (it already fills)"
+    assert best_launch(10, 1, tn=128, geom="glm")[2] == 4, best_launch(10, 1, tn=128, geom="glm")
+    assert best_launch(4, 1, tn=128, geom="glm")[1] is True, "GLM at 4 experts DOES fill-poor -> fusion pays 1.43x"
+    assert abs(best_launch(4, 1, tn=128, geom="glm")[0] - 9.125) < 1e-9
+    # geometry isolation: the same E in the two geometries must not read the same table
+    assert abs(best_launch(10, 1)[0] - 2.080) < 1e-9 and abs(best_launch(10, 1, geom="glm")[0] - 12.040) < 1e-9
+    # The contract that matters at GLM E=10 is that the tie band sits INSIDE the separate family (KS=4 at 12.04
+    # vs KS=2 at 12.22, 1.5% apart) and never crosses into fusion: fusing is 6% worse than the best separate
+    # cell, so whichever KS wins, the schedule does not change. (Asserting "no INDIFFERENT" was my error - the
+    # tie detector is deliberately candidate-wide, not schedule-wide.)
+    _gu, _gf, _gk, _gn = best_launch(10, 1, geom="glm")
+    assert not _gf and _gk == 4 and "INDIFFERENT" in _gn and "sep KS=2" in _gn, (_gu, _gf, _gk, _gn)
+    assert _gu < min(KS_FUSED_GLM[10][1].values()), (_gu, KS_FUSED_GLM[10][1])
     return True
 
 
@@ -352,7 +417,7 @@ def should_fuse(tn, KS, E, hw_threads=HW_THREADS):
     return tn * KS * 2 * E < 0.6 * hw_threads
 
 
-def layer_us_joint(picks, rows, tn, gate_mib, scale=1.0):
+def layer_us_joint(picks, rows, tn, gate_mib, scale=1.0, geom="qwen38"):
     """Per-layer B70 time from the MEASURED joint (fusion, split-K) choice.
 
     Replaces the older should_fuse(tn, KS=1, E) + layer_us_fused() pairing, which could only ask "fuse or not, at
@@ -364,9 +429,22 @@ def layer_us_joint(picks, rows, tn, gate_mib, scale=1.0):
     out_fusion_penalty_k.txt showed bytes cannot predict the sign near the band edges. `tn` is this model's
     gate/up column-tile count.
     """
-    us_pair, fused, KS, note = best_launch(max(1, int(round(picks))), rows, tn=tn, bytes_per_expert=gate_mib)
+    detail = geom != "qwen38"
+    out = best_launch(max(1, int(round(picks))), rows, tn=tn, bytes_per_expert=gate_mib, geom=geom,
+                      return_detail=detail)
+    us_pair, fused, KS, note = out[:4]
     if rows not in DPAS_FUSE_DOWN:
         raise ValueError(f"rows={rows} outside the fused measurement set {sorted(DPAS_FUSE_DOWN)}")
+    if geom == "glm":
+        # The GLM rungs were measured ON GLM WEIGHTS (3.0 MiB per expert per projection at K=3), so the Qwen
+        # weight-count `scale` must NOT be applied to them - doing so double-counted and priced a GLM layer at
+        # 310 us/layer against the legacy 123 (found before this shipped). `scale` stays meaningful for the
+        # recipe only: pass 1.0 for a model whose geometry table was measured at its own deployed K.
+        e_used = out[4]
+        rung = e_used if e_used in KS_SEP_GLM else min(KS_SEP_GLM, key=lambda x: abs(x - e_used))
+        down = KS_SEP_GLM[rung][rows][KS] * DOWN_RATIO_GLM[rows][KS]
+        return ((us_pair + down) * picks, ("fused" if fused else "separate"), KS,
+                note + f" [GLM-native table; down from measured ratio {DOWN_RATIO_GLM[rows][KS]:.3f} at E={rung}]")
     return (us_pair + DPAS_FUSE_DOWN[rows]) * picks * scale, ("fused" if fused else "separate"), KS, note
 
 
