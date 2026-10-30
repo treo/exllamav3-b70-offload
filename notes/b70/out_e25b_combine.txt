@@ -1,0 +1,51 @@
+E25b: one combine launch for the whole fused pair - REFUTED
+===========================================================
+Question. After E25a the layer runs gemm(gate+up fused) -> combine(gate) -> combine(up) -> gemm(down) ->
+combine(down). DPAS_FLOOR prices launch+setup+combine at ~7.8 us per projection at rows=1, i.e. more than half
+of the rows=1 layer time is fixed cost. E25a showed fusion buys parallelism for the gemm. E25b asked whether it
+buys anything for the combine too: merge the pair's two combines into one grid.
+
+Why it looked promising. The two projections are independent, so unlike E29's row bucketing (which had to double
+the accumulator set and died on the 128-GRF register file) a work-item still touches exactly one projection. The
+extra state is one partial pointer and one output pointer selected by index: register bill flat, one dispatch
+saved.
+
+Result (fused gemm unchanged, gate+up on /tmp/gemv_R64 + /tmp/gemv_up_R64, KS=1, min of 5 interleaved rounds,
+anchor rev I gate rows=1 = 19.4 us, healthy; both arms bit-exact against each projection's own y_ref, read from
+the directory the run wrote):
+
+  rows=1    two combines 21.50 us -> one combine 21.60 us    +0.10 us  (x0.995)
+  rows=8    two combines 26.80 us -> one combine 28.70 us    +1.90 us  (x0.934)
+  rows=16   two combines 34.60 us -> one combine 38.10 us    +3.50 us  (x0.908)
+
+AMENDED THE SAME SESSION — the conclusion below is RETRACTED. Standalone (probe_combine.cpp, no gemm in the
+timed region), the merged combine is ~2x FASTER, not slower: rows=1 2.87 vs split 5.89 us, rows=8 2.86 vs 5.92,
+rows=16 3.76 vs 5.81. Split therefore costs ~2.9 us per launch - the protocol cost - and merging removes one of
+them, exactly as hypothesized. Both measurements are clean, so the in-situ loss above is an INTERACTION with the
+preceding fused gemm (L2 state of freshly written partials, or queue behaviour), not the combine kernel's cost.
+"Launch-count reduction per se is not a lever" does not follow from any data here and is withdrawn; the lever is
+real in isolation and its in-situ cancellation is an open question. ISA census (asm_e25b/, 4 dumps, 565-994
+lines, mov 93-193, mul 27-53, no spill/scratch indications) does not identify which dump is which schedule, so
+it adjudicates nothing.
+
+Original reading, kept for the record: A combine's cost is the memory work it performs, not the per-launch protocol, even though the protocol
+is genuinely ~7.8 us at rows=1: the merged launch reads the same partials and writes the same floats, and above
+rows=1 it gives up whatever overlap the two smaller grids enjoyed. Neutral at rows=1, monotonically worse with
+rows - the shape you expect when the saving is real (one dispatch, fixed) and the loss scales with the work
+merged.
+
+Consequence beyond this experiment: **launch-count reduction per se is not a lever on this device.** That
+retroactively sharpens E25a: its win came from filling an under-subscribed grid (800 of ~2048 slots at KS=1),
+not from launching fewer kernels - which is why fusing at KS=2 cost +7 % instead of helping.
+
+What still stands, and it is not this. The engine-facing version of E25b is a combine that reads both partial
+sets, computes silu(gate) * up, and writes ONE product tensor. That is a traffic win (one elementwise pass
+eliminated, half the writes) rather than a launch win, and this probe cannot express it: it has no elementwise
+stage, and its whole purpose is to check each projection against its own y_ref. It belongs in the
+engine-shaped harness where the intermediate feeds the down projection.
+
+Reproduce (the merged arm was a temporary schedule in probe_dpas9 and has been removed; the refutation comment
+remains where the function was):
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revL probe_dpas9.cpp
+    WARM_S=3 /tmp/revL /tmp/gemv_R64 3 16 1 native /tmp/gemv_up_R64     # two combines (the kept schedule)
+    anchor: DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2              # 19.4 us when ramped

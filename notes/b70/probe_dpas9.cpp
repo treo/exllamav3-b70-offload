@@ -474,6 +474,27 @@ static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const i
     });
 }
 
+// E25b, MIXED - and the mixed result is the finding, so it is recorded rather than tidied away. In situ (after
+// the fused gemm, which is what matters) merging the two combines measured neutral-to-worse; STANDALONE, the
+// same merged kernel measures ~2x FASTER (probe_combine.cpp: rows=1 2.87 vs 5.89 us, rows=8 2.86 vs 5.92,
+// rows=16 3.76 vs 5.81 - split costs ~2.9 us per launch, which is the protocol cost, and merging removes one).
+// The ISA does not adjudicate: dumping both schedules (asm_e25b/, 4 files) gives 565-994 lines with mov 93-193
+// and mul 27-53, no spill/scratch indications, but which dump belongs to which schedule was never established,
+// so no per-item claim is supportable from it. So the in-situ loss is an interaction with the preceding gemm (L2 state of
+// freshly written partials, or queue behaviour), not the combine's own cost - UNRESOLVED. Kept schedule: split,
+// because that is what was measured in situ.
+// Merging the pair's two combine launches into ONE grid measured neutral at rows=1 (+0.10 us) and worse above it
+// (+1.90 us at rows=8, +3.50 us at rows=16; anchor 19.4, both arms bit-exact vs their own y_ref):
+//   rows=1  21.50 -> 21.60   rows=8  26.80 -> 28.70   rows=16  34.60 -> 38.10 us
+// So a combine's cost is mostly the memory work it performs, NOT the per-launch protocol - even though
+// DPAS_FLOOR prices that protocol at ~7.8 us per projection at rows=1. One launch still reads the same partials
+// and writes the same floats; merging only removes a dispatch and, above rows=1, gives up whatever overlap the
+// two smaller grids had. Launch-count reduction per se is therefore not a lever on this device, which also
+// retroactively explains why E25a's win came from PARALLELISM (an under-filled grid at KS=1), not from launching
+// less. The hypothesis that survives is a different one and cannot be expressed here: fold SiLU-mul into a
+// combine that reads both partial sets and writes ONE product tensor - a traffic win (one pass fewer, half the
+// writes), not a launch win. Needs the engine-shaped harness, since the probe has no elementwise stage.
+
 static void check_against(const std::string &path, const std::vector<float> &y, bool quiet_if_missing)
 {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -655,6 +676,8 @@ int main(int argc, char **argv)
     {
         dispatch_k(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
         combine(q, PART, Q, SX8, Y, m, KS, RPAD);
+        // Two combine launches, one per projection: E25b's merged combine was measured slower above rows=1, so
+        // the loser exists only as a comment above and in out_e25b_combine.txt.
         if (!dir2.empty()) combine(q, PART2, Q, SX8, Y2, m2, KS, RPAD);
     };
 
