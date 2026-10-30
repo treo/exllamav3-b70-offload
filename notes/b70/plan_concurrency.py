@@ -88,8 +88,13 @@ def union_at(cnt, E, topk, rows, rng_seed=5, trials=400):
 
 def main():
     ppb.selftest()
-    print("XMX crossover: 367e12/2 MAC/s over 674e9 B/s =", round(367e12 / 2 / 674e9),
-          "MAC per byte -> a GEMM becomes compute-bound at ~272 rows hitting the SAME expert\n")
+    # UNITS, corrected per kernels.md 4: 272 is MACs per BYTE at 1 byte/weight. Trellis is 0.375 B/weight and
+    # the integer-DPAS route spends 4 MACs per weight-token (kernels.md 2c item 13b), so the eligibility bar in
+    # ROWS per expert is (0.375 x 183.5e12) / (4 x rate) = ~26 rows at the 674 GB/s copy peak, ~59 rows at the
+    # 292 GB/s this GEMV family actually achieves. Quoting 272 rows for trellis shapes is the same mistake as
+    # quoting GB/s across quantizations with different bytes per weight.
+    print("XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte; for trellis (0.375 B/weight, "
+          "4 MACs per weight-token) that is ~26 rows/expert at the copy peak, ~59 at the achieved GEMV rate\n")
     for lab, dirname, prof, bandk in pq.QUANTS:
         cat = ppb.census(dirname)
         cfg = json.load(open(os.path.join(ppb.ROOT, dirname, "config.json")))
@@ -220,12 +225,20 @@ def main():
               f"; elsewhere three separate projections. tiles_n={tiles_n} from plan_decode_cost.GATE_TILES_N"
               " (absent for a model means fusion was not evaluated there).")
         print()
-    print("""Prefill: a chunk of R tokens touches (almost) all E experts per layer, so the B70's byte
-cost per LAYER is capped at E*expert_bytes regardless of R, while its MAC cost grows with R*topk. With
-the 272 rows-per-expert crossover above, a 2048-token chunk at topk 10 over 512 experts averages 40
-rows/expert - still 7x memory-bound; 8192-token chunks average 160, still under. So on this model class
-the XMX routes do not become the limit for any chunk size the 3090 could feed in one pass, and the
-binding quantity for prefill is the same one as for decode: bytes per layer per step, plus the link.""")
+    print("""Prefill: a chunk of R tokens touches many experts per layer, so the B70's byte cost per LAYER is
+bounded by (experts touched) x expert_bytes while its MAC cost grows with R*topk. The averages are misleading
+and the peaks are not: at R=2048 the mean is 40 rows/expert but under LIVE routing the experts at or above the
+~26-row XMX bar are a ~24% minority carrying ~94% of the picks; at the stricter 59-row bar it is 15.8% of
+experts carrying 85.6% of picks. The STORED profile tells the opposite story at that bar - 0.4% of experts,
+0.6% of picks, because it is near-uniform so every expert looks identically marginal at ~40 rows - i.e. the
+input distribution, not the arithmetic, was deciding whether to build the matrix path at all
+(out_live_trace.txt). So the XMX
+routes DO bind for most of the work at every chunk size worth running, and the correct design is two-speed
+prefill - matrix tiles for experts above the bar, streaming GEMV below - with tile height <= rows/expert
+(kernels.md 2c item 2). The remaining question is traffic, not arithmetic: 16-row bucketing re-reads each
+touched expert ceil(rows/16) times, measured 2.24x / 7.01x / 26.29x at R = 512 / 2048 / 8192, which
+probe_slm shows is a scheduling property rather than a hardware limit (out_prefill_gemm.txt).
+Marked per-quant below; the numbers assume the profile in effect (B70_PROFILE_DIR).""")
 
 
     print("""Prefill and the XMX routes: rows/expert averaged over the union is the wrong statistic,
@@ -248,12 +261,27 @@ numbers support; a single chunk-wide GEMM is not.
             continue
         tot = sum(cnt) or 1.0
         freq = sorted((c / tot for c in cnt), reverse=True)
+        # PER LAYER, then averaged. Qualification is an ORDER statistic on each layer's own distribution, and
+        # `cnt` is the layer-mean mixture - which flattens the hot tail exactly enough to invert the conclusion
+        # (mixture: max 105 rows/expert and 83/512 past the 59-row bar carrying 29% of picks; per layer: max
+        # ~1,029 rows and 15.8% of experts carrying 85.6%). LESSONS 63, second victim.
+        stats = {R: [0.0, 0.0, 0.0, 0.0, 0.0] for R in (512, 2048, 8192)}
+        for v in vecs:
+            f = sorted(v, reverse=True)
+            for R in (512, 2048, 8192):
+                rows_e = [R * topk * x for x in f]
+                tr = sum(rows_e) or 1.0
+                st = stats[R]
+                st[0] += rows_e[0] / len(vecs)        # mean over layers of THAT layer's hottest expert
+                st[1] += sum(1 for x in rows_e if x >= 26) / len(vecs)
+                st[2] += sum(x for x in rows_e if x >= 26) / tr / len(vecs)
+                st[3] += sum(1 for x in rows_e if x >= 59) / len(vecs)
+                st[4] += sum(x for x in rows_e if x >= 59) / tr / len(vecs)
         print(f"  {lab} bpw (topk {topk}, E {E}):", end="")
         for R in (512, 2048, 8192):
-            rows_e = [R * topk * f for f in freq]
-            n_hot = sum(1 for x in rows_e if x >= 272)
-            print(f"   R={R}: max {rows_e[0]:6.0f} rows/expert, {n_hot:3d} of {E} above 272",
-                  end="  |")
+            mx, n26, s26, n59, s59 = stats[R]
+            print(f"   R={R}: hot expert {mx:6.0f} rows/expert, {n26:5.1f} of E >=26 carrying {s26*100:3.0f}% "
+                  f"| {n59:5.1f} >=59 carrying {s59*100:3.0f}%", end="  |")
         print()
 
 

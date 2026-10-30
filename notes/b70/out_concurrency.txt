@@ -1,5 +1,5 @@
 scale selftest ok (MiB/GB/s -> us)
-XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte -> a GEMM becomes compute-bound at ~272 rows hitting the SAME expert
+XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte; for trellis (0.375 B/weight, 4 MACs per weight-token) that is ~26 rows/expert at the copy peak, ~59 at the achieved GEMV rate
 
    PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (141.9 us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 290.2 us/layer = 71.8 tok/s with -mcs 256
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 257 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.11x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
@@ -76,12 +76,20 @@ Qwen3.8 6.05 bpw: eb 3.608 MiB, h 100.0 %, parent bill (h 100.0% per-layer; a mi
     256   187.8     2282     1279        3 parent=   109.52    2338   29.2x      13.6
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 2, 4, 8, 16, 32, 64, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
-Prefill: a chunk of R tokens touches (almost) all E experts per layer, so the B70's byte
-cost per LAYER is capped at E*expert_bytes regardless of R, while its MAC cost grows with R*topk. With
-the 272 rows-per-expert crossover above, a 2048-token chunk at topk 10 over 512 experts averages 40
-rows/expert - still 7x memory-bound; 8192-token chunks average 160, still under. So on this model class
-the XMX routes do not become the limit for any chunk size the 3090 could feed in one pass, and the
-binding quantity for prefill is the same one as for decode: bytes per layer per step, plus the link.
+Prefill: a chunk of R tokens touches many experts per layer, so the B70's byte cost per LAYER is
+bounded by (experts touched) x expert_bytes while its MAC cost grows with R*topk. The averages are misleading
+and the peaks are not: at R=2048 the mean is 40 rows/expert but under LIVE routing the experts at or above the
+~26-row XMX bar are a ~24% minority carrying ~94% of the picks; at the stricter 59-row bar it is 15.8% of
+experts carrying 85.6% of picks. The STORED profile tells the opposite story at that bar - 0.4% of experts,
+0.6% of picks, because it is near-uniform so every expert looks identically marginal at ~40 rows - i.e. the
+input distribution, not the arithmetic, was deciding whether to build the matrix path at all
+(out_live_trace.txt). So the XMX
+routes DO bind for most of the work at every chunk size worth running, and the correct design is two-speed
+prefill - matrix tiles for experts above the bar, streaming GEMV below - with tile height <= rows/expert
+(kernels.md 2c item 2). The remaining question is traffic, not arithmetic: 16-row bucketing re-reads each
+touched expert ceil(rows/16) times, measured 2.24x / 7.01x / 26.29x at R = 512 / 2048 / 8192, which
+probe_slm shows is a scheduling property rather than a hardware limit (out_prefill_gemm.txt).
+Marked per-quant below; the numbers assume the profile in effect (B70_PROFILE_DIR).
 Prefill and the XMX routes: rows/expert averaged over the union is the wrong statistic,
 because routing is peaked - the hot experts are exactly the ones a chunk concentrates. The table below
 takes each expert's real pick frequency and asks how many rows of a chunk of R tokens land on it, then
@@ -89,8 +97,8 @@ counts how many experts cross the 272 rows/expert crossover where FP/int8 matrix
 bind. Two-speed prefill (XMX for the experts above the line, streaming GEMV for those below) is what the
 numbers support; a single chunk-wide GEMM is not.
 
-  2.05 bpw (topk 10, E 512):   R=512: max     27 rows/expert,   0 of 512 above 272  |   R=2048: max    107 rows/expert,   0 of 512 above 272  |   R=8192: max    428 rows/expert,  50 of 512 above 272  |
-  2.68 bpw (topk 10, E 512):   R=512: max     26 rows/expert,   0 of 512 above 272  |   R=2048: max    105 rows/expert,   0 of 512 above 272  |   R=8192: max    419 rows/expert,  49 of 512 above 272  |
-  4.05 bpw (topk 10, E 512):   R=512: max     27 rows/expert,   0 of 512 above 272  |   R=2048: max    108 rows/expert,   0 of 512 above 272  |   R=8192: max    433 rows/expert,  45 of 512 above 272  |
-  5.05 bpw (topk 10, E 512):   R=512: max     28 rows/expert,   0 of 512 above 272  |   R=2048: max    111 rows/expert,   0 of 512 above 272  |   R=8192: max    444 rows/expert,  52 of 512 above 272  |
-  6.05 bpw (topk 10, E 512):   R=512: max     27 rows/expert,   0 of 512 above 272  |   R=2048: max    108 rows/expert,   0 of 512 above 272  |   R=8192: max    432 rows/expert,  47 of 512 above 272  |
+  2.05 bpw (topk 10, E 512):   R=512: hot expert  12309 rows/expert,  54.2 of E >=26 carrying  75% |  21.6 >=59 carrying  50%  |   R=2048: hot expert  49238 rows/expert, 124.7 of E >=26 carrying  94% |  82.0 >=59 carrying  86%  |   R=8192: hot expert 196951 rows/expert, 208.0 of E >=26 carrying 100% | 152.6 >=59 carrying  97%  |
+  2.68 bpw (topk 10, E 512):   R=512: hot expert  12344 rows/expert,  53.4 of E >=26 carrying  75% |  22.1 >=59 carrying  51%  |   R=2048: hot expert  49377 rows/expert, 124.4 of E >=26 carrying  94% |  80.9 >=59 carrying  86%  |   R=8192: hot expert 197509 rows/expert, 205.7 of E >=26 carrying 100% | 152.3 >=59 carrying  97%  |
+  4.05 bpw (topk 10, E 512):   R=512: hot expert  12173 rows/expert,  53.5 of E >=26 carrying  75% |  22.5 >=59 carrying  52%  |   R=2048: hot expert  48691 rows/expert, 124.4 of E >=26 carrying  94% |  81.9 >=59 carrying  86%  |   R=8192: hot expert 194764 rows/expert, 205.1 of E >=26 carrying 100% | 152.8 >=59 carrying  97%  |
+  5.05 bpw (topk 10, E 512):   R=512: hot expert  12237 rows/expert,  53.2 of E >=26 carrying  75% |  22.2 >=59 carrying  52%  |   R=2048: hot expert  48948 rows/expert, 123.7 of E >=26 carrying  94% |  80.6 >=59 carrying  86%  |   R=8192: hot expert 195793 rows/expert, 203.7 of E >=26 carrying 100% | 150.8 >=59 carrying  97%  |
+  6.05 bpw (topk 10, E 512):   R=512: hot expert  12111 rows/expert,  52.9 of E >=26 carrying  75% |  22.6 >=59 carrying  52%  |   R=2048: hot expert  48444 rows/expert, 123.3 of E >=26 carrying  94% |  80.8 >=59 carrying  86%  |   R=8192: hot expert 193777 rows/expert, 203.9 of E >=26 carrying 100% | 151.1 >=59 carrying  97%  |

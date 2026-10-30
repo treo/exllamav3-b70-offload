@@ -18,15 +18,29 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    B70 could not have.
 
 2. MEASURED INPUTS (all from this tree, nothing assumed)
-   * Rows per expert at realistic chunks (`out_concurrency.txt`, Qwen3.8@2.68, topk 10, E 512):
-       R=512  → max  26 rows/expert,  0 of 512 above the 272-MAC crossover
-       R=2048 → max 105 rows/expert,  0 above 272
-       R=8192 → max 419 rows/expert, 49 of 512 above 272
-     so at chunk sizes the 3090 can actually feed in one pass, MoE prefill on this model class is
-     **bandwidth-bound, not compute-bound** - which is good news: it means the kernel does not need high MFU,
-     it needs to read each weight byte once.
-   * XMX/DPAS ceiling: 367e12/2 MAC/s against 674e9 B/s ⇒ ~272 MAC per byte, ~102 rows/expert for the 0.375
-     B/weight trellis (corrected units in §12); 49 of 512 experts pass it only at R=8192.
+   FIRST, A UNITS CORRECTION to the version of this note that cited "272 rows". That figure is
+   (367e12/2 MAC/s) ÷ 674e9 B/s = 272 **MAC per byte**, which belongs to 1-byte-per-weight formats.
+   Trellis weights are 0.375 B each and the integer-DPAS route spends 4 MACs per weight-token
+   (kernels.md §2c item 13b), so the arithmetic-intensity bar is 4/0.375 ≈ 10.7 MAC/byte and the
+   **eligibility crossover is ~26 rows/expert at the 674 GB/s copy peak, or ~59 at the 292 GB/s this
+   GEMV family actually achieves** (kernels.md §4 says exactly this; this note had it wrong).
+
+   Rows per expert at realistic chunks, from the LIVE traced routing (`profiles/live/live_268.json`,
+   mean over 48 layers; the stored profile said something much worse - see the last bullet):
+       R= 512: mean 10 rows/expert; 10.4% of experts ≥ 26 rows, and they carry 75.0% of the picks
+                                          (4.3% / 51.4% against the stricter 59-row bar)
+       R=2048: mean 40 rows/expert; 24.3% of experts ≥ 26 rows, carrying 94.3% of the picks
+                                          (15.8% / 85.6% against the 59-row bar); hottest ≈ 1,029 rows
+       R=8192: mean 160 rows/expert; 40.2% of experts ≥ 26 rows, carrying 100% of picks
+   So the honest statement is the opposite of "prefill is bandwidth-bound, the kernel does not need the
+   matrix unit": **a minority of experts per layer carries nearly all the work, and those experts are
+   already past the XMX bar at every chunk size worth running.** The design consequence is per-expert
+   tiering (kernels.md §2c item 2: tile height ≤ rows/expert, `MS_=4` vs `MS_=1` because a 64-row tile
+   "wastes ~60/64 rows" at small M), not one kernel for the whole chunk.
+   Under the STORED profile the same R=2048 / 59-row test qualifies 0.4% of experts carrying 0.6% of
+   picks - i.e. the flat routing profile had been quietly arguing AGAINST building the prefill path, and
+   it was the wrong input (out_live_trace.txt), which is the second time this week that input changed a
+   build/no-build decision.
    * Weight bytes per layer, from the census (`out_placement.txt`): Qwen3.8@2.05 599 MiB, @2.68 750 MiB,
      @4.05 1.17 GiB, @5.05 1.47 GiB, @6.05 1.76 GiB, GLM@3.05 2.53 GiB; B70 usable 31.9 GiB against expert
      sets of 28.1 / 36.3 / 56.3 / 70.3 / 84.4 GiB. **Residency is the first constraint, not the kernel.**
@@ -39,17 +53,24 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
      128 KiB per group and a group-scoped barrier is free (−0.03…+0.22 µs, `out_e25c_groupscoped.txt`).
 
 3. THE ARITHMETIC, WHICH SAYS WHY THE KERNEL MATTERS MORE THAN THE ROUTE
-   Per MoE layer, one 2048-token chunk, Qwen3.8@2.68 (750 MiB of expert weights, ~105 rows/expert):
-     weights read ONCE           750 MiB → 1.17 ms/layer at 674 GB/s   →  56 ms/chunk → 36.6k tok/s
-     weights read ⌈105/16⌉=7×   5.2 GiB → 7.9 ms/layer                 → 380 ms/chunk →  5.4k tok/s
-   Compute ceiling for the same chunk (48 layers, 3 projections, 2 MACs per multiply-accumulate): 2.2 ms/layer
-   → 105 ms/chunk → 19.2k tok/s, i.e. **at R=2048 the bucketed kernel is bandwidth-bound at 1/7 of the memory
-   roof and lands below its own compute ceiling** - it is the worst of both. The same ratio at R=8192 is
-   ~27×. So the prefill case for the B70 is decided by a single property: does an expert's weight bytes get
-   read once per chunk, or once per 16 rows?
+   Bucket amplification, computed on the live routing (each touched expert's bytes re-read once per 16-row
+   bucket, Qwen3.8@2.68, equal bytes/expert, mean over 48 layers):
+       R= 512 -> 2.24x      R=2048 -> 7.01x      R=8192 -> 26.29x
+   (support caveat: "touched" is the 205.7 experts the 192-token trace ever selected, so the true tail -
+   experts with small but non-zero p - dilutes these slightly downward; the numbers are per-layer means.)
+
+   Per MoE layer for one 2048-token chunk, Qwen3.8@2.68 (750 MiB of expert weights):
+     weights read ONCE      750 MiB → 1.17 ms/layer at 674 GB/s  →  56 ms/chunk → 36.6k tok/s
+     weights read 7.01x    5.26 GiB → 8.2 ms/layer               → 393 ms/chunk →  5.2k tok/s
+   Compute ceiling for the same chunk (48 layers, 3 projections, the 4-MAC-per-weight-token integer route):
+   ~2.2 ms/layer → 105 ms/chunk → 19.2k tok/s, i.e. **the bucketed kernel sits at 1/7 of the memory roof and
+   still below its own compute ceiling - the worst of both**, and the gap widens with chunk size (26.29x at
+   R=8192). So the prefill case for the B70 is decided by one property: does an expert's weight bytes get read
+   once per chunk, or once per 16 rows? §4a shows the answer is a scheduling decision, not a hardware limit.
    For GLM the arithmetic is harsher in capacity and gentler in traffic: 2.53 GiB/layer cannot be resident on
    one 31.9 GiB card across 42 layers (106 GiB), so prefill there is a residency-policy question first - and
-   its rows/expert at R=2048 is ~2048×8/288 = 57, i.e. four buckets today.
+   its rows/expert at R=2048 is ~2048×8/288 ≈ 57 mean, ≈ 4 buckets today. GLM has no live trace, so unlike
+   Qwen3.8 its hot-tail share (§2's 94%-of-picks number) is unmeasured, not small.
 
 4. THE DESIGN THAT AVOIDS THE SPILL — SUPERSEDED BELOW by `probe_slm` measurements; read §4a as the design
    Register pressure is what caps M at 16, so do not raise M per thread. Keep **an expert's B tile resident in

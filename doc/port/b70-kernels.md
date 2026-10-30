@@ -269,6 +269,67 @@ What they say that changes our design:
    clocks. Decode at b=1 has a few-percent duty cycle, so **plan decode on the single-launch number**
    (conservative: it also carries the completion tax) and prefill/batched on the sustained number.
 
+13b–13r. **The measured rev H–L additions to this list** (revs G–L live: `probe_dpas7/9.cpp`, costs in
+`out_ks_grid.txt` / `out_egrid.txt` / `out_rows_2_4.txt` / `out_fusion_rows.txt` / `out_low_e_grid.txt`, ISA in
+`asm/` + `asm_k2/`; E13c/E13m/E13n/E13o/E13q were each measured because the ISA or an ablation said so).
+These replace the earlier version of this list, which was lost to a botched scripted edit and is reconstructed
+here from the artifacts rather than memory.
+    * **13b — byte-replication is the whole fp16 argument.** A pure fp16 pipeline must dequantise every weight
+      at runtime and cannot amortise it, and at GEMV M-tiles replication is the *right* answer: 4 replicated
+      bytes occupy the same dword lane in all 4 A fragments, so all 16 fragments of an M=16 tile stream
+      straight into `dpas` with no shuffle. Ban fp16 conversion in the decoder loop; keep `f16` storage for
+      bias/alpha only.
+    * **13c — `k_p` permutation is O(n) streamable, so it is free at admit.** Permutation is determined by the
+      position inside the 4-symbol super-state; states are visited in ascending order and symbol index =
+      position mod 4 ⇒ emit permuted bytes during dequant, no buffer, no shuffle.
+    * **13d — group 4 sub-tiles as one `mc=2, rc=8` call.** Two adjacent 8-row slabs share a 16-quad B fetch;
+      B traffic halves per MAC and the A fragments of the two slabs are disjoint (no dependency stall).
+    * **13e — int8/4 M ≤ 8.** `BMG_DPAS_WS_EC2_BYTE={8,16,32}` but `_INT={8}`: the int8/4 route takes **M ≤ 8**,
+      so int8 forces 2× the M-tiles. Choose int8 on bytes and DPAS width together, never on bytes alone.
+    * **13f — group-major grid order for L2 reuse** (llm-scaler rule 4; verified independently by
+      `probe_slm`: concurrent readers of one region are cheaper than unique readers, 1689 vs 1348 GB/s).
+      Neighbouring work-groups must work on the SAME bytes, not different bytes of the same tensor.
+    * **13g — the fused penalty is schedule depth, not extra work.** `KS`-matching the unfused schedule costs
+      1.06× (K=2) / 1.23× (K=3) / 1.53× (K=6); the penalty rises with KS because fusing doubles the
+      accumulator array, and with rows because co-resident groups grow. Edges do NOT move with rows ⇒ one
+      decision per (model, quant), taken at rows=1.
+    * **13h — E-proportional cost has a per-kernel exponent** (`out_egrid.txt`): separate ~0.96, fused ~1.05,
+      down ~0.92; 1.00 is within the fit's standard error and must not be quoted as a law.
+    * **13i — interleave projections at sub-tile granularity when both are short** (their rule 3; our E24:
+      separate schedules win 3.3–4.2× at E=48–64, so interleaving is for the short-K case only).
+    * **13j — normalize-at-admit beats a separate norm kernel**: fold it into the gather/permute, and check
+      whether that pass is bandwidth- or latency-bound before optimising it (their post-mortem: latency-bound
+      at ~11% peak bandwidth because each lane read 32 stride-16 fp16 scalars; contiguous `ushort8` loads
+      5.27→2.41 ms, 1.30→1.17 ms, ~31x faster than CUDA).
+    * **13k — a fused combine is worth more than a fused gate+up** (their post-mortem: +19.5% on XL at bs=1,
+      beating the gate/up fusion; their fused path needs `total_slots ≤ 1024`, so it lives at bs=1–2 and dies
+      by bs=8, where `chunking` is what recovers). Our D9 `combine_both` agrees.
+    * **13l — a barrier inside the tile loop is the most expensive thing you can add**: an `item.barrier()`
+      inside the k-loop cost **+106%**, and moving it out cost nothing; our E25c measured a device-wide spin
+      barrier at 1.6 µs/256 → 6.2 µs/2048 work-items, killing "all three projections in one launch".
+    * **13m — the band is a compile-time parameter, not a runtime constant.** Same kernel, `-CJ 24/32/40`: the
+      1.19× banding tax **vanished** (1.00× at every multiplier) because the divisor became a shift. Template
+      the band; the runtime-variable penalty is real and free to avoid.
+    * **13n — one launch beats two at equal total threads; it is a threshold, not a trend.** 32 slots: 4.36×
+      (K=1) / 3.60× (K=2); 64 slots: 2.46× / 1.74×; 128: 1.58× / 1.05×; 256: 0.90× / 1.01×. The second launch
+      is *free* once slots ≈ 64 — so "the launch count is never a lever" was wrong, and so is the opposite.
+    * **13o — ISA reading beats ISA guessing.** Two rounds of dumps overturned confident claims: (i) a
+      "scalar-load bottleneck" that wasn't — the compiler had already coalesced the strided reads
+      (`load.ugm.u16.reindex`, lane j → element 16j+L), and the win came from halving the *loads*;
+      (ii) "two `mem_fence`s cost 7%" — they emitted zero fence opcodes (the atomics are implicitly
+      synchronising). Marginal ablation, or read the asm.
+    * **13p — tokens ride M, experts ride the grid; swapping them is a cliff.** Making experts the SIMD axis
+      regressed 3.9–11.8× and got WORSE with more rows (the `dequant→shuffle→insert_sub_group` chain is
+      serial per item), and it was a strict subset of the bytes read. rev G's layout is what makes the
+      marginal row cheap: **8.3–11.1 slots per weight, flat over rows 1→16**.
+    * **13q — no cross-dependency fusion.** Fusing the two independent gate/up chains into one item body
+      slowed K=1 by 42–125%: the chains compete for the same scoreboard slots, and the fused schedule needs
+      twice the accumulators (which is what lowers the occupancy ceiling — 30 registers/item ⇒ 1,365 max
+      concurrent items). Combine stays a separate kernel.
+    * **13r — split-K is a dispatch parameter, not a constant.** The best KS depends jointly on E and rows
+      (`out_ks_grid.txt`, `out_rows_2_4.txt`); KS=1 dominates once E ≥ 16, and the fused schedule prefers the
+      largest KS that keeps slots ≤ 2048 while E is small. Hard-coding KS=4 misprices E=1–12 by 1.13–2.49×.
+
 ## 2c. Second harvest from `doc/b70/llm-scaler` — mapped to the weaknesses we just measured
 
 Every item below is **[source]** (their claim or their code), not measured here; the right-hand column
@@ -515,6 +576,19 @@ Row grouping: as on the CPU, tokens are bucketed per expert and chunks of ≤4 (
 share a GEMV; above ~16 rows per expert switch to the DPAS path with M = 16/32 tiles; between the
 two, the decode kernel with several token rows is usually better than XMX at N=16, so the tier
 boundary is a measured constant (`EXL3_MOE_B70_DPAS_T`, tentatively 16) rather than an inherited one.
+
+**TRAFFIC IS NOT A FIXED COST — superseded by `probe_slm` (`notes/b70/out_prefill_gemm.txt`).** The
+`ceil(rows/16)` re-read law above is an artifact of launching row-buckets at different times, not a memory
+system limit. Measured: 32 work-items reading the same 40 KiB tile **concurrently** deliver 1689 GB/s of unique
+bytes versus 1348 GB/s when every read is unique (re-use through the hierarchy is cheaper than no re-use, at
+100% L2 miss and ~20% L1 hit), while staging the tile into SLM first is **2.5–6× slower** than just re-reading
+it — the ISA shows the staged kernel issuing the same global staging read *plus* 80 `load.slm.d32x4` and 77
+`store.slm.d32x4` (1177 vs 719 instructions), and 128 KiB/group caps tiles at 4× the largest one wanted.
+So: map `(expert, column tile, k-slice)` to a work-group, map each **16-row slab to a work-item of that group**,
+read B globally and concurrently, and get the re-reads absorbed by the hierarchy with no staging pass and no
+group barrier. Full design in `doc/port/b70-prefill.md` §4a; the eligibility bar for this section (≈26 rows at
+the copy peak, ≈59 at the achieved GEMV rate) and the live-routing qualification numbers (124 of 512 experts
+≥ 26 rows carrying 94% of picks at R=2048) are in §4's correction above and `out_concurrency.txt`.
 
 ## 5. Transforms, activation, quantisation
 

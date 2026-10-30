@@ -1,0 +1,77 @@
+Verify-batch economics (M = 4-16): the win is deduplication across the batch, not a bigger M tile
+===================================================================================================
+Where the near-term payoff actually is. Speculative decode asks the MoE layer to process M rows at once (MTP
+verify, DFlash draft-verify, MTP+draft trees) with M in the 4-16 range, and the temptation - mine included, in
+`doc/port/b70-prefill.md` - is to reach for a GEMM. The measurements in this tree say the gain at those shapes
+comes from a different place, and they bound how far it goes.
+
+WHAT IS MEASURED vs COMPUTED. Kernel costs are the measured rev L joint-table values (gate+up pair + down per
+expert, best (fused?, KS) per (E, rows); `plan_decode_cost.best_launch`), which are flat in rows precisely
+because the tokens-on-M layout (kernels.md 13p/13q) makes the marginal row ~5% of an expert read. Routing is
+the live per-token expert sets from `notes/b70/profiles/live/live_268.json` (48 layers x 192 tokens), so
+"which experts does a batch touch" is measured, not modelled. What is *computed* is the combination of the two
+and the ceilings; nothing here is measured end-to-end on a real verify step.
+
+BATCHED COST (A: picks bucketed by expert, each expert costs rows/expert) vs M INDEPENDENT DECODES (B):
+     M   picks   experts touched   rows/expert   A us/layer   per token   A/B     dedup headroom vs today
+     1      10              9.9          1.01        35.81      35.81     1.00x              1.0x
+     2      20             17.8          1.12        62.90      31.45     1.14x              1.7x
+     4      40             30.0          1.33       107.49      26.87     1.34x              2.6x
+     8      80             47.9          1.67       187.92      23.49     1.53x              3.8x
+    16     160             73.0          2.19       310.64      19.42     1.85x              4.9x
+    32     320            103.9          3.08       462.60      14.46     2.49x              7.3x
+    64     640            138.7          4.61       648.00      10.13     3.55x             10.2x
+(dedup headroom = A / cost of the same M rows if every row hit the same 10 experts, i.e. zero spread.)
+
+THREE THINGS THE TABLE SAYS
+1. **Batching M=4-16 pays 1.34-1.85x on the card, and it is worth ~2.5x at M=32.** Per-token layer cost falls
+   35.8 -> 19.4 us from M=1 to M=16. That is a real, near-term number that needs no new kernel.
+2. **Almost all of it is deduplication, not row-scaling.** At M=16 the 160 picks land on 73 experts instead of
+   160 (a 2.2x reduction in weight reads), while rows/expert is only 2.19 - which is why the measured win
+   (1.85x) sits well below the 16x that "one read, sixteen rows" would suggest. The M tile is *starved by
+   routing spread*, so a wider DPAS tile buys almost nothing at these shapes: kernels.md 2c item 2's own rule
+   (tile height <= rows/expert, `MS_=1`/16-row because a 64-row tile "wastes ~60/64 rows") already puts the
+   right tile in place at rows/expert ~2. The near-term work is the bucketing and the gather, not the tile.
+3. **The ceiling is 4.9x at M=16 (10.2x at M=64), and reaching it is a scheduling problem.** The headroom
+   column is what batching would save if the batch's rows shared experts perfectly. Two ways to move toward
+   it, both cheap to try and both about co-scheduling rather than arithmetic:
+     * pack verify requests whose drafts share hot experts onto the same worker/B70 (the live profile says
+       half of a layer's picks fall in 23 of 512 experts, so overlap between concurrent sessions is large and
+       findable);
+     * and the `probe_slm` result (out_prefill_gemm.txt) makes the multi-row case cheaper than it looks: when
+       several row-slabs of one expert are *concurrent* (same work-group), 31 of 32 weight reads are absorbed
+       by the hierarchy at zero DRAM cost - so the marginal row really is ~5% of a read, and rows/expert does
+       not have to be large for reuse to pay.
+
+WHAT THE ENGINE NEEDS TO COLLECT IT
+  * bucket-by-expert over the verify batch with the activation gather folded into the load (kernels.md 2c
+    items 5 and 11: `chunks = {eid, t0, nt}` + `tok_ids`, so there is no `index_select` round trip). At M=16
+    this is a 73-entry bucket list per layer, not a new data structure.
+  * the decode job slots sized for M rows: the CPU path's `MAX_M = 8` and the B70 budget's `slots x slot_rows`
+    both cap batch rows today; M=16 verify needs the slot math redone, and `EXL3_MOE_B70_DPAS_T` (tentatively
+    16) is the knob that decides GEMV-vs-tile at these shapes.
+  * the combine over topk partials per row (unchanged from decode; M rows just multiplies it, and it is
+    already the cheap stage - `combine_both` at 2.9-3.8 us/launch).
+  * correctness surface: a verify batch must produce bit-identical per-row results to M separate decodes at
+    the same inputs, because a drafter's accept/reject decision depends on exact logits. That is Gate B3 with
+    an M dimension, and it is the thing that will actually break first (partial-sum ordering per row).
+  * the MTP/DFlash path currently runs experts on the parent (`exllamav3/model/spec_decode_mtp.py`,
+    `spec_decode_drafters.py`): nothing in the verifier consults the offload homes. So the first integration
+    step is plumbing, and the payoff bound is the 1.34-1.85x measured above at the card level - which, at
+    decode's b=1 constraint (parent binds at 196 us/layer vs the card's 38), means the *end-to-end* verify win
+    is capped by how much of the verify step is expert work. Verify at M=16 changes that balance: the card's
+    310.6 us/layer for the batched batch is above the parent's non-expert 195.6, so at M>=16 the card becomes
+    the binding leg again and the batching decision starts to show up in tokens/s. That is the sharpest reason
+    to do this before big-M prefill: M=16 is where the card stops being free.
+
+CAVEATS
+  * Cost tables are measured for decode-shaped launches at E up to 96; a verify batch touches ~73-139 experts,
+    near the top of that range, and the tables are ~10-20% pessimistic for large resident sets, so the real
+    batched numbers should be slightly better than A above.
+  * rows/expert > 16 in the M=32/64 rows is priced as buckets (additive). `probe_slm` says that additive law is
+    an artifact of time-separated launches, so a co-scheduled kernel should bend it - that is the single most
+    valuable thing `probe_gemm` can measure at these M, more valuable than any big-M tile.
+  * The routing overlap between *concurrent* verify sessions is unmeasured (the traces are single-session);
+    the "pack drafts that share hot experts" idea needs a two-session trace before it is more than a hunch.
+  * Nothing here is measured on a real verify step; the numbers are a bound on where the win is, and the first
+    experiment should be the plumbing plus the M=8/M=16 batch on real MTP accept rates.
