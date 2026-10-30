@@ -83,11 +83,12 @@ def make_staged(case, K):
     return out
 
 
-def make_banded(case, K, g=2):
+def make_banded(case, K, g=2, tag="_full"):
     """The COMPLETE production AVX2 staged form: planar dword order AND the tile banding
     (kt, nt) -> (nt/g, kt, nt%g) that _copy_repacked applies per expert tensor. `g` must match the
     -DDPAS_BAND the kernel was built with, and must divide tn - which is exactly the constraint the CPU
-    kernels already carry ('bands must be divisors of 8')."""
+    kernels already carry ('bands must be divisors of 8'). g = 2 is this host's AVX2 form; g = 8 emulates the
+    AVX-512 BW tiers' banding at the BYTE level only - their CPU speed cannot be measured on this box."""
     m = json.load(open(os.path.join(case, "meta.json")))
     E, tk, tn = int(m["E"]), int(m["tk"]), int(m["tn"])
     nw = 8 * K
@@ -96,7 +97,7 @@ def make_banded(case, K, g=2):
     assert tn % g == 0, f"{case}: tn={tn} not divisible by band g={g}"
     pl = w.reshape(E, tk, tn, nw).reshape(-1, 8, K).transpose(0, 2, 1).reshape(-1, nw)
     x = pl.reshape(E, tk, tn // g, g, nw).transpose(0, 2, 1, 3, 4).reshape(E, tk * tn, nw)
-    out = case + "_full"
+    out = case + tag
     if os.path.isdir(out):
         shutil.rmtree(out)
     shutil.copytree(case, out)
@@ -110,19 +111,20 @@ def staged_checks(fails):
     (banding) - and each needs its own assertion plus a negative control, or a vacuous pass is possible
     (a band map that was secretly the identity would otherwise 'work')."""
     n = 0
-    bins = {"planar": "/tmp/revJ_staged", "banded": "/tmp/revJ_banded"}
+    bins = {"planar": "/tmp/revJ_staged", "banded": "/tmp/revJ_banded", "banded8": "/tmp/revJ_banded8"}
     missing = [v for v in bins.values() if not os.path.exists(v)]
     if missing:
-        print(f"  SKIP  staged: {', '.join(missing)} not built (see build.sh: -DDPAS_STAGED_LAYOUT, "
-              "-DDPAS_STAGED_LAYOUT -DDPAS_BAND=2)")
+        print(f"  SKIP  staged: {', '.join(missing)} not built (see build.sh: -DDPAS_STAGED_LAYOUT "
+              "[-DDPAS_BAND=2|8])")
         return 0
-    print("\nstaged-layout input - the parent's AVX2 form consumed verbatim by the B70 (D3-alt):")
+    print("\nstaged-layout input - the parent's staged forms consumed verbatim by the B70 (D3-alt):")
     for case, K, label, ks in CASES:
         if K > 5 or not os.path.isdir(case) or not os.path.exists(os.path.join(case, "sx8.bin")):
             continue
         ref = np.load(os.path.join(case, "y_ref.npy")).astype(np.float32)
         for tag, bin_, mk in (("planar-only", bins["planar"], lambda: make_staged(case, K)),
-                              ("planar+banded", bins["banded"], lambda: make_banded(case, K))):
+                              ("planar+band2", bins["banded"], lambda: make_banded(case, K, 2)),
+                              ("planar+band8", bins["banded8"], lambda: make_banded(case, K, 8, tag="_full8"))):
             d = mk()
             for R in (1, 4, 8, 16):
                 for f in glob.glob(os.path.join(d, "y_dev*")):
@@ -139,7 +141,7 @@ def staged_checks(fails):
                 if not good:
                     fails.append(f"{label} {tag} rows={R}: NOT bit-exact")
             # negative control: the checkpoint tile map must NOT succeed on banded bytes
-            if tag == "planar+banded":
+            if tag.startswith("planar+band"):
                 for f in glob.glob(os.path.join(d, "y_dev*")):
                     os.remove(f)
                 run(bins["planar"], [d, "1", "1", str(ks)])

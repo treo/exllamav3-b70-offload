@@ -15,10 +15,14 @@
   gate_proj K=5          rows=8   dp4a=ok revI=ok revJ=ok revK=ok
   gate_proj K=5          rows=16  dp4a=ok revI=ok revJ=ok revK=ok
 
-staged-layout input - the parent's AVX2 form consumed verbatim by the B70 (D3-alt):
-  gate_proj K=3 tn=40    planar+banded  rows 1/4/8/16 exact; control (wrong tile map) rejected
-  down_proj K=3 tn=160   planar+banded  rows 1/4/8/16 exact; control (wrong tile map) rejected
-  gate_proj K=2          planar+banded  rows 1/4/8/16 exact; control (wrong tile map) rejected
-  gate_proj K=5          planar+banded  rows 1/4/8/16 exact; control (wrong tile map) rejected
+staged-layout input - the parent's staged forms consumed verbatim by the B70 (D3-alt):
+  gate_proj K=3 tn=40    planar+band2   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  gate_proj K=3 tn=40    planar+band8   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  down_proj K=3 tn=160   planar+band2   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  down_proj K=3 tn=160   planar+band8   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  gate_proj K=2          planar+band2   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  gate_proj K=2          planar+band8   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  gate_proj K=5          planar+band2   rows 1/4/8/16 exact; control (wrong tile map) rejected
+  gate_proj K=5          planar+band8   rows 1/4/8/16 exact; control (wrong tile map) rejected
 
-148 comparisons, 0 failures, 0 skips
+168 comparisons, 0 failures, 0 skips

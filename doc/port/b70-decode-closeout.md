@@ -172,9 +172,47 @@ B70's fastest kernel wants, and the copy is verbatim. **Two things still stand b
 
 `gate_dpas.py --staged` regenerates both staged case dirs, asserts bit-exactness through the matching tile map,
 and asserts the **negative control** (checkpoint tile map must reject banded bytes), so this is a regression
-gate with teeth rather than a finding. The only remaining item is contractual: **the handoff must carry the
-staged layout** (`group` ∈ {8, 2, 0} + `planar`), and the engine must keep D3's device permute for tiers where
-staging is not planar.
+gate with teeth rather than a finding. The only remaining item is contractual — resolved below as **normalize
+at admit**: the engine keeps D3's device permute for tiers where staging is not planar, and the compute kernel
+needs no marker at all.
+
+## Closing the last open item: normalize the layout **at admit**, do not pass a marker to the kernel
+
+D3-alt left one contractual requirement, and the obvious implementation — put `group` and `planar` in the
+handoff so the compute kernel picks its tile map — is the weaker of two available designs. The hazard being
+managed is a *silent* one: if a kernel reads staged bytes with the wrong tile map or dword convention, output is
+wrong only for experts routing happens to select, which is exactly what Gate A cannot see.
+
+| | A. marker → compute kernel | B. normalize at admit (**recommended**) |
+|---|---|---|
+| invariant | "device bytes are whatever the parent staged" | "device bytes are always B70-canonical (planar dwords + g-major tiles)" |
+| who knows the layout | every kernel that touches weights | one function: the admit path |
+| cost | a field per job (or per resident tensor), read and branched on in the hot path | nothing at compute time |
+| verbatim vs permuted paths | two code paths through the kernel | converge at admit: verbatim when the staged form already matches, device permute (+5.4 % of load, `probe_permute`) when it does not |
+| how a bug shows up | silently wrong numerics for rarely-routed experts | broken invariant, detectable by sampling the tensor at admit |
+
+**What admit needs, and where it already exists.** The parent decides the layout in one place already —
+`exl3_moe_cpu_swizzle_group` / `exl3_moe_cpu_planar_layout`, plus the tensor's own shape `[tk, tn, ps]` — and
+moving weights into the device is already a distinct job kind in the production protocol (`MoeJob.kind == stage`
+carrying `experts[]`, in `moe_handoff.h`). The information is therefore present exactly where normalization
+would happen: no new per-layer payload, and the handshake's reserved area (128 B at offset 192, held by E8 for
+extensions) stays free. Non-integer rates and the AVX-512 tiers, where staging is not planar, stop being
+kernel-configuration cases and become one branch inside admit.
+
+**Validation that makes the invariant real** — this is the part that removes the silent-failure mode:
+
+1. **Per-admit conformance check**: sample a few tiles of the freshly staged device tensor, un-permute with the
+   declared source layout, `memcmp` against the checkpoint bytes. Covers every expert, including ones routing
+   never picks. It is precisely the self-check `probe_permute` already performs against a host-computed
+   reference, moved onto the engine path.
+2. **Gate entry**: `gate_dpas.py --staged` already asserts the B70 kernel accepts the parent's full staged form
+   and *rejects* the wrong tile map; add a "staged ≠ canonical" case (AVX-512-shaped: group 8, native dwords)
+   so the permute-on-admit branch is covered rather than assumed.
+3. **Fail loud on unknown triples**: an unrecognized (group, planar, bits) must reject the admission rather than
+   fall through to a default map.
+
+The last "the handoff must carry X" item thus becomes a locality property: the layout is a fact about one
+function, checked where the bytes arrive, and invisible to the decode kernel that measured 437 GB/s.
 
 ## Verification consequence of D3 (new gate needed)
 

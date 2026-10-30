@@ -46,6 +46,11 @@ echo "built /tmp/revJ_staged (staged-layout input)"
 # form consumed verbatim. gate_dpas.py --staged exercises both and includes the negative control.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -DDPAS_BAND=2 -o /tmp/revJ_banded probe_dpas7.cpp
 echo "built /tmp/revJ_banded (staged layout + group-2 tile banding)"
+# group-8 banding: emulates the AVX-512 BW tiers' staged tile order at the byte level (this host has no
+# AVX-512, so only the LAYOUT is covered here, never their CPU speed). Keeps the normalize-at-admit
+# invariant exercised for the tier whose bytes we cannot otherwise see.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -DDPAS_BAND=8 -o /tmp/revJ_banded8 probe_dpas7.cpp
+echo "built /tmp/revJ_banded8 (staged layout + group-8 tile banding)"
 # rev K (probe_dpas8): rev J + fused combine + DPAS_FLOOR. The fused combine is REFUTED (doc/port/
 # b70-decode-closeout.md D2); keep this build because DPAS_FLOOR is the only instrument that separates fixed
 # cost from per-tile work, and DPAS_COMBINE=split reproduces rev J's structure for A/B runs.
