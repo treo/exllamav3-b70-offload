@@ -958,6 +958,23 @@ nothing that is the sole instance of a measurement.
     before moving on — agreement is not evidence. (b) Check whether any column already in your own artifact
     contradicts another; the cheapest bug-finder is arithmetic consistency inside a table you already trust.
 
+48. **When a mechanism story fits a single datapoint, vary a second knob and turn it into an experiment.** E29's
+    shared-stream kernel lost to plain bucketing and I had two causal stories, both wrong. "Spilling exhausts
+    local memory, hence the MMU faults" — scratch is allocated by the runtime from the kernel's own spill
+    metadata, so spilling costs bandwidth, not faults; and my dump "evidence" was backwards because a faulting
+    process dies before IGC compiles the remaining kernels, so **absence of spill records was a coverage
+    artifact I read as a measurement**. "The non-monotonic failure set (BKT 2, 3 fault; 4 works; 8 faults) proves
+    a codegen edge case" — no: whether an overrun faults depends on what the allocator happened to place after
+    the buffer, which has nothing to do with BKT. What the fault record actually said — read, page-aligned,
+    address moving between runs — pointed straight at walking off a live allocation, and it was my own host code
+    sizing one bucket for a kernel that reads BKT. The ring sweep (96→576 dwords across four shapes) then turned
+    a vague "time tracks spill" into a controlled result: the baseline is spill-free and entirely
+    ring-insensitive, and every multi-bucket shape pays for extra accumulators in prefetch depth — the mechanism
+    works, the **budget accounting** is what refutes it, and that is the honest form of a negative result.
+    Two subsidiary habits: never send a build's stderr to /dev/null (12 silent failures read as a tooling
+    mystery), and re-read preprocessor structure after editing comments — a comment glued to `#ifndef X`
+    silently disables the directive.
+
 
 
 

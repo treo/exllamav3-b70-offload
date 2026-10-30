@@ -1,0 +1,77 @@
+E29 follow-up: can ONE launch carry more than 16 rows?  Yes - and the 128-GRF register file makes it a wash.
+=============================================================================================================
+Question (owner's): "is it possible to have a single 32 row launch?" Answer: yes - `NF=4` (4 fragments x MR=8)
+is implemented in probe_dpas7 (XROWS 16 -> 32, NF = ceil(rows/8), submit_k gains the nf==4 case) and it is
+bit-exact at 24 and 32 rows. It is also the slowest of every shape tried. Cell D (`DPAS_SHARED=2`, 16 rows per
+bucket) already WAS a single 32-row launch, so this closes the question from two directions.
+
+THE SWEEP - time (us) and spill (B/thread) as the prefetch ring budget varies. Gate, E=10, K=3, ks2, 3 s
+in-process warm-up, min of 3. Ring 384 is rev J's default; PF_RAW halves the *effective* depth above 8 rows.
+
+  shape                         ring 96         ring 192        ring 384        ring 576
+  C  4 buckets x  8 = 32 rows   44.4 /     0B    53.8 /  1536B   60.7 /  1856B   60.8 /  1856B
+  D  2 buckets x 16 = 32 rows   48.1 /  1536B    47.3 /  1536B   53.8 /  2112B   66.6 /  2688B
+  E  native NF=4   = 32 rows    51.2 /  3072B    51.2 /  3072B   64.4 /  3584B   77.2 /  4352B
+  A  native NF=2   = 16 rows    21.1 /     0B    21.7 /     0B   21.2 /     0B    21.4 /     0B
+
+  additive baseline for 32 rows = 2 x A ~= 42.4 us (measured 41.5 us directly, out_rows_gt16.txt)
+
+WHAT THE SWEEP ESTABLISHES
+--------------------------
+1. **Spilling is the causal variable for the shared-stream loss, and the register file is zero-sum.** Inside
+   every shape, time rises monotonically with spill. A is spill-free and *totally insensitive* to ring depth
+   (21.1-21.7 us over a 6x ring range) - 16 rows plus prefetch fits with room to spare. Add a second 16-row
+   bucket and ring depth becomes the thing you pay with: C at ring 96 is spill-free at 44.4 us (within 5 % of
+   additive), and at ring 576 it spills 1856 B and costs 60.8 us. Sharing rows is bought with prefetch, not for
+   free.
+2. **Sharing therefore never actually wins.** Its best case (C, starved ring) is 44.4 us vs ~42.4 us additive;
+   its natural configuration loses by 43 %. The native NF=4 launch spills unconditionally (>= 3072 B) even at
+   ring 96, so it cannot be rescued by trading prefetch - 32 rows of accumulators plus Bop plus one ring slot
+   set already exceed the budget.
+3. **Never pad a bucket.** 24 rows expressed as one NF=4 launch costs 61.8 us (measured at default ring); as
+   16+8 buckets it is ~38 us. A bucket that is not full still pays full accumulator and traffic cost.
+4. This also *corrects* the C-vs-D anomaly that I earlier said needed explaining before anyone retried sharing:
+   C spilled less than D at ring 384 yet ran slower, which looked contradictory. With the ring varied the
+   contradiction dissolves - the two shapes sit at different points on the same prefetch-vs-accumulators
+   trade-off, so raw spill bytes are a proxy, not the mechanism.
+
+MECHANISM, STATED ONCE: rev J spends 128 GRF on 16 row accumulators + Bop + a 24-GRF prefetch ring and is
+spill-free by construction (the author's claim, reproduced). The row dimension is already at that ceiling, so
+any scheme that carries more row state across the weight stream must borrow from the ring; borrowing the ring
+costs about as much latency as the re-streamed weights cost at the ~450 GB/s this kernel achieves. Fusion has
+to come from the axis that does NOT compete for accumulator registers - columns and projections (E25: gate+up
+in one launch; the author's own note that two adjacent column tiles per thread would halve per-tile
+bookkeeping *and* activation loads) - not from rows.
+
+HOW THE FAULT WAS REALLY FOUND (and two wrong hypotheses that had to die)
+------------------------------------------------------------------------
+`DPAS_BKT>=2` builds faulted the device (MMU read fault, CCS engine reset). journalctl -k gave the decisive
+detail: the access was a READ at a PAGE-ALIGNED address that MOVED between runs (...a01000, ...a06000,
+...a0b000) - i.e. walking off the end of a live allocation, not a fixed bad pointer and not scratch traffic.
+Cause: with DPAS_BKT>1 the kernel reads BKT activation buckets and writes BKT partial regions on every path,
+while the plain (non-shared) host path allocated exactly ONE bucket. Sizing XA/PART for BKT buckets removed it
+completely - zero fault records across the entire sweep above.
+
+Rejected on the way, both recorded so nobody re-derives them:
+  * "The non-monotonic failure set (BKT 2x, 3x, 4 OK, 8x) proves a codegen edge case." No: whether an overrun
+    faults depends on what the allocator placed after the buffer, which is unrelated to BKT.
+  * "The kernel spills 1856 B and exhausts local memory." No: scratch is sized by the runtime from the kernel's
+    own spill metadata, so spilling costs bandwidth, not faults. Worse, the dump "evidence" was backwards -
+    the faulting shape showed no spill records because a faulting process dies before IGC compiles the rest.
+    Absence of records was a coverage artifact that I read as a measurement.
+
+Process notes worth keeping: several builds failed silently because stderr was piped to /dev/null (12 of them,
+so an entire sweep produced "no binaries" and I nearly misread that as a tooling problem); and a comment edit
+once glued `...)#ifndef DPAS_RING_DW` onto one line, silently disabling a preprocessor directive until a build
+was allowed to complain.
+
+Reproduce:
+    for r in 96 192 384 576; do
+      icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_BKT=4 -DDPAS_RING_DW=$r -o /tmp/sw_b4_r$r probe_dpas7.cpp
+      icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_RING_DW=$r -o /tmp/sw_n_r$r probe_dpas7.cpp
+    done
+    DPAS_SHARED=4 DPAS_WARM_S=3 /tmp/sw_b4_r384 /tmp/gemv_R64 3 8 2      # C: 4 buckets x 8 = 32 rows
+    DPAS_WARM_S=3          /tmp/sw_n_r384 /tmp/gemv_R64 3 32 2           # E: native NF=4, 32 rows
+    DPAS_WARM_S=3          /tmp/sw_n_r384 /tmp/gemv_R64 3 16 2           # A: baseline, 16 rows
+    # spill: NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=<dir> <cmd>; grep "spill size" <dir>/*.asm
+Regression status of the code that produced this: gate_dpas.py --staged = 168 comparisons, 0 failures, 0 skips.

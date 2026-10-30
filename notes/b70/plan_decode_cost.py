@@ -225,9 +225,14 @@ def main():
                     for p in PROJS)
         print(f"  rows={r:<4} ({nb:>2} buckets)  bucketed schedule {j:8.2f} us/expert-layer   "
               f"shared-stream kernel ~{ideal:7.2f} us   (worth x{j / ideal:.2f})")
-    print("The bucketed column is what the engine does today. The shared-stream column is an UNIMPLEMENTED")
-    print("projection from two measured points (stream ~ rows=1, row work ~ rows=16 minus rows=1): it bounds")
-    print("an optimization opportunity and must not be quoted as a measurement.")
+    print("The bucketed column is what the engine does today. The shared-stream column was a PROJECTION that")
+    print("E29 then BUILT AND TESTED, and it loses in every shape - gate rows=32: 41.5 us for two separate")
+    print("16-row launches, 53.7 us sharing 2x16, 60.5 us sharing 4x8, and 64.8 us for a NATIVE single 32-row")
+    print("launch (NF=4, also implemented and bit-exact). Reason: this kernel's 128-GRF budget holds exactly 16")
+    print("rows spill-free, and every wider shape spills 1856-3584 B/thread to scratch, which costs more than")
+    print("re-reading weights at the ~450 GB/s the kernel already achieves. So do NOT widen the row dimension;")
+    print("fuse columns/projections instead (E25). And never pad a bucket: 24 rows as one padded NF=4 launch")
+    print("costs 61.8 us, while 16+8 as two buckets costs ~38 us (b70-decode-closeout.md, E29 RESULT).")
 
 
 if __name__ == "__main__":

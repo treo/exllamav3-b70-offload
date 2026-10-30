@@ -64,8 +64,18 @@ namespace xmx = sycl::ext::intel::esimd::xmx;
 using esimd::simd;
 
 static constexpr int NCOL = 16;                 // output columns per trellis tile = DPAS execution size
-static constexpr int XROWS = 16;                // max token rows
-static constexpr int RING_DW = 384;             // register budget of the trellis prefetch ring (24 GRF)
+static constexpr int XROWS = 32;                // max token rows (NF up to 4 fragments x MR=8)
+// E29: row buckets sharing one weight pass (1 = rev J baseline).
+#ifndef DPAS_BKT
+#define DPAS_BKT 1
+#endif
+// Prefetch ring budget in dwords (baseline 384 = 24 GRF). Overridable so the C-vs-D tie-breaker can separate
+// ring pressure from accumulator pressure; the default stays 384 for EVERY build so that E29 numbers remain
+// comparable to each other. (PF_RAW already halves the effective budget above 8 rows on its own.)
+#ifndef DPAS_RING_DW
+#define DPAS_RING_DW 384
+#endif
+static constexpr int RING_DW = DPAS_RING_DW;    // register budget of the trellis prefetch ring
 static constexpr uint32_t HASH = 0x83DCD12Du;   // window -> 4 weight bytes
 static constexpr int K_MIN = 2, K_MAX = 16;     // trellis bits per weight compiled in (windows are 16 bits)
 #ifndef DPAS_BAND
@@ -210,6 +220,9 @@ static void submit(const Launch &L)
     constexpr int XW = NW + 16;               // ring slot: [8 unused][row -1][rows 0..K-1], tile GRF-aligned
     constexpr int RPAD = MR * NF;             // padded token rows
     constexpr int ADW = RPAD * 16;            // activation dwords per tile: 2 byte-blocks x RPAD rows x 8
+    // E29 shared-stream buckets: BKT row buckets ride ONE weight pass. The unpacked tile lives in Bop, so an
+    // extra bucket is another mad() + accumulator set + partial store, never a second read of the stream.
+    constexpr int BKT = DPAS_BKT;
     // with 9-16 rows the accumulators and activation tile double: the ring gets half the budget
     // (at the full budget the M=8x2 kernels for odd K >= 7 spilled ~1.5 KB on BMG)
     constexpr int PF_RAW = (RPAD > 8 ? RING_DW / 2 : RING_DW) / XW;
@@ -248,6 +261,9 @@ static void submit(const Launch &L)
             const int ne = E - e0 < EPT ? E - e0 : EPT;
             const int kt0 = ks * tps + sub * per_sg;
             const int ntile = per_sg;
+            // per-bucket strides: activations are [bucket][kt][kb][rpad][32B]; partials are [bucket][ks][sub][e][rpad][n]
+            const size_t XBUCK = (size_t)tk * ADW;
+            const size_t PBUCK = ((size_t)KS * 2 * E * RPAD) * (size_t)n;
             const int total = ne * ntile;
 
             // Funnel shift amounts per column: two values (half 0, half 1), compile-time - but held in
@@ -342,22 +358,27 @@ static void submit(const Launch &L)
                 });
             };
 
-            simd<int32_t, MR * NCOL> acc[NF];
+            simd<int32_t, MR * NCOL> acc[BKT][NF];
             auto store_part = [&](int e) SYCL_ESIMD_FUNCTION
             {
                 constexpr esimd::properties props{esimd::alignment<16>};
-                int32_t *P = PART + ((((size_t)ks * 2 + sub) * E + e) * RPAD) * (size_t)n + (size_t)nt * NCOL;
 #pragma unroll
-                for (int f = 0; f < NF; ++f)
+                for (int b = 0; b < BKT; ++b)
+                {
+                    int32_t *Pb = PART + (size_t)b * PBUCK;
+                    int32_t *P = Pb + ((((size_t)ks * 2 + sub) * E + e) * RPAD) * (size_t)n + (size_t)nt * NCOL;
 #pragma unroll
-                    for (int mr = 0; mr < MR; ++mr)
-                    {
-                        const simd<int32_t, NCOL> row = acc[f].template select<NCOL, 1>(mr * NCOL);
-                        esimd::block_store<int32_t, NCOL>(P + (size_t)(8 * f + mr) * n, row, props);
-                    }
+                    for (int f = 0; f < NF; ++f)
+#pragma unroll
+                        for (int mr = 0; mr < MR; ++mr)
+                        {
+                            const simd<int32_t, NCOL> row = acc[b][f].template select<NCOL, 1>(mr * NCOL);
+                            esimd::block_store<int32_t, NCOL>(P + (size_t)(8 * f + mr) * n, row, props);
+                        }
+                }
             };
 
-            auto mad = [&](const uint32_t *a_tile) SYCL_ESIMD_FUNCTION
+            auto mad = [&](const uint32_t *a_tile, int b) SYCL_ESIMD_FUNCTION
             {
                 simd<uint32_t, ADW> At = load_dw<ADW>(a_tile);   // select() is non-const
 #pragma unroll
@@ -366,9 +387,9 @@ static void submit(const Launch &L)
                     for (int f = 0; f < NF; ++f)
                     {
                         const simd<uint32_t, MR * 8> a = At.template select<MR * 8, 1>(kb * RPAD * 8 + f * MR * 8);
-                        acc[f] = xmx::dpas<8, MR, int32_t, int32_t, uint32_t, uint32_t,
-                                           xmx::dpas_argument_type::u8, xmx::dpas_argument_type::s8>(
-                            acc[f], Bop[kb], a);
+                        acc[b][f] = xmx::dpas<8, MR, int32_t, int32_t, uint32_t, uint32_t,
+                                              xmx::dpas_argument_type::u8, xmx::dpas_argument_type::s8>(
+                            acc[b][f], Bop[kb], a);
                     }
             };
 
@@ -383,19 +404,24 @@ static void submit(const Launch &L)
                 if (cti == 0)
                 {
 #pragma unroll
-                    for (int f = 0; f < NF; ++f) acc[f] = 0;
+                    for (int b = 0; b < BKT; ++b)
+#pragma unroll
+                        for (int f = 0; f < NF; ++f) acc[b][f] = 0;
                 }
                 if (mode == MODE_ALL)
                 {
                     fetch(pf[(u + PF_DIST) % NSET]);  // the slot the previous tile just used
                     unpack(pf[u]);
-                    mad(ap);
+#pragma unroll
+                    for (int b = 0; b < BKT; ++b) mad(ap + (size_t)b * XBUCK, b);   // one stream, BKT row buckets
                 }
                 else
                 {
                     if (mode & MODE_FETCH) fetch(pf[(u + PF_DIST) % NSET]);
                     if (mode & MODE_UNPACK) unpack(pf[u]);
-                    if (mode & MODE_MAD) mad(ap);
+                    if (mode & MODE_MAD)
+#pragma unroll
+                        for (int b = 0; b < BKT; ++b) mad(ap + (size_t)b * XBUCK, b);
                 }
                 ap += ADW;
                 if (++cti == ntile)
@@ -415,6 +441,7 @@ template <int K>
 static void submit_k(int mr, int nf, const Launch &L)
 {
     if (nf == 2) { submit<K, 8, 2>(L); return; }
+    if (nf == 4) { submit<K, 8, 4>(L); return; }   // native 32-row launch (E29 follow-up)
     switch (mr)
     {
     case 1: submit<K, 1, 1>(L); break;
@@ -493,7 +520,7 @@ int main(int argc, char **argv)
     if (K < K_MIN || K > K_MAX) { fprintf(stderr, "rev J is compiled for K = %d..%d (K is %d)\n", K_MIN, K_MAX, K); return 2; }
 
     int MR = m.R <= 1 ? 1 : m.R <= 2 ? 2 : m.R <= 4 ? 4 : 8;
-    const int NF = m.R > 8 ? 2 : 1;
+    const int NF = m.R <= 8 ? 1 : m.R <= 16 ? 2 : 4;   // fragments per byte-block: rows = MR * NF
     if (const char *fm = getenv("DPAS_M"))
     {
         const int want = atoi(fm);
@@ -501,8 +528,29 @@ int main(int argc, char **argv)
         if (want * NF < m.R) { fprintf(stderr, "DPAS_M=%d does not cover %d rows\n", want, m.R); return 2; }
         MR = want;
     }
-    if (NF == 2) MR = 8;
+    if (NF > 1) MR = 8;
     const int RPAD = MR * NF;
+
+    // ROOT CAUSE of the device faults, and the invariant that was missing.
+    // With DPAS_BKT > 1 the kernel reads BKT activation buckets (ap + b*XBUCK) and writes BKT partial regions
+    // (PART + b*PBUCK) UNCONDITIONALLY, but the plain non-shared host path allocates and prepares exactly ONE
+    // bucket of XA and one region of PART. Bucket 1 onward therefore ran past the end of XA and past the end of
+    // PART, and whether that trips the MMU depends on what the USM pool happened to map after them - which is
+    // why BKT=2/RPAD<=8 faulted ("Fault response: Unsuccessful -ENOENT", CCS engine reset, 3/3) while
+    // BKT=4/RPAD=8 did not. Not a driver bug, not codegen, not an NF=1 or loop-count problem: my host-side
+    // allocation sizing was wrong for the build. A multi-bucket build is only valid with the path that sizes
+    // BKT buckets, i.e. DPAS_SHARED=BKT - and the check must come before ANY launch, because the plain timing
+    // loops run first and were the ones faulting.
+    const int SH_REQ = getenv("DPAS_SHARED") ? atoi(getenv("DPAS_SHARED")) : 0;
+    if (DPAS_BKT > 1 && SH_REQ != DPAS_BKT)
+    {
+        fprintf(stderr,
+                "refused: built with DPAS_BKT=%d but DPAS_SHARED=%d. The kernel reads/writes %d buckets while\n"
+                "the non-shared path allocates one, running off the end of XA and PART (observed as MMU faults\n"
+                "and a CCS engine reset). Run with DPAS_SHARED=%d, or build DPAS_BKT=1.\n",
+                DPAS_BKT, SH_REQ, DPAS_BKT, DPAS_BKT);
+        return 2;
+    }
 
     int mode = MODE_ALL;
     const char *mode_name = "fetch+unpack+dpas";
@@ -580,12 +628,14 @@ int main(int argc, char **argv)
            MR, NF, RPAD, EPT, EPT > 1 ? "s" : "", base_threads * NEG, hw_threads, mode_name);
 
     uint32_t *W = (uint32_t *)sycl::malloc_device(hW.size() * 4, q);
-    uint32_t *XA = (uint32_t *)sycl::malloc_device(hXA.size(), q);
+    uint32_t *XA = (uint32_t *)sycl::malloc_device(hXA.size() * DPAS_BKT, q);
     float *Q = (float *)sycl::malloc_device(qbuf.size(), q);
     int32_t *SX8 = (int32_t *)sycl::malloc_device(sbuf.size(), q);
     float *Y = (float *)sycl::malloc_device((size_t)m.E * m.R * m.n * 4, q);
-    int32_t *PART = (int32_t *)sycl::malloc_device((size_t)KS * 2 * m.E * RPAD * m.n * 4, q);
+    int32_t *PART = (int32_t *)sycl::malloc_device((size_t)KS * 2 * m.E * RPAD * m.n * 4 * DPAS_BKT, q);
     q.memcpy(W, hW.data(), hW.size() * 4);
+    q.memset(XA, 0, hXA.size() * DPAS_BKT);
+    q.memset(PART, 0, (size_t)KS * 2 * m.E * RPAD * m.n * 4 * DPAS_BKT);
     q.memcpy(XA, hXA.data(), hXA.size());
     q.memcpy(Q, qbuf.data(), qbuf.size());
     q.memcpy(SX8, sbuf.data(), sbuf.size());
@@ -615,6 +665,13 @@ int main(int argc, char **argv)
     }
 
     double best = 1e30;
+    // Multi-bucket builds (DPAS_BKT > 1) read/write BKT activation buckets and BKT partial regions on EVERY
+    // path, including this plain one - so the plain path's XA and PART are allocated for BKT buckets below
+    // (zero-filled beyond bucket 0). Skipping that sizing is what produced the MMU faults: the kernel walked
+    // off a one-bucket allocation, and the reported address moved between runs (…a01000, …a06000, …a0b000),
+    // which is what reading past a live allocation looks like - not spilling, not codegen. Consequence for
+    // reading the numbers: in a BKT>1 build the plain 'revI' line is NOT comparable to the BKT=1 baseline (it
+    // carries BKT-1 buckets of zero-filled work); use the SHARED line, or build DPAS_BKT=1.
     for (int r = 0; r < reps + 2; ++r)
     {
         auto t0 = std::chrono::steady_clock::now();
@@ -715,6 +772,99 @@ int main(int argc, char **argv)
                "  -> x%.2f of %d separate launches  |  %6.1f G-weight-tokens/s\n",
                NB, m.E, KS, gb * 1e6, gb * 1e6 / NB, tpbest * 1e6, (gb / NB) / tpbest,
                NB, (double)m.E * m.k * m.n * NB / gb / 1e9);
+    }
+
+    // --- DPAS_SHARED=B: the E29 shared-stream kernel (B buckets, ONE weight pass) -----------------
+    // Counterpart to DPAS_BUCKETS: same per-bucket activations/scales/row-sums/outputs, but laid out so the
+    // kernel compiled with -DDPAS_BKT=B walks the weight stream once and accumulates B row buckets in
+    // registers. Additive bucketing is the baseline this has to beat (out_rows_gt16.txt).
+    const int SH = getenv("DPAS_SHARED") ? atoi(getenv("DPAS_SHARED")) : 0;
+    const int rows_av = (int)(xbuf.size() / (size_t)m.k);
+    if (SH > 0)
+    {
+        if (SH != DPAS_BKT) { fprintf(stderr, "DPAS_SHARED=%d but built with DPAS_BKT=%d\n", SH, DPAS_BKT); return 2; }
+        if (m.R < 1 || m.R > 16 || rows_av < SH * m.R)
+        {
+            fprintf(stderr, "DPAS_SHARED needs rows in 1..16 per bucket and a case holding >= %d rows\n",
+                    SH * m.R);
+            return 2;
+        }
+        const int RB = m.R;                                  // rows carried by each bucket
+        // (the DPAS_BKT==2 && RPAD<=8 device-fault configuration is refused earlier in main(), before any
+        // launch, so nothing here needs to re-check it)
+        const int8_t *x8s = (const int8_t *)xbuf.data();
+        const size_t xbucket = (size_t)m.tk * 2 * RPAD * 32;              // one bucket of activation tiles
+        std::vector<int8_t> hx(xbucket * SH);
+        for (int b = 0; b < SH; ++b)
+            for (int kt = 0; kt < m.tk; ++kt)
+                for (int kb = 0; kb < 2; ++kb)
+                    for (int row = 0; row < RPAD; ++row)
+                    {
+                        const int sr = b * RB + (row < RB ? row : RB - 1);
+                        const int8_t *s = x8s + (size_t)sr * m.k + kt * 16 + kb * 8;
+                        int8_t *d = &hx[b * xbucket + (((size_t)kt * 2 + kb) * RPAD + row) * 32];
+                        for (int w = 0; w < 8; ++w)
+                            for (int bb = 0; bb < 4; ++bb) d[w * 4 + bb] = s[w];
+                    }
+        const size_t pbuck = (size_t)KS * 2 * m.E * RPAD * m.n;           // int32 partials per bucket
+        uint32_t *XAs = (uint32_t *)sycl::malloc_device(hx.size(), q);
+        int32_t *PARTs = (int32_t *)sycl::malloc_device(pbuck * SH * 4, q);
+        q.memcpy(XAs, hx.data(), hx.size());
+        q.memset(PARTs, 0, pbuck * SH * 4);
+        std::vector<float *> Qs(SH), Ys(SH);
+        std::vector<int32_t *> SXs(SH);
+        for (int b = 0; b < SH; ++b)
+        {
+            Qs[b] = (float *)sycl::malloc_device(RB * 4, q);
+            q.memcpy(Qs[b], (const float *)qbuf.data() + b * RB, RB * 4);
+            SXs[b] = (int32_t *)sycl::malloc_device(RB * 4, q);
+            q.memcpy(SXs[b], (const int32_t *)sbuf.data() + b * RB, RB * 4);
+            Ys[b] = (float *)sycl::malloc_device((size_t)m.E * RB * m.n * 4, q);
+            q.memset(Ys[b], 0, (size_t)m.E * RB * m.n * 4);
+        }
+        q.wait();
+        if (getenv("DPAS_ADDR_DEBUG"))   // for correlating an MMU fault record against our own buffer extents
+            printf("ADDRS XA %p..%p (%zu B)  PART %p..%p (%zu B)  XBUCK %zu B  PBUCK %zu B  RB %d SH %d\n",
+                   (void *)XAs, (void *)((char *)XAs + hx.size()), hx.size(),
+                   (void *)PARTs, (void *)((char *)PARTs + pbuck * SH * 4), pbuck * SH * 4,
+                   xbucket, pbuck * 4, RB, SH);
+        if (getenv("DPAS_ADDR_DEBUG")) fflush(stdout);
+
+        auto dispatch_sh = [&]
+        {
+            Launch Ls = L;
+            Ls.XA = XAs; Ls.PART = PARTs;
+            dispatch_k(K, MR, NF, Ls, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
+            for (int b = 0; b < SH; ++b)
+                combine(q, PARTs + (size_t)b * pbuck, Qs[b], SXs[b], Ys[b], m, KS, RPAD);
+        };
+
+        if (WARM_S > 0.0)
+        {
+            auto tw0 = std::chrono::steady_clock::now();
+            do { dispatch_sh(); } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count() < WARM_S);
+            q.wait();
+        }
+        double shb = 1e30;
+        for (int w = 0; w < 2; ++w) for (int i = 0; i < 3; ++i) dispatch_sh();
+        q.wait();
+        for (int r = 0; r < 5; ++r)
+        {
+            auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < BURST; ++i) dispatch_sh();
+            q.wait();
+            shb = std::min(shb, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / BURST);
+        }
+        for (int b = 0; b < SH; ++b)
+        {
+            std::vector<float> yb((size_t)m.E * RB * m.n);
+            q.memcpy(yb.data(), Ys[b], yb.size() * 4); q.wait();
+            char path[256]; snprintf(path, sizeof path, "%s/y_dev_revi_sh%d_ks%d.bin", dir.c_str(), b, KS);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(yb.data(), 4, yb.size(), f); fclose(f); }
+        }
+        printf("SHARED %d buckets x rows %d = rows %d (E %d, ks %d, M %dx%d): %8.1f us\n",
+               SH, RB, SH * RB, m.E, KS, MR, NF, shb * 1e6);
     }
 
     std::vector<float> y((size_t)m.E * m.R * m.n);

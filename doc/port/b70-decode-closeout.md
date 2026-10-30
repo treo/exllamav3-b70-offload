@@ -214,7 +214,120 @@ kernel-configuration cases and become one branch inside admit.
 The last "the handoff must carry X" item thus becomes a locality property: the layout is a fact about one
 function, checked where the bytes arrive, and invisible to the decode kernel that measured 437 GB/s.
 
+## E29 RESULT: shared-stream buckets implemented, and it LOSES — 53.3 µs vs 41.5 µs additive at rows=32
+
+Implemented as specced (`-DDPAS_BKT=N`, `DPAS_SHARED=N`; five sites, no rewrite) and measured with the same
+discipline as everything else: 3 s in-process warm-up, min of 3 repeats, every bucket checked bit-exact against
+its own `y_ref` slice (**all buckets exact in every working configuration**), plus a regression check that the
+refactor left `BKT=1` untouched (rows=16 20.6–21.3 µs vs the published 21.4 ✓).
+
+To separate the two candidate causes I varied bucket *count* and bucket *width* so that accumulator registers
+matched across a pair of runs — gate, E=10, K=3, ks2, µs for the stated total rows:
+
+| | buckets | rows/bucket | total rows | acc GRF | time | vs additive |
+|---|---|---|---|---|---|---|
+| A | 1 | 16 (`NF=2`) | 16 | 16 | 20.9 | (baseline) |
+| B | 2 | 8 (`NF=1`) | 16 | 16 | **— faults the device** | n/a |
+| C | 4 | 8 (`NF=1`) | 32 | 32 | **60.7 / 61.4** | **x1.46 worse** (additive 41.5) |
+| D | 2 | 16 (`NF=2`) | 32 | 32 | **53.3** | **x1.29 worse** (additive 41.5) |
+
+Projected ideal for rows=32 was ~29–31 µs. **The mechanism is real and it still loses.**
+
+**The hypothesis I wrote first, and what killed it.** I attributed the loss to occupancy — "doubling accumulator
+registers halves threads per EU in a latency-hiding-bound kernel". C and D carry the *same* 32 GRF of
+accumulators, yet differ by 14 % (and both lose to additive), so accumulator pressure is not the story. Worse for
+that hypothesis: C does *more* buckets with *smaller* per-bucket accumulators and is the slowest of all. The
+discrimination I built to test occupancy (cell B) was supposed to settle it, and B is the one configuration that
+faults.
+
+**What actually caused the fault: my host-side allocation sizing, not the compiler, not the driver, and not
+spilling.** `journalctl -k` gave the fault records:
+
+    kernel: xe 0000:0f:00.0: [drm] Tile0: GT0: Faulted Address: 0x0000d556b7a01000 / …a06000 / …a0b000
+    kernel: xe 0000:0f:00.0: [drm] Tile0: GT0: Fault response: Unsuccessful -ENOENT
+    kernel: xe 0000:0f:00.0: [drm] Tile0: GT0: Engine reset: engine_class=ccs ... in revJ_k2
+
+Three things about that record were the actual evidence: the access was a **read**, the address was
+**page-aligned**, and it **moved between runs**. A fixed bad base pointer would not move; scratch traffic would
+not be reported as an unmapped read. Together they say "walked off the end of a live allocation, landing on
+whatever the USM pool happened to map next" — which is exactly what my change did: with `DPAS_BKT > 1` the kernel
+reads `BKT` activation buckets and writes `BKT` partial regions on **every** path, while the plain (non-shared)
+host path allocated exactly **one** bucket of `XA` and one region of `PART`. Sizing those for `BKT` buckets
+(zero-filled beyond bucket 0) removed the fault completely: cell B now runs, and fault records in the kernel log
+went to zero across the whole subsequent sweep.
+
+Two wrong hypotheses I held along the way, recorded because both were plausible and both were tested to death:
+
+* **"Non-monotonic failure set (BKT 2 ✗, 3 ✗, 4 ✓, 8 ✗) means a codegen edge case."** No: whether an overrun
+  faults depends only on what lies after the allocation, which is *not* a function of `BKT`. The apparent
+  pattern was noise.
+* **"The kernel spills 1856 B to scratch, so it exhausts local memory."** Spills are serviced inside a scratch
+  region the runtime sizes from the kernel's *own* reported spill size, so spilling costs bandwidth, not faults.
+  And the correlation was backwards — the faulting shape's dump showed *no* spill records while working shapes
+  spilled more. That comparison was worthless anyway: a faulting run dies before IGC compiles the remaining
+  kernels, so the absence of records was a **coverage artifact that I read as a measurement**.
+
+**Why the shared stream loses, and it is about registers after all — just not occupancy.** Now that every shape
+runs, spill size is measurable on equal footing, and it tracks the loss:
+
+| shape for 32 rows | time | spill / thread |
+|---|---|---|
+| two separate 16-row launches (**baseline**) | **41.5 µs** | **none** |
+| shared 2 buckets × 16 rows (D) | 53.7 µs | 2112 B |
+| shared 4 buckets × 8 rows (C) | 60.5 µs | 1856 B |
+| **native single 32-row launch (`NF=4`)** | **64.8 µs** | **3584 B** |
+| native `NF=4` asked for 24 rows (pads to 32) | 61.8 µs | — |
+| 2 buckets × 8 rows = 16 rows (B, occupancy-matched to A) | 24.9–25.1 µs | none |
+
+**It is zero-sum, and the ring sweep proves it.** Varying the prefetch ring 96→576 dwords across four shapes
+(`out_e29_share.txt`) turns the correlation into a controlled experiment rather than an observation:
+
+| shape (32 rows unless noted) | ring 96 | ring 192 | ring 384 | ring 576 |
+|---|---|---|---|---|
+| **A** native `NF=2`, 16 rows (baseline) | 21.1 / 0 B | 21.7 / 0 B | 21.2 / 0 B | 21.4 / 0 B |
+| **C** 4 buckets × 8 | **44.4 / 0 B** | 53.8 / 1536 | 60.7 / 1856 | 60.8 / 1856 |
+| **D** 2 buckets × 16 | 48.1 / 1536 | 47.3 / 1536 | 53.8 / 2112 | 66.6 / 2688 |
+| **E** native `NF=4` | 51.2 / 3072 | 51.2 / 3072 | 64.4 / 3584 | 77.2 / 4352 |
+
+Inside each shape, time rises monotonically with spill. A is spill-free and *entirely insensitive* to a 6× ring
+range — 16 rows plus prefetch fits with room to spare. Add a second 16-row bucket and **ring depth becomes the
+currency**: C starved to ring 96 is spill-free at 44.4 µs, within 5 % of the additive baseline (~42.4 µs), and at
+ring 576 it spills 1856 B and costs 60.8 µs. So sharing rows is bought *with* prefetch, and once you pay for it
+the transaction is at best a wash — which is the honest form of "refuted": the mechanism works, the budget
+accounting does not. E cannot even make that trade, because 32 rows of accumulators plus `Bop` plus one ring set
+already spill at ring 96.
+
+The pattern: **this kernel's register budget holds exactly 16 rows** — `NF=2` fragments of `MR=8` plus `Bop`
+plus the prefetch ring fit 128 GRF spill-free, which is why rev J is spill-free across all its
+instantiations. Anything carrying more row state across the weight stream must borrow from the ring, and
+borrowing the ring costs about as much latency as the re-streamed weights cost at the ~450 GB/s this kernel
+already achieves. Note B: with 8-row buckets and `acc` back to 16 GRF the kernel is spill-free again and
+*sharing does pay* versus two separate 8-row launches (25.1 vs ~33 µs) — it just cannot beat a single 16-row
+launch (20.9 µs), which is the shape the hardware wants. This also resolves the C-vs-D oddity I earlier said
+had to be explained before anyone retried sharing: raw spill bytes are a proxy, not the mechanism, and the two
+shapes simply sit at different points on the same prefetch-versus-accumulator trade-off.
+
+**Conclusion, and what changes.** Bucketed 16-row launches stand as the rows>16 schedule and the additive law in
+`plan_decode_cost.py` is the model, not a placeholder; a single wider launch is possible (`NF=4`, implemented,
+bit-exact at 24 and 32 rows) and is the slowest option measured. Wider kernels are the wrong axis: the row dimension is
+already at the register-budget ceiling, so the remaining fusion lever is **column/projection** reuse (E25
+gate+up in one launch; the rev-J author's own note that two adjacent column tiles per thread would halve
+per-tile bookkeeping *and* activation loads) — that amortizes the stream without adding row state. And a warning
+for the engine's row-bucket tiler: never pad a bucket. 24 rows expressed as one padded `NF=4` launch costs
+61.8 µs; 16+8 as two buckets costs ~38 µs.
+
+**Operational note that applies beyond E29:** after a fault, an unwarmed run read 44.1 µs and the same run after
+3 s of continuous work read 21.3 µs — a faulted-then-reset card looks *exactly* like an un-ramped one, so the
+anchor is what separates "the device changed state" from "my code regressed", and `journalctl -k` settles it
+definitively. Read the kernel log before theorising about the driver.
+
+**Operational note that applies beyond E29:** after the fault, an unwarmed run read 44.1 µs and the same run
+after 3 s of continuous work read 21.3 µs — i.e. a faulted-then-reset card looks *exactly* like an un-ramped one,
+and the anchor is what distinguishes them from a real regression. `journalctl -k` distinguishes them definitively.
+
 ## E29 spec: the shared-stream row-bucket kernel (design is done; implementation is not)
+
+## E29 spec: the shared-stream row-bucket kernel — **superseded by the RESULT above; kept because the reasoning was sound and the failure is instructive**
 
 **Why it should work, structurally.** In `probe_dpas7.cpp` the unpacked weight tile already lives in registers
 (`simd<uint32_t, 128> Bop[2]`, line 296) and `mad(a_tile)` consumes it (line 359). A second 16-row bucket is
