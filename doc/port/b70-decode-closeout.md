@@ -56,6 +56,38 @@ What is left, in measured order of size:
 | Per-launch vs per-thread-share split of the 7.8 µs floor | sets the ceiling for item 1 above | extend `DPAS_FLOOR` with a no-combine, no-setup mode |
 | Sustained power/thermals during decode | all rates are warm-window, not soak | harness E-items with the power monitor at duty cycle |
 
+## Precedent in the tree: the parent already ships repacked weights, and the device already fixes layout
+
+D3 is not a new architectural departure — it is the second instance of a pattern already in production, and the
+first instance's cost data argues for keeping the work on the device:
+
+- The CPU MoE path **requires** a repacked ("swizzled") trellis layout: tiles are reordered into groups of 8
+  (`exl3_moe_cpu_swizzle_group`) so a worker's k-stream is contiguous in DRAM — measured **3.4× over
+  per-output-column traversal on cold stacks** (`moe_mul1.cpp` header notes). The caller repacks each tensor at
+  load; `make_matrix` only checks that the flag matches the bytes.
+- The staged bytes are then "copied verbatim, packed or not", and **the GPU restores native order after the
+  DMA** (`moe_unswizzle.cu::moe_unswizzle_trellis`) — chosen explicitly because on-device it is "one read + one
+  write at VRAM bandwidth instead of `tiles_k × groups` scattered memcpys" on the parent. The note records what
+  the alternative cost when someone tried it on the stager thread: **~17 % of a fully streamed 119 B model at
+  32 K — the entire VBMI-vs-VNNI prefill gap.**
+
+So: intra-device layout transforms at admit are established practice, and the parent has already been measured
+to be the wrong place to pay for them. That is the strongest available argument for D3's exact shape (DMA then
+permute on device, +5.4 % of load) over making a permuted form primary on the parent.
+
+Two axes must also be kept distinct, because they compose rather than compete: the existing swizzle is a
+**tile-order** permutation (which tile lives where — a DRAM-streaming property), while rev J's transpose is
+**intra-tile** (dword order inside the 8·K dwords of one tile — an operand-assembly property). Adopting the
+intra-tile transpose would therefore not disturb the CPU's 3.4× traversal win, and the two could share one
+pass. Whether it *helps* the CPU is a separate, open question: the CPU needs "16 k × 4 columns" per `vpdpbusd`
+and obtains its expanded bytes through "compile-time (bits, row) index tables for `vpermt2var` plus immediate
+funnel shifts" — i.e. CPU-side operand routing, the same tax the transpose deletes on the GPU. But the CPU path
+is cold-DRAM-bound by construction (that is *why* it swizzles) and its extraction is already a small number of
+wide shuffles, so the plausible upside is modest and it is an experiment, not a format change:
+feed the existing kernel intra-tile-transposed bytes with adjusted extraction tables, hold bit-exactness against
+the current kernel's output, and measure ns/weight plus cold-expert throughput. If it is under ~5 %, native
+stays primary and the permuted form remains a device-resident representation.
+
 ## Verification consequence of D3 (new gate needed)
 
 Device bytes no longer match checkpoint bytes, so "the staging path is correct" is no longer something Gate A
