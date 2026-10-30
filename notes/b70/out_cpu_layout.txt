@@ -74,10 +74,45 @@ CONSEQUENCES
 * Nothing about the checkpoint format, oracle provenance or capacity arithmetic changes: the permuted form
   is a staged/RAM representation, and every reference still comes from native checkpoint bytes.
 
+CHECK 3 - the OTHER half of the staged form: tile banding. Also consumable, also free
+-----------------------------------------------------------------------------------------
+The production layout differs from the checkpoint in two independent ways, and only the first was covered
+above: planar dword order (intra-tile) and the tile banding `(kt, nt) -> (nt/g, kt, nt%g)` per expert tensor,
+with g = 2 on AVX2. probe_dpas7 gained `-DDPAS_BAND=g` - three lines of tile addressing, since consecutive kt
+for a fixed nt are g tiles apart instead of tn apart:
+
+    kstride = (band ? band : tn) * NW
+    tbase   = band ? (nt/band)*(tk*band) + kt0*band + (nt%band) : kt0*tn + nt
+    fp      = W + (e0*tk*tn + tbase)*NW          (expert stride is unchanged: experts are repacked independently)
+
+Bit-exactness on the COMPLETE staged form (planar + banded), gate and down, K = 2/3/5, rows 1/4/8/16 -
+**16 of 16 exact**, each with a negative control feeding the same bytes to the checkpoint tile map, which is
+**WRONG in every case** (a band map that was secretly the identity would have passed vacuously; it does not).
+
+Rate cost of the parent's banding on the B70, identical planar bytes, only the tile map differing, warm
+interleaved min of 4:
+
+    gate  rows 1 / 4 / 16 : 14.1 -> 13.9 (-1.4 %)   15.2 -> 14.5 (-4.6 %)   20.3 -> 20.4 (+0.5 %)
+    down  rows 1 / 4 / 16 : 15.6 -> 15.4 (-1.3 %)   18.6 -> 18.5 (-0.5 %)   30.5 -> 30.8 (+1.0 %)
+
+So banding is free to mildly positive for the GPU - as expected for a kernel that reads whole tiles, since the
+banding only improves page locality. It is measured here rather than assumed, because "cannot hurt" claims
+have been wrong repeatedly in this chapter.
+
+WHERE THIS LEAVES D3 / D3-alt
+-----------------------------
+On an AVX2 host the B70 can take the parent's staged bytes verbatim: no device permute, no second layout, one
+in-RAM form for CPU execution, B70 copy, and (with its existing unswizzle retargeted) the CUDA path too. What
+remains is a CONTRACT item, not a mechanism: the handoff must carry `group` (8 / 2 / 0 by tier and rate) and
+the `planar` flag, because the B70 kernel now needs the tile map and the dword convention to match what it was
+handed, and a mismatch miscomputes silently for experts routing never selects. Where staging is not planar
+(AVX-512 BW tiers at integer rates, any tier at non-integer rates) the device permute of D3 remains the path.
+
 Reproduce:
     python3 -c "import numpy as np; K=3; t=np.fromfile('/tmp/gemv_dpE10/weights.bin',dtype=np.uint32).reshape(-1,8*K); \
                 r=np.empty_like(t); [r.__setitem__((slice(None), i*8+q), t[:, q*K+i]) for q in range(8) for i in range(K)]; \
                 print(np.array_equal(r, t.reshape(-1,8,K).transpose(0,2,1).reshape(-1,8*K)))"
     icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -o /tmp/revJ_staged probe_dpas7.cpp
-    python3 gate_dpas.py --staged        # regenerates the planar case dirs and asserts exactness
+    python3 gate_dpas.py --staged        # planar + banded case dirs, exactness, and the negative control
+                                         # (needs /tmp/revJ_staged and /tmp/revJ_banded from build.sh)
     ./probe_dpas7 /tmp/gemv_dpE10_planar 1 1 2   # vs /tmp/revJ_staged

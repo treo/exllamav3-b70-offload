@@ -12,7 +12,7 @@ measurements.
 | D1 | **Rev J (transposed tiles) is the decode kernel** for K = 2–16 | **adopted, pending D3** | 1.27–1.46× over rev I, 2.5–3.1× over rev G at every measured point; bit-exact; `out_dpas.txt` |
 | D2 | **Combine stays a separate launch.** Do not fuse it into the producer with atomics | **adopted (refuted the alternative)** | fused costs +6.4…+8.4 µs gate / +13.6…+15.8 µs down; the atomic protocol alone is ~8.7 µs against 1.9 µs of saved round trip (13w) |
 | D3 | **Accept the intra-tile permuted device layout** (`dword q·K+i → i·8+q`, produced when weights are staged into VRAM) | **ACCEPTED (owner decision), and now priced** | It is what buys D1's win: same bytes, same capacity, same DRAM traffic, bit-identical outputs, but the VRAM tensor is no longer byte-identical to the checkpoint. Measured (`probe_permute`, `out_permute.txt`): a device permute of the whole 512 MiB resident set costs **3.46 ms** at K=3 (4.24 ms at K=6) against 1.19 ms for a straight device copy — i.e. **+5.4 % on a load that already takes ~64 ms** over the measured 8.37 GB/s link. Doing it on the parent instead is worse: a host permute-copy runs at **6.8 GiB/s (K=3) to 9.1 GiB/s (K=6)** against memcpy's 20.4 GiB/s, and the link itself is ~7.8 GiB/s, so for K=3 staging becomes permute-bound (+~20 %) while also burning parent cores that §6 prices as scarce. **Recommendation adopted: ordinary DMA staging + a device-side permute at admit.** One caveat on "pay it once": that is true only for experts that never leave VRAM — a readmit after eviction pays it again, 226 µs per 14 MiB admission (+13 % of that admission's transfer). §4a's cache tier therefore permutes **on admit**, not once per process |
-| D3-alt | **One staged in-RAM layout, consumed verbatim by the B70**, with the CUDA path still unpacking to native from that different base | **confirmed on AVX2 (measured); ship-blocked on the tile-map change + layout marker** | The production AVX2 repack (`_copy_repacked`, planar) already emits exactly rev J's dword order — byte-identical over 1.536 M dwords — and rev J reads it verbatim, bit-exact, at the same rate (−1.3…+2.0 %) (`out_cpu_layout.txt`, `gate_dpas.py --staged`). D3's device permute therefore survives only as the fallback for tiers where staging is not planar (AVX-512 group 8; non-integer rates group 0), which is what makes the layout marker mandatory rather than cosmetic |
+| D3-alt | **One staged in-RAM layout, consumed verbatim by the B70**, with the CUDA path still unpacking to native from that different base | **demonstrated end-to-end on AVX2** (planar dwords + group-2 banding, 16/16 bit-exact with negative controls, banding rate-neutral); remaining work is the layout marker in the handoff and keeping D3 for non-planar tiers | The production AVX2 repack (`_copy_repacked`, planar) already emits exactly rev J's dword order — byte-identical over 1.536 M dwords — and rev J reads the full staged form bit-exactly at the same rate (−1.3…+2.0 % planar; −4.6…+1.0 % banded) (`out_cpu_layout.txt`, `gate_dpas.py --staged`). D3's device permute survives as the fallback for tiers where staging is not planar (AVX-512 group 8; non-integer rates group 0), which is what makes the marker mandatory rather than cosmetic |
 | D4 | **One expert per thread, always** (`DPAS_X=1`, equivalently `DPAS_EPT=1`) | **adopted** | Confirmed from two independent lineages: expert grid on revs G/H/I, and an `DPAS_EPT` sweep on rev J (1 → 14.0 µs, 2 → 21.1, 5 → 39.7). It is a latency requirement, not only a partial-traffic one |
 | D5 | **dp4a (rev C + compile-time K) keeps exactly one niche:** layouts that cannot be permuted *and* K > 5 | **adopted** | Rev C is ~43 µs of non-byte cost against rev J's 6.2 µs above floor; ~5 instructions/weight vs 0.29 (13x). Rev I already owns the no-permute, K ≤ 5 case |
 | D6 | **Epilogues must be written contraction-safe**, or device code compiled `-ffp-contract=off` | **adopted as a rule** | icpx contracts FMA by default and nothing in the repo sets it. Rev K's form (`CQ * ((float)s − DR)`, scalar differences rounded on the host) is the pattern. Existing certifications re-checked: revs I/J byte-identical with the flag off |
@@ -157,17 +157,24 @@ actually run:
 So on this host the 3.46 ms per 512 MiB device permute is simply not paid: staging already emits the bytes the
 B70's fastest kernel wants, and the copy is verbatim. **Two things still stand between that and shipping it.**
 
-- The B70 kernel's tile index map must follow the staged banding `(nt/group, kt, nt%group)` instead of
-  checkpoint `(kt, nt)`. Addressing only, and banding cannot hurt the GPU (it reads whole tiles, and page
-  behaviour can only improve) — but it gets measured, not assumed.
+- ~~The B70 kernel's tile index map must follow the staged banding `(nt/group, kt, nt%group)` instead of
+  checkpoint `(kt, nt)`~~ **done and measured**: `-DDPAS_BAND=g` implements it in three lines of addressing
+  (`kstride = g·NW` instead of `tn·NW`, per-expert stride unchanged), and the complete staged form — planar
+  dwords **and** group-2 banding — is bit-exact on gate and down at K = 2/3/5, rows 1/4/8/16 (**16/16**), each
+  with a negative control that feeds the same bytes to the checkpoint tile map and is **rejected every time**.
+  Banding's rate cost on the B70: **−4.6 % … +1.0 %** (free to mildly better, as expected for a kernel that
+  reads whole tiles). Measured rather than assumed, because "cannot hurt" has been wrong repeatedly here.
 - `planar` is returned **only for AVX2** (`exl3_moe_cpu_planar_layout`), and only at integer rates where
   group ≠ 0. On AVX-512 tiers staging keeps native dword order; at non-integer rates group is 0. So D3's
   device-side permute stays as the fallback path, and the handoff must carry an explicit **layout marker**
   (group ∈ {8, 2, 0} plus the planar flag) — without it the B70 silently misreads bytes for exactly those
   experts routing never selects, which is the hole Gate A cannot see.
 
-`gate_dpas.py --staged` regenerates the planar case dirs and asserts the verbatim-consumption claim, so this is
-now a regression gate rather than a finding.
+`gate_dpas.py --staged` regenerates both staged case dirs, asserts bit-exactness through the matching tile map,
+and asserts the **negative control** (checkpoint tile map must reject banded bytes), so this is a regression
+gate with teeth rather than a finding. The only remaining item is contractual: **the handoff must carry the
+staged layout** (`group` ∈ {8, 2, 0} + `planar`), and the engine must keep D3's device permute for tiers where
+staging is not planar.
 
 ## Verification consequence of D3 (new gate needed)
 

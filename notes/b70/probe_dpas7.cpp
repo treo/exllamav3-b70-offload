@@ -68,6 +68,9 @@ static constexpr int XROWS = 16;                // max token rows
 static constexpr int RING_DW = 384;             // register budget of the trellis prefetch ring (24 GRF)
 static constexpr uint32_t HASH = 0x83DCD12Du;   // window -> 4 weight bytes
 static constexpr int K_MIN = 2, K_MAX = 16;     // trellis bits per weight compiled in (windows are 16 bits)
+#ifndef DPAS_BAND
+#define DPAS_BAND 0                            // 0 = checkpoint tile order; g = staged band (nt/g, kt, nt%g)
+#endif
 
 enum : int { MODE_FETCH = 1, MODE_UNPACK = 2, MODE_MAD = 4, MODE_ALL = 7 };
 
@@ -263,9 +266,18 @@ static void submit(const Launch &L)
 
             // --- trellis register ring: tile g lives in slot g % NSET (compile-time slots, see step) ---
             simd<uint32_t, XW> pf[NSET];
-            const size_t kstride = (size_t)tn * NW;                                   // next kt, same expert
-            const size_t estride = (size_t)tk * kstride - (size_t)(ntile - 1) * kstride; // last kt -> next expert
-            const uint32_t *fp = W + ((size_t)e0 * tk + kt0) * kstride + (size_t)nt * NW;
+            // Tile order. Default is the checkpoint's (kt, nt). -DDPAS_BAND=g switches to the ORDER THE
+            // PARENT ACTUALLY STAGES IN: moe_cpu_host._copy_repacked puts tile (kt, nt) at
+            // (nt/g, kt, nt%g) within each expert (g = exl3_moe_cpu_swizzle_group: 2 on AVX2, 8 on the
+            // AVX-512 BW tiers, 0 when there is no repack). Consecutive kt for a fixed nt are then g tiles
+            // apart rather than tn apart - that is the whole change, and it is what makes the B70 copy
+            // verbatim instead of permuted on arrival.
+            const size_t band = DPAS_BAND;
+            const size_t kstride = (band ? band : (size_t)tn) * NW;                     // next kt, same expert
+            const size_t estride = (size_t)tk * tn * NW - (size_t)(ntile - 1) * kstride; // last kt -> next expert
+            const size_t tbase = band ? (nt / band) * (tk * band) + (size_t)kt0 * band + (nt % band)
+                                      : (size_t)kt0 * tn + nt;
+            const uint32_t *fp = W + ((size_t)e0 * tk * tn + tbase) * NW;
             int fe = 0, fti = 0;                      // next tile to fetch
             auto fetch = [&](simd<uint32_t, XW> &d) SYCL_ESIMD_FUNCTION
             {

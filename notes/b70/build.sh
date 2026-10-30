@@ -42,6 +42,10 @@ echo "built probe_dpas7"
 # "the B70 copy can be verbatim".
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -o /tmp/revJ_staged probe_dpas7.cpp
 echo "built /tmp/revJ_staged (staged-layout input)"
+# ... and the same plus the parent's tile banding (nt/g, kt, nt%g), i.e. the COMPLETE production AVX2 staged
+# form consumed verbatim. gate_dpas.py --staged exercises both and includes the negative control.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -DDPAS_BAND=2 -o /tmp/revJ_banded probe_dpas7.cpp
+echo "built /tmp/revJ_banded (staged layout + group-2 tile banding)"
 # rev K (probe_dpas8): rev J + fused combine + DPAS_FLOOR. The fused combine is REFUTED (doc/port/
 # b70-decode-closeout.md D2); keep this build because DPAS_FLOOR is the only instrument that separates fixed
 # cost from per-tile work, and DPAS_COMBINE=split reproduces rev J's structure for A/B runs.

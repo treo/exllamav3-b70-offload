@@ -23,6 +23,7 @@ count, dtype and shape are checked before any comparison, because a silent empty
 reports success.
 """
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -82,40 +83,78 @@ def make_staged(case, K):
     return out
 
 
+def make_banded(case, K, g=2):
+    """The COMPLETE production AVX2 staged form: planar dword order AND the tile banding
+    (kt, nt) -> (nt/g, kt, nt%g) that _copy_repacked applies per expert tensor. `g` must match the
+    -DDPAS_BAND the kernel was built with, and must divide tn - which is exactly the constraint the CPU
+    kernels already carry ('bands must be divisors of 8')."""
+    m = json.load(open(os.path.join(case, "meta.json")))
+    E, tk, tn = int(m["E"]), int(m["tk"]), int(m["tn"])
+    nw = 8 * K
+    w = np.fromfile(os.path.join(case, "weights.bin"), dtype=np.uint32)
+    assert w.size == E * tk * tn * nw, f"{case}: weights size mismatch"
+    assert tn % g == 0, f"{case}: tn={tn} not divisible by band g={g}"
+    pl = w.reshape(E, tk, tn, nw).reshape(-1, 8, K).transpose(0, 2, 1).reshape(-1, nw)
+    x = pl.reshape(E, tk, tn // g, g, nw).transpose(0, 2, 1, 3, 4).reshape(E, tk * tn, nw)
+    out = case + "_full"
+    if os.path.isdir(out):
+        shutil.rmtree(out)
+    shutil.copytree(case, out)
+    x.astype(np.uint32).tofile(os.path.join(out, "weights.bin"))
+    return out
+
+
 def staged_checks(fails):
-    """D3-alt: assert that the B70 kernel consumes the parent's staged bytes verbatim (probe_dpas7 built
-    with -DDPAS_STAGED_LAYOUT, so it does no permute of its own) and stays bit-exact. This is the regression
-    gate for the 'copy verbatim to the B70' claim - if a future staging change alters the planar map, or the
-    kernel's tile map drifts, this is what catches it."""
-    bin_ = "/tmp/revJ_staged"
-    if not os.path.exists(bin_):
-        print("  SKIP  staged: /tmp/revJ_staged not built "
-              "(icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -o /tmp/revJ_staged probe_dpas7.cpp)")
-        return 0
+    """D3-alt: the B70 consumes the parent's staged bytes verbatim. Two levels, because the staged form
+    differs from the checkpoint in TWO independent ways - intra-tile dword order (planar) and tile order
+    (banding) - and each needs its own assertion plus a negative control, or a vacuous pass is possible
+    (a band map that was secretly the identity would otherwise 'work')."""
     n = 0
-    print("\nstaged-layout input (production AVX2 planar dword order, consumed verbatim):")
+    bins = {"planar": "/tmp/revJ_staged", "banded": "/tmp/revJ_banded"}
+    missing = [v for v in bins.values() if not os.path.exists(v)]
+    if missing:
+        print(f"  SKIP  staged: {', '.join(missing)} not built (see build.sh: -DDPAS_STAGED_LAYOUT, "
+              "-DDPAS_STAGED_LAYOUT -DDPAS_BAND=2)")
+        return 0
+    print("\nstaged-layout input - the parent's AVX2 form consumed verbatim by the B70 (D3-alt):")
     for case, K, label, ks in CASES:
         if K > 5 or not os.path.isdir(case) or not os.path.exists(os.path.join(case, "sx8.bin")):
             continue
-        st = make_staged(case, K)
         ref = np.load(os.path.join(case, "y_ref.npy")).astype(np.float32)
-        for R in (1, 16):
-            for f in glob.glob(os.path.join(st, "y_dev*")):
-                os.remove(f)
-            rc, out, err = run(bin_, [st, "1", str(R), str(ks)])
-            f = newest_file(st)
-            n += 1
-            if rc or f is None:
-                fails.append(f"{label} staged rows={R}: rc={rc} no output - {(err or out).strip()[:70]}")
-                continue
-            got = np.fromfile(f, dtype=np.float32)
-            want = ref[:, :R, :]
-            if got.size != want.size:
-                fails.append(f"{label} staged rows={R}: size {got.size} vs ref {want.size}")
-            elif not np.array_equal(got.reshape(want.shape), want):
-                fails.append(f"{label} staged rows={R}: NOT bit-exact ({int((got.reshape(want.shape) != want).sum())} differ)")
-            else:
-                print(f"  {label:<22} rows={R:<3} verbatim-staged ok")
+        for tag, bin_, mk in (("planar-only", bins["planar"], lambda: make_staged(case, K)),
+                              ("planar+banded", bins["banded"], lambda: make_banded(case, K))):
+            d = mk()
+            for R in (1, 4, 8, 16):
+                for f in glob.glob(os.path.join(d, "y_dev*")):
+                    os.remove(f)
+                rc, out, err = run(bin_, [d, "1", str(R), str(ks)])
+                f = newest_file(d)
+                n += 1
+                if rc or f is None:
+                    fails.append(f"{label} {tag} rows={R}: rc={rc} no output - {(err or out).strip()[:60]}")
+                    continue
+                got = np.fromfile(f, dtype=np.float32)
+                want = ref[:, :R, :]
+                good = got.size == want.size and bool(np.array_equal(got.reshape(want.shape), want))
+                if not good:
+                    fails.append(f"{label} {tag} rows={R}: NOT bit-exact")
+            # negative control: the checkpoint tile map must NOT succeed on banded bytes
+            if tag == "planar+banded":
+                for f in glob.glob(os.path.join(d, "y_dev*")):
+                    os.remove(f)
+                run(bins["planar"], [d, "1", "1", str(ks)])
+                f = newest_file(d)
+                n += 1
+                if f is None:
+                    fails.append(f"{label} control produced no output")
+                else:
+                    got = np.fromfile(f, dtype=np.float32)
+                    want = ref[:, :1, :]
+                    if got.size == want.size and bool(np.array_equal(got.reshape(want.shape), want)):
+                        fails.append(f"{label} control: checkpoint tile map accepted banded bytes "
+                                     "- the banding test would be vacuous")
+                    else:
+                        print(f"  {label:<22} {tag:<14} rows 1/4/8/16 exact; control (wrong tile map) rejected")
     return n
 
 
