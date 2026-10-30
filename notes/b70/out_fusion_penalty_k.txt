@@ -1,0 +1,69 @@
+How deep is the fusion penalty, and where does it start? Same E ladder at three bit rates
+===========================================================================================
+Task set by out_ks_grid.txt: the L2 footprint argument predicts WHERE fusion should stop paying (2·E·b vs L2) but
+not how DEEP the penalty is - 1.27x at K=3 and 1.79x at K=6 were observed at the same 37.4 MiB live footprint.
+This measures both directions, and in doing so refutes part of the rule I had already shipped.
+
+Design note (my first attempt at this experiment was wrong): holding 2·E·b fixed across K means varying E, but
+fill also depends on E (grid = 2·tn·KS·2·E with tn identical across quants), so a constant-footprint sweep
+confounds bytes with occupancy. Instead: fix the E ladder and vary K, so fill is identical cell-for-cell and only
+bytes-per-weight and unpack density change.
+
+All cells rows=1, min of 2 interleaved passes, rev L (/tmp/revL9 via sweep_ks_grid.py), fused cells bit-exact for
+both projections, anchors 19.0-19.8 us (healthy; 19.8 is one sample). Gain = separate/fused, so >1 means FUSED is
+better. Gains are computed at matched KS, which is the only comparison that isolates the fusion lever.
+
+  rows=1              KS=1                              KS=2
+   E          K=2      K=3      K=6            K=2      K=3      K=6      |  fused footprint 2*E*b (MiB)
+                                          (b: K2 0.39 / K3 0.585 / K6 1.17)   K=2    K=3    K=6
+   10           -       1.62     1.25            -       0.99     0.94         7.8   11.7   23.4
+   16           -       0.81     0.56            -       1.29       -         12.5   18.7   37.4
+   20           -       0.84     0.53            -       0.97       -         15.6   23.4   46.8
+   24           -       0.81     0.62            -       0.83       -         18.7   28.1   56.2
+   32          1.32     0.96     1.04           1.10     0.79     0.95        25.0   37.4   74.9
+   48          0.91       -        -            0.87       -        -         37.5   56.2      -
+   64          1.01     1.05       -            0.89     0.99       -         50.0   74.9      -
+   96            -      1.00       -              -      1.06       -           -  112.3      -
+  (K=3 column assembled from out_ks_grid.txt and out_egrid.txt; K=2/K=6 measured here. "-" = not run.)
+
+WHAT THE DATA SAYS
+
+1. Depth scales with bits-per-weight, sub-linearly. Worst penalty per K: K=2 = 1.16x worse (0.866), K=3 = 1.27x
+   (0.79), K=6 = 1.88x (0.532). Bytes differ 3x across that range, depth only ~1.6x, so the depth is not a direct
+   function of traffic. Consistent with "a miss costs more when more arithmetic is exposed behind it" (denser
+   trellis = more unpack per byte), but the exponent is not established.
+
+2. Onset is KS-DEPENDENT, which the footprint model cannot express. At K=3, E=16: separate wins at KS=1 (0.81)
+   and fused wins at KS=2 (1.29) - same cell, same bytes, opposite sign, because the two choices put 1280 and
+   2560 items on the device. Any single-number "fusion threshold in MiB" is therefore over-simplified; the honest
+   statement is that bytes shift the whole curve earlier as they grow (K=6 is penalty-from-E=16-onward at KS=1,
+   K=3 from E=16/20, K=2 not until ~E=48), but the sign at a given cell also turns on the fill that cell produces.
+
+3. THE FOOTPRINT RULE IS NOT A SWITCH - and I had shipped it as one. Two independent counterexamples: K=2 at
+   E=32 sits inside the predicted band (fused 25.0 MiB > L2, one stream 12.5 fits) and fusion WON by 1.32x; and
+   K=3 at E=16 flips sign with KS. So best_launch() now ANNOTATES ("cache warning ... the sign near the edges is
+   not predictable from bytes alone") and only excludes fused candidates when the caller passes
+   enforce_cache_rule=True, which should be set only where a measurement backs it. The selftest pins all three
+   behaviours: warns by default, keeps fused candidates by default, excludes when told, and stays silent well
+   past L2.
+
+4. An unexplained shape worth recording: at K=6 the fused cost is almost E-independent (4.475 / 4.479 / 4.456 us
+   per pair at E=20/24/32) while separate scales steeply (2.38 -> 4.64). A schedule whose cost barely responds to
+   a 1.6x change in work is pinned by something other than its own traffic - plausibly the two concurrent weight
+   streams inside one launch meeting a queue/row limit rather than an L2 capacity limit.
+
+FOR THE PLANNERS AND THE ENGINE
+  * Decide from the measured tables. The byte test is a flag reading "near a known penalty band; sign not
+    modelled here", nothing more.
+  * Where the dense recipe matters, prefer separate launches from E ~ 16 upward at K=6: the penalty there is both
+    deepest and earliest, and 6.05 bpw is exactly where a fill-driven argument would otherwise tempt fusion.
+  * Still open: rows > 1 at K=2/K=6 (this file is rows=1), so "the band narrows as rows grows" remains a
+    prediction. Note the KS-dependence in point 2 when designing that sweep - it needs both KS values per cell,
+    not one.
+
+Reproduce:
+    C6=Qwen3.8-Flash-Next-exl3-6.05bpw_h6_ng8; C2=Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4
+    python3 notes/b70/dump_gemv_case.py /tmp/k6_e20_gate 20 16 0 --with-reference --ckpt=$C6
+    python3 notes/b70/dump_gemv_case.py /tmp/k6_e20_up   20 16 0 --with-reference --ckpt=$C6 --proj up_proj  (etc.)
+    python3 notes/b70/sweep_ks_grid.py --es 20,24,32 --rows 1 --ks 1,2 --dirs-template '/tmp/k6_e{E}_gate:/tmp/k6_e{E}_up'
+    python3 notes/b70/sweep_ks_grid.py --es 32,48,64 --rows 1 --ks 1,2 --dirs-template '/tmp/k2_e{E}_gate:/tmp/k2_e{E}_up'

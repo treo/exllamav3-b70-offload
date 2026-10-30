@@ -166,7 +166,8 @@ KS_FUSED = {
 DEVICE_L2_MIB = 24.0      # `devinfo` -> global cache (L2): 24.0 MiB
 
 
-def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2_mib=DEVICE_L2_MIB):
+def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2_mib=DEVICE_L2_MIB,
+                enforce_cache_rule=False):
     """Joint (fusion, split-K) choice: the measured schedule that minimises us per (expert, gate+up pair).
 
     Two conditions, both measured (out_ks_grid.txt):
@@ -186,7 +187,7 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2
         if E < es[0]:
             raise ValueError(f"E={E} is below the smallest measured expert count {es[0]}")
         e_used = max(e for e in es if e <= E)
-        note = f"E={E} not measured; using nearest measured point below (E={e_used});"
+        note = f"E={E} not measured; using nearest measured point below (E={e_used})"
     if rows not in KS_SEP[e_used]:
         raise ValueError(f"E={e_used} was measured at rows {sorted(KS_SEP[e_used])}, not rows={rows}; "
                          "do not borrow a neighbouring row count")
@@ -195,9 +196,19 @@ def best_launch(E, rows, tn=40, hw_threads=HW_THREADS, bytes_per_expert=None, l2
     if bytes_per_expert:
         one, both = e_used * bytes_per_expert, 2.0 * e_used * bytes_per_expert
         if one <= l2_mib < both:
-            only = [c for c in cands if not c[2]]
-            if only:
-                cands, note = only, note + f" fused excluded: penalty band ({both:.1f} MiB pair > L2 {l2_mib}, single {one:.1f} fits);"
+            # Warn, do not exclude. The band is real at K=3 (measured: fused up to 1.27x worse in it), and it
+            # gets deeper as bits per weight grow (K=6: 1.6-1.9x, out_fusion_penalty_k.txt) - but it does NOT
+            # predict the sign near the edges: K=2 at E=32 sits in the band by this arithmetic and fusion still
+            # WON there by 1.32x. So the byte test is a flag for the caller, and only `enforce_cache_rule` (which
+            # should be set only where a measurement backs it) drops fused candidates.
+            note += (f"; cache warning: fused footprint {both:.1f} MiB exceeds L2 {l2_mib:.0f} while one stream "
+                     f"({one:.1f} MiB) still fits - fusion is penalised in this band at K=3/K=6, but the sign "
+                     f"near the edges is not predictable from bytes alone")
+            if enforce_cache_rule:
+                only = [c for c in cands if not c[2]]
+                if only:
+                    cands = only
+                    note += "; EXCLUDED fused shapes (enforce_cache_rule=True)"
         elif both > l2_mib:
             note += f" both shapes exceed L2 ({both:.1f} MiB pair): levers within a few percent;"
     us, KS, fused = min(cands)
@@ -219,12 +230,17 @@ def selftest_launch():
     assert not best_launch(32, 1)[1] and best_launch(32, 1)[2] == 2, best_launch(32, 1)  # separate, KS=2
     assert best_launch(16, 1)[1], best_launch(16, 1)                                  # fused still wins at E=16
     assert not best_launch(24, 1)[1], best_launch(24, 1)                              # penalty band by E=24
-    # the cache condition must reproduce the table's choice from bytes alone, at an unmeasured E
-    us_f, fused_f, _, n_f = best_launch(28, 1, bytes_per_expert=0.585)
-    assert not fused_f and "penalty band" in n_f, (us_f, fused_f, n_f)
-    # ...and must NOT exclude fusion where both shapes are cache-cold
+    # The byte test must be INFORMATIONAL by default: passing bytes may add a note but must never change which
+    # candidate wins (out_fusion_penalty_k.txt shows the sign near the band edges is not derivable from bytes).
+    plain = best_launch(28, 1)[:3]
+    withb = best_launch(28, 1, bytes_per_expert=0.585)[:3]
+    assert plain == withb, (plain, withb)
+    assert "cache warning" in best_launch(28, 1, bytes_per_expert=0.585)[3]
+    # opting in does constrain the choice: a banded cell must come back non-fused
+    assert not best_launch(28, 1, bytes_per_expert=0.585, enforce_cache_rule=True)[1]
+    # ...and no false warning where both shapes are well past L2
     _, _, _, n_cold = best_launch(64, 1, bytes_per_expert=0.585)
-    assert "penalty band" not in n_cold and "exceed L2" in n_cold, n_cold
+    assert "cache warning" not in n_cold and "exceed L2" in n_cold, n_cold
     for bad in (0, 1):
         try:
             best_launch(bad, 1)

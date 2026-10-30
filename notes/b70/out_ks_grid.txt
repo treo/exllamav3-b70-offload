@@ -135,6 +135,12 @@ measured tables are the size.
 Rows dependence: still untested - the runs above are rows=1. "The band narrows as rows grows" remains a
 prediction, not a result.
 
+FOLLOW-UP ANSWERED (`out_fusion_penalty_k.txt`): the fixed-footprint K sweep was run, and it resolved the
+magnitude question - penalty depth scales with bits-per-weight (worst case 1.16x / 1.27x / 1.88x at K=2/3/6,
+sub-linear in traffic) - but it ALSO refuted the byte test as a decision rule: K=2 at E=32 lies inside the
+predicted band and fusion won there by 1.32x, and K=3 at E=16 flips sign between KS=1 and KS=2 at identical
+bytes. `best_launch()` therefore treats the L2 arithmetic as a warning and decides from measured cells.
+
 This is LESSONS 55 (never quote a rate without its working-set size) paying rent a second time: the curve looked
 non-monotonic only because one of the two shapes' footprints was being ignored.
 
