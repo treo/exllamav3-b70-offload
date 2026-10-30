@@ -1,0 +1,85 @@
+Parent leg measured on the 3090 - the kernel is the bottleneck, not the bandwidth (and the box has the GPU all along)
+======================================================================================================================
+The chapter's last un-measured input: `T_parent`, the 3090's own per-layer decode time. It entered
+plan_parent_budget.py as an inherited constant (t0 = 250 us/layer at b=1), the stream leg used rate_g = 936 GB/s,
+and the open-items row said this needed "a CUDA box". It did not: the 3090 is in this machine (PCI 0c:00.0), the
+extension is built with CUDA, and tests/testlib/moe.py already assembles the real fused-MoE kernel's argument
+list. notes/bench_parent_leg.py measures the legs; two full runs are reported side by side.
+
+Shapes are the real ones (Qwen3.8@2.68: H=2560, I=640, topk=10, 48 layers = 12 full + 36 linear attention, 24 q
+heads / 2 kv heads, head_dim 256, 512 experts). The expert leg calls **ext.exl3_moe itself** - the same fused
+kernel the engine dispatches for small batches (`block_sparse_mlp.py:1198` uses it while `num_tokens*topk <=
+fused_rows`, and MOE_FUSED_ROWS/FUSED_ROWS_WIDE are 128/256, so every b measured here is inside that window).
+Expert *bytes* are synthetic (rand_experts at K=3); shapes, counts and the kernel are not.
+
+1. STREAMED READS: the assumed 936 GB/s is the datasheet, not the achievable figure
+   best-of-7 runs: 859 and 864 GB/s across two invocations; individual samples 639-864 (a 35% spread, so the
+   weak samples are the usual un-warmed/contended-device story, and only the best-of-N is quotable). Use ~860.
+
+2. THE PARENT'S EXPERT LEG IS NOT BANDWIDTH-BOUND AT ALL - it runs at ~170-215 GB/s at every batch measured:
+
+    b   rows A  distinct exp | expert us (run1/run2) | implied GB/s | what bytes/rate_g charged | ratio
+    1      10        10       |    103.3 /  90.0      |  179 / 205   |        21.5 / 21.3      |  4.8x / 4.2x
+    2      20        20       |    171.6 / 171.9      |  215 / 214   |        42.9 / 42.7      |  4.0x / 4.0x
+    4      40        39       |    361.8 / 412.9      |  199 / 174   |        83.7 / 83.2      |  4.3x / 5.0x
+    8      80        73       |    690.5 / 787.2      |  195 / 171   |       156.7 / 155.7     |  4.4x / 5.1x
+   16     160       131       |   1163.7 / 1396.8     |  207 / 173   |       281.2 / 279.4     |  4.1x / 5.0x
+
+   The implied rate is FLAT in b, which is the signature of a kernel-bound (not bandwidth-bound) leg: batching
+   buys the parent nothing in this range. Every model that charges the parent's expert work as bytes/936 is
+   understating it by roughly 4-5x. This is the single biggest correction in this file.
+
+3. ATTENTION (decode: one query row against cached KV), one full_attention layer, SDPA fp16 - a PROXY for the
+   engine's own kernel, and a pessimistic one at small KV where launch dominates:
+
+     b  ctx 4096 (us/layer)      ctx 16384          implied KV bandwidth
+     1     39.6 / 53.9           83.0 / 83.9        156-212 GB/s  (launch-bound: 8 MiB of KV in 40-54 us)
+     2     49.4 / 51.1          136.4 / 132.3       328-340
+     4     68.0 / 83.1          217.2 / 197.9       404-493
+     8    105.5 / 105.0         391.2 / 427.4       628-639
+    16    177.4 / 201.0         710.2 / 723.5       668-757
+   Cost is linear in b·ctx (as it must be: KV bytes), and only approaches streaming rates once the KV working
+   set is big. Averaged over the real 12-of-48 layer mix that is 10-50 us/layer at 4k context.
+
+4. COMPOSED per-layer parent time, and the credibility check against the inherited 250 us:
+
+     b   run1 / run2 (us/layer, ctx=4096)     expert   attn   stream  linstate
+     1      224.2 / 213.8                     90-103   10-14   105     5.5
+     2      300.4 / 300.4                    172       12      105    11
+     4      506.3 / 560.4                    362-413   17-21   105    22
+     8      866.3 / 962.0                    690-787   26      105    44
+    16     1401.5 / 1639.2                  1164-1397  44-50   105    88
+
+   At b=1 the bottom-up composition lands 12-15% BELOW the inherited 250 us - close enough to trust the
+   decomposition (and the gap is expected: sampler/lm_head, graph overheads and the rest of the network are not
+   modelled, so this is a floor). The headline is the SHAPE: the parent does not stay at ~250 us as batch grows,
+   it goes to ~1.4-1.6 ms/layer at b=16, and essentially all of that growth is the expert leg, not attention.
+
+CONSEQUENCES FOR THE PLANNER (applied in plan_parent_budget.py)
+  * rate_g 936 -> 860 for streamed non-expert bytes (measured best-of-N).
+  * The parent's own expert work is charged at the measured kernel rate (~190 GB/s, the midpoint of the flat
+    170-215 band) instead of a byte rate. Experts left on the parent are ~4.7x more expensive than the old model.
+  * T_parent stops being a constant: the non-expert floor is ~120 us/layer at ctx=4096 and grows with b·ctx
+    through attention and linear-state traffic; a measured table is used, with nearest-neighbour lookup and a
+    refusal to extrapolate past b=16 / ctx=16384.
+  * Direction of the placement conclusion is unchanged but sharpened: at b=1 the parent still binds (~120 us of
+    non-expert work vs ~36 us for the B70 to run the same layer's experts at E=10 rows=1: 20.8 us fused gate+up
+    plus ~15 us down), and it binds because of attention + streamed non-expert weights - NOT because of experts.
+    Offloading experts helps the parent far more than the old model credited, because its expert leg was being
+    undervalued by ~4.7x.
+
+WHAT IS NOT MEASURED HERE (stated, not smoothed)
+  * Synthetic expert BYTES (random trellis at K=3): shapes, counts and the kernel are real; the quantization mix
+    of the checkpoint (which is a 2.68 bpw blend) is not. A real-checkpoint run would move the number somewhat.
+  * Attention is SDPA, not the engine's kernel; the linear-attention leg is pure state traffic (no arithmetic),
+    so both are bounds rather than measurements - attention pessimistic at small b, linstate optimistic.
+  * No sampler/lm_head/graph/network overhead -> composed figures are floors.
+  * One 3090, one desktop box, samples varying 639-864 GB/s; only best-of-N used.
+  * The CPU home and the B70 are measured elsewhere (out_cpu_worker_calib.txt, out_glm_cpu_calib.txt,
+    out_ks_grid.txt); this file is only the 3090 leg.
+
+Reproduce:
+    source notes/env.sh
+    python3 notes/bench_parent_leg.py --iters 20                      # ~2 min; run twice for the spread shown
+    python3 notes/bench_parent_leg.py --batches 1,4,16 --ctx 4096 --iters 40
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader

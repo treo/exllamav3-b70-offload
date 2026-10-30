@@ -150,13 +150,20 @@ def main():
             rpe = B * topk / max(d, 1.0)
             rr = next((m for m in pdc.MEASURED_ROWS if m >= rpe), rpe)
             us_layer, kern = pdc.layer_us(dev, rr, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
-            # E25a/D8: price gate+up as ONE launch when the separate launches under-fill the device. Only
-            # applies where tiles_n is measured for this model and per-expert rows stay within the fused
-            # measurement set (rows>16 would need bucketing, which was never measured for the fused kernel).
-            if tiles_n and rr in (1, 2, 4, 8, 16) and pdc.should_fuse(tiles_n, 1, max(1, int(round(dev)))):
-                fus = pdc.layer_us_fused(dev, rr, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
-                if fus < us_layer:
-                    us_layer, kern = fus, "E25a-fused"
+            # E25a/E25b/D8: price the layer with the MEASURED joint choice (fusion AND split-K), instead of the
+            # old "fuse at KS=1 if the grid is empty" test, which could not express e.g. fused+KS=4 at low E.
+            # Needs a measured gate geometry (tiles_n) and rows inside the fused measurement set.
+            if tiles_n and rr in (1, 2, 4, 8, 16):
+                try:
+                    j_us, j_shape, j_ks, j_note = pdc.layer_us_joint(
+                        dev, rr, tiles_n, eb / 3.0, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
+                except ValueError:
+                    # The joint tables cover the cells that were measured (rows 1/8/16, E 2..96). Outside them we
+                    # fall back to the older per-projection tables rather than borrowing a neighbouring row count
+                    # or expert count - which is what out_fusion_penalty_k.txt showed is unsafe to guess about.
+                    j_us = None
+                if j_us is not None and j_us < us_layer:
+                    us_layer, kern = j_us, f"joint-{j_shape}-KS{j_ks}"
                     fused_any = True
             usc = c            # clustered-rate column is now diagnostic only
             us = us_layer
@@ -165,17 +172,21 @@ def main():
             cards = f"{us / tlayer:.1f}" if tlayer else "   ?"
             print(f"{B:5d} {d:7.1f} {dev:10.1f} {mib:9.1f}M {'yes' if mib < L2_MIB else 'no':>7s} {s:6.0f} "
                   f"{us:9.0f} {us/base:5.1f}x {usc:6.0f} {us*layers/1000:9.2f} {cards:>6s}")
-        print(f"  fusion (E25a/D8): " + (f"applied where the separate launches under-fill the device "
-              f"(gate tiles_n={tiles_n}, KS=1 grid = tiles_n*2*experts threads vs ~{pdc.HW_THREADS} slots)"
-              if (tiles_n and fused_any) else
-              ("not evaluated - no measured gate geometry for this model" if not tiles_n else "not applicable at these grids")))
+        print(f"  fusion/split-K (D8 joint rule): " + (f"joint table consulted where a gate geometry is measured "
+              f"(gate tiles_n={tiles_n}); the choice is (fused?, KS) together, not fuse-at-KS=1"
+              if tiles_n else
+              "not evaluated - no measured gate geometry for this model"))
         d1 = distinct_experts(cnt, topk, 1, rng=rng)
         mib1 = d1 * h * eb
         us1, kern1 = pdc.layer_us(d1 * h, 1, pdc.scale_from_eb(eb, bpw_note))
-        if tiles_n and pdc.should_fuse(tiles_n, 1, max(1, int(round(d1 * h)))):
-            f1 = pdc.layer_us_fused(d1 * h, 1, pdc.scale_from_eb(eb, bpw_note))
-            if f1 < us1:
-                us1, kern1 = f1, "E25a-fused"
+        if tiles_n:
+            try:
+                j1, sh1, ks1, _n1 = pdc.layer_us_joint(d1 * h, 1, tiles_n, eb / 3.0,
+                                                       pdc.scale_from_eb(eb, bpw_note))
+            except ValueError:
+                j1 = None
+            if j1 is not None and j1 < us1:
+                us1, kern1 = j1, f"joint-{sh1}-KS{ks1}"
         print(f"  b=1: {layers} layers x {us1:.0f} us = {layers*us1/1000:.2f} ms/token of B70 time "
               f"({mib1:.1f} MiB/layer read while doing {d1*h:.1f} expert-projection-layers of work; "
               f"dispatch picks {kern1})")

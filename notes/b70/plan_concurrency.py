@@ -106,6 +106,19 @@ def main():
         us = lambda mib, r: mib * 1048576.0 / (r * 1000.0)
         fixed = calib - us(rd_l + state_l + kv_l, 936.0) if calib else 0.0
         assert fixed > 0, f"calibration went negative: parent bill alone exceeds {calib} us"
+        # Cross-check this composed parent model against the DIRECT measurement on the 3090
+        # (notes/bench_parent_leg.py -> out_parent_leg.txt): the floor there is non-expert only, so the
+        # comparison is fixed + streamed weights, not tp(b) with KV/state included.
+        floor_meas = ppb.PARENT_FLOOR_US[(1, 4096)]
+        floor_model = fixed + us(rd_l + 1 * (state_l + kv_l), ppb.PARENT_STREAM_GBPS)
+        print(f"parent model cross-check at b=1/ctx=4096: this planner's non-expert figure {floor_model:.0f} us vs "
+              f"the measured floor {floor_meas:.0f} us (out_parent_leg.txt) -> {floor_model / floor_meas:.2f}x. "
+              f"The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + "
+              f"state traffic only), while `fixed` here was calibrated so the parent bill reproduces the "
+              f"inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, "
+              f"lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor "
+              f"for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. "
+              f"Streamed reads charged at {ppb.PARENT_STREAM_GBPS:.0f} GB/s (measured), not the 936 spec figure.")
         print(f"Qwen3.8 {lab} bpw: eb {eb:.3f} MiB, h {h*100:.1f} %, parent bill "
               f"{rd_l:.0f} MiB/layer weights + {state_l:.1f} state + {kv_l:.1f} KV per sequence-layer; "
               f"fixed overhead {fixed:.0f} us")
@@ -121,7 +134,7 @@ def main():
             u = union_at(cnt, E, topk, rows)
             dev_mib = u * h * eb
             rate = pq.interp(band, dev_mib, 1)      # diagnostic only now: footprint, not a rate driver
-            tp = fixed + us(rd_l + rows * (state_l + kv_l), 936.0)
+            tp = fixed + us(rd_l + rows * (state_l + kv_l), ppb.PARENT_STREAM_GBPS)
             # Measured decode cost, priced PER EXPERT at the row count that expert actually sees. One step's
             # `rows` tokens make rows*topk selections spread over union(rows) touched experts, so the average
             # per-expert row count is rows*topk/union - the "rows/exp" column below - NOT the global row count.
@@ -133,10 +146,14 @@ def main():
             rpe = rows * topk / max(u, 1.0)
             rr = next((m for m in pdc.MEASURED_ROWS if m >= rpe), rpe)
             tb, kern = pdc.layer_us(u * h, rr, pdc.scale_from_eb(eb, float(lab)))
-            if tiles_n and rr in (1, 2, 4, 8, 16) and pdc.should_fuse(tiles_n, 1, max(1, int(round(u * h)))):
-                tf_ = pdc.layer_us_fused(u * h, rr, pdc.scale_from_eb(eb, float(lab)))
-                if tf_ < tb:
-                    tb, kern = tf_, "E25a-fused"
+            if tiles_n and rr in (1, 2, 4, 8, 16):
+                try:
+                    tf_, jshape, jks, _jn = pdc.layer_us_joint(u * h, rr, tiles_n, eb / 3.0,
+                                                               pdc.scale_from_eb(eb, float(lab)))
+                except ValueError:
+                    tf_ = None      # joint tables cover rows 1/8/16 only; fall back, do not extrapolate
+                if tf_ is not None and tf_ < tb:
+                    tb, kern = tf_, f"joint-{jshape}-KS{jks}"
                     fused_rows.append(rows)
             tc_ = us(u * (1 - h) * eb, ppb.CPU_RATE)
             wall = max(tp, tb, tc_)

@@ -99,6 +99,7 @@ across runs, the 1 MiB DMA at 13.1 GB/s, and both cross-vendor probes at their r
 | decode µs/layer at the matched footprint | Qwen3.8 **51** (27 clustered, ~5× inside the 250 µs parent window); GLM **405** (247 clustered) | GLM's 9 MiB experts land on the curve's worst point (132 GB/s) |
 | batch is the real variable | Qwen3.8 margin 4.9× → 1.3× → 0.5× over b = 1 → 4 → 8: distinct experts per layer grow ~linearly with rows while the parent window is weight-bound | "offload hides at decode" is a small-batch claim |
 | tiers are parallel, so combine by max | GLM 1 card is CPU-bound (467 µs/layer), 2 cards parent-bound (300 µs assumed), 3 cards add **nothing** unless `T_parent` < 135 µs | summing worker ms/token double-counts and hides the ceiling |
+| the parent's expert leg is kernel-bound, not bandwidth-bound | ~190 GB/s flat across b=1..16 (170–215); non-expert floor 122 µs/layer at b=1/ctx 4k → 238 µs at b=16; streamed reads 860 GB/s, not the 936 spec | a byte rate is an upper bound on traffic, not a rate to charge a kernel with; the spec figure is not even what the card delivers (`out_parent_leg.txt`) |
 
 Read as: the B70's link is not the problem (it is a shade faster than the 3090's on this box),
 and its compute is not the problem either (roughly 10x the CPU worker's expert-read rate). Two things

@@ -1190,6 +1190,25 @@ nothing that is the sole instance of a measurement.
     out_ks_grid.txt showed that at rows=16 fill still costs +36% (~18 us) against ~6 us saved, i.e. the idea is
     closed, not deferred. A corrected reason is only better than a wrong one if it gets the same scrutiny.
 
+61. **Two right answers can differ 2x, because one measures a floor and the other absorbed a window.** The
+    parent's non-expert cost per layer now has two numbers in this tree: **122 us**, composed bottom-up on the
+    3090 from measured legs (decode attention + streamed non-expert weights + recurrent-state traffic,
+    out_parent_leg.txt), and **257 us** from plan_concurrency.py, whose `fixed` overhead was calibrated so the
+    parent bill reproduces the inherited ~250 us/layer window. Neither is wrong: the planner's figure carries the
+    sampler, lm_head, graph launch and the rest of the network - everything the window contains and no bench of
+    mine measures - while the composed figure is explicitly a floor. The reason to write this down is that a
+    decision sits in the gap: at b=8 the parent term is 313 us calibrated vs 176 us floored, and the B70's leg is
+    299 us, so with one number the parent binds and with the other the B70 does. Rule adopted: when a constant
+    was inherited as an *observed window*, never calibrate a sub-model to reproduce that window and then quote the
+    sub-model as independent corroboration of the window - the calibration smuggles the window's unmeasured
+    contents into the "prediction". Report both estimates and name the decisions that flip between them.
+    The same file contains a second lesson about inherited rates. The parent's expert leg, measured with the real
+    fused kernel at the real shapes, runs at ~190 GB/s at b=1 and stays flat (170-215) through b=16 - the
+    signature of a kernel-bound leg, not a bandwidth-bound one, and batching buys it nothing. Anything that
+    charged that leg at the card's byte rate had it 4-5x wrong, and the byte rate itself was the datasheet's 936
+    rather than the 860 the card actually delivers (samples ranged 639-864, so only best-of-N is quotable). A
+    spec bandwidth is an upper bound on a *traffic* term; it is not a rate you may charge a kernel with.
+
 
 
 

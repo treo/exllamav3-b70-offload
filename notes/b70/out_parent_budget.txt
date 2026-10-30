@@ -5,7 +5,7 @@ plan_parent_budget.py - capacity vs traffic on the parent, and what that implies
 Qwen3.8@2.68:  checkpoint 91.47 GiB, 48 layers, 512 experts/layer, expert block 1.465 MiB, topk 10
   CAPACITY (GiB)                     TRAFFIC AT DECODE
     routed experts      37.51                    resident-read   86.37 MiB/layer/token = 4.05 GiB/token
-    streamed non-exp.    4.05   attn, shared/dense MLP, router, norms  ->  96.8 us/layer of 3090 DRAM time
+    streamed non-exp.    4.05   attn, shared/dense MLP, router, norms  -> 105.3 us/layer of 3090 DRAM time at the measured 860 GB/s
     lookup tables       49.91   embed, lm_head, n-gram: row-gathered from
                                                         host/disk (ngram_gather_cpu) - NOT VRAM,
                                                         not per-token traffic: excluded below
@@ -21,7 +21,7 @@ Qwen3.8@2.68:  checkpoint 91.47 GiB, 48 layers, 512 experts/layer, expert block 
 GLM@3.05:  checkpoint 116.56 GiB, 45 layers, 288 experts/layer, expert block 9.000 MiB, topk 8
   CAPACITY (GiB)                     TRAFFIC AT DECODE
     routed experts     109.27                    resident-read  129.03 MiB/layer/token = 5.67 GiB/token
-    streamed non-exp.    5.67   attn, shared/dense MLP, router, norms  -> 144.5 us/layer of 3090 DRAM time
+    streamed non-exp.    5.67   attn, shared/dense MLP, router, norms  -> 157.3 us/layer of 3090 DRAM time at the measured 860 GB/s
     lookup tables        1.63   embed, lm_head, n-gram: row-gathered from
                                                         host/disk (ngram_gather_cpu) - NOT VRAM,
                                                         not per-token traffic: excluded below
@@ -38,42 +38,54 @@ GLM@3.05:  checkpoint 116.56 GiB, 45 layers, 288 experts/layer, expert block 9.0
 PLACEMENT: P_order (hottest->3090 first, the plan today) vs P_lpt (hot list, each expert to the
 least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/rate_b, CPU leg)
   CPU home (S_c): measured per-assignment cost at 16 threads, per profile (out_cpu_worker_calib.txt, out_glm_cpu_calib.txt); any profile without a measured table falls back to bytes/47.4 GiB/s and says so
-  model          rows  T_par  S_g slots                      P_order                        P_lpt  verdict
-  Qwen3.8@2.68      1    250          5            251 (  5/464/ 43)            251 (  5/446/ 61)  tie
-  Qwen3.8@2.68      1    250         30            253 ( 29/464/ 19)            253 ( 29/425/ 58)  tie
-  Qwen3.8@2.68      1    250        120            257 (119/393/  0)            257 (119/346/ 47)  tie
-  Qwen3.8@2.68      4    250          5            252 (  5/464/ 43)            252 (  5/437/ 70)  tie
-  Qwen3.8@2.68      4    250         30            261 ( 29/464/ 19)            260 ( 29/416/ 67)  tie
-  Qwen3.8@2.68      4    250        120            279 (119/393/  0)            276 (119/338/ 55)  lpt
-  Qwen3.8@2.68      8    250          5            356 (  5/464/ 43)            317 (  5/436/ 71)  lpt
-  Qwen3.8@2.68      8    250         30            314 ( 29/464/ 19)            278 ( 29/415/ 68)  lpt
-  Qwen3.8@2.68      8    250        120            304 (119/393/  0)            299 (119/338/ 55)  lpt
-  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU home measured per-assignment; T_par swept because this box cannot measure the 3090 parent)
-  GLM@3.05          1    150          5            738 (  5/ 86/197)            804 (  5/ 86/197)  order
-  GLM@3.05          1    150         30            589 ( 30/ 86/172)            641 ( 30/ 86/172)  order
-  GLM@3.05          1    150        120            203 (120/ 86/ 82)            235 (120/ 86/ 82)  order
-  GLM@3.05          4    150          5           2704 (  5/ 86/197)           2955 (  5/ 86/197)  order
-  GLM@3.05          4    150         30           2159 ( 30/ 86/172)           2355 ( 30/ 86/172)  order
-  GLM@3.05          4    150        120            695 (120/ 86/ 82)            865 (120/ 86/ 82)  order
-  GLM@3.05          8    150          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
-  GLM@3.05          8    150         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
-  GLM@3.05          8    150        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  GLM@3.05          1    250          5            738 (  5/ 86/197)            804 (  5/ 86/197)  order
-  GLM@3.05          1    250         30            589 ( 30/ 86/172)            641 ( 30/ 86/172)  order
-  GLM@3.05          1    250        120            303 (120/ 86/ 82)            300 (120/ 86/ 82)  lpt
-  GLM@3.05          4    250          5           2704 (  5/ 86/197)           2955 (  5/ 86/197)  order
-  GLM@3.05          4    250         30           2159 ( 30/ 86/172)           2355 ( 30/ 86/172)  order
-  GLM@3.05          4    250        120            695 (120/ 86/ 82)            865 (120/ 86/ 82)  order
-  GLM@3.05          8    250          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
-  GLM@3.05          8    250         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
-  GLM@3.05          8    250        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  GLM@3.05          1    400          5            738 (  5/ 86/197)            804 (  5/ 86/197)  order
-  GLM@3.05          1    400         30            589 ( 30/ 86/172)            641 ( 30/ 86/172)  order
-  GLM@3.05          1    400        120            453 (120/ 86/ 82)            450 (120/ 86/ 82)  lpt
-  GLM@3.05          4    400          5           2704 (  5/ 86/197)           2955 (  5/ 86/197)  order
-  GLM@3.05          4    400         30           2159 ( 30/ 86/172)           2355 ( 30/ 86/172)  order
-  GLM@3.05          4    400        120            695 (120/ 86/ 82)            865 (120/ 86/ 82)  order
-  GLM@3.05          8    400          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
-  GLM@3.05          8    400         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
-  GLM@3.05          8    400        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU home measured per-assignment; T_par swept because this box cannot measure the 3090 parent)
+  model          rows    ctx  T_par S_g slots                      P_order                        P_lpt  verdict
+  Qwen3.8@2.68      1   4096    122        5            125 (  5/464/ 43)            125 (  5/446/ 61)  tie
+  Qwen3.8@2.68      1   4096    122       30            135 ( 29/464/ 19)            132 ( 29/425/ 58)  lpt
+  Qwen3.8@2.68      1   4096    122      120            159 (119/393/  0)            147 (119/346/ 47)  lpt
+  Qwen3.8@2.68      4   4096    144        5            190 (  5/464/ 43)            170 (  5/437/ 70)  lpt
+  Qwen3.8@2.68      4   4096    144       30            196 ( 29/464/ 19)            183 ( 29/416/ 67)  lpt
+  Qwen3.8@2.68      4   4096    144      120            286 (119/393/  0)            239 (119/338/ 55)  lpt
+  Qwen3.8@2.68      8   4096    176        5            356 (  5/464/ 43)            318 (  5/436/ 71)  lpt
+  Qwen3.8@2.68      8   4096    176       30            314 ( 29/464/ 19)            288 ( 29/415/ 68)  lpt
+  Qwen3.8@2.68      8   4096    176      120            442 (119/393/  0)            354 (119/338/ 55)  lpt
+  Qwen3.8@2.68     16   4096    238        5            643 (  5/464/ 43)            574 (  5/436/ 71)  lpt
+  Qwen3.8@2.68     16   4096    238       30            567 ( 29/464/ 19)            520 ( 29/415/ 68)  lpt
+  Qwen3.8@2.68     16   4096    238      120            719 (119/393/  0)            560 (119/338/ 55)  lpt
+  Qwen3.8@2.68      1  16384    133        5            136 (  5/464/ 43)            136 (  5/446/ 61)  tie
+  Qwen3.8@2.68      1  16384    133       30            146 ( 29/464/ 19)            143 ( 29/425/ 58)  lpt
+  Qwen3.8@2.68      1  16384    133      120            170 (119/393/  0)            158 (119/346/ 47)  lpt
+  Qwen3.8@2.68      4  16384    181        5            193 (  5/464/ 43)            192 (  5/437/ 70)  lpt
+  Qwen3.8@2.68      4  16384    181       30            233 ( 29/464/ 19)            220 ( 29/416/ 67)  lpt
+  Qwen3.8@2.68      4  16384    181      120            323 (119/393/  0)            276 (119/338/ 55)  lpt
+  Qwen3.8@2.68      8  16384    247        5            356 (  5/464/ 43)            318 (  5/436/ 71)  lpt
+  Qwen3.8@2.68      8  16384    247       30            345 ( 29/464/ 19)            320 ( 29/415/ 68)  lpt
+  Qwen3.8@2.68      8  16384    247      120            513 (119/393/  0)            425 (119/338/ 55)  lpt
+  Qwen3.8@2.68     16  16384    371        5            643 (  5/464/ 43)            574 (  5/436/ 71)  lpt
+  Qwen3.8@2.68     16  16384    371       30            567 ( 29/464/ 19)            520 ( 29/415/ 68)  lpt
+  Qwen3.8@2.68     16  16384    371      120            852 (119/393/  0)            693 (119/338/ 55)  lpt
+  (cells are wall us/layer, then expert slots on 3090/B70/CPU. parent floor = measured non-expert cost (out_parent_leg.txt); parent expert bytes charged at the measured fused-kernel rate (190 GB/s), not a byte rate; CPU home measured per-assignment; streamed reads at 860 GB/s measured)...
+  GLM@3.05          1   4096    122        5            738 (  5/ 86/197)            807 (  5/ 86/197)  order
+  GLM@3.05          1   4096    122       30            589 ( 30/ 86/172)            654 ( 30/ 86/172)  order
+  GLM@3.05          1   4096    122      120            382 (120/ 86/ 82)            315 (120/ 86/ 82)  lpt
+  GLM@3.05          4   4096    144        5           2704 (  5/ 86/197)           2966 (  5/ 86/197)  order
+  GLM@3.05          4   4096    144       30           2159 ( 30/ 86/172)           2403 ( 30/ 86/172)  order
+  GLM@3.05          4   4096    144      120           1127 (120/ 86/ 82)           1070 (120/ 86/ 82)  lpt
+  GLM@3.05          8   4096    176        5           4930 (  5/ 86/197)           5407 (  5/ 86/197)  order
+  GLM@3.05          8   4096    176       30           3936 ( 30/ 86/172)           4379 ( 30/ 86/172)  order
+  GLM@3.05          8   4096    176      120           1969 (120/ 86/ 82)           1951 (120/ 86/ 82)  lpt
+  GLM@3.05         16   4096    238        5           8593 (  5/ 86/197)           9425 (  5/ 86/197)  order
+  GLM@3.05         16   4096    238       30           6860 ( 30/ 86/172)           7634 ( 30/ 86/172)  order
+  GLM@3.05         16   4096    238      120           3363 (120/ 86/ 82)           3400 (120/ 86/ 82)  order
+  GLM@3.05          1  16384    133        5            738 (  5/ 86/197)            807 (  5/ 86/197)  order
+  GLM@3.05          1  16384    133       30            589 ( 30/ 86/172)            654 ( 30/ 86/172)  order
+  GLM@3.05          1  16384    133      120            393 (120/ 86/ 82)            326 (120/ 86/ 82)  lpt
+  GLM@3.05          4  16384    181        5           2704 (  5/ 86/197)           2966 (  5/ 86/197)  order
+  GLM@3.05          4  16384    181       30           2159 ( 30/ 86/172)           2403 ( 30/ 86/172)  order
+  GLM@3.05          4  16384    181      120           1164 (120/ 86/ 82)           1070 (120/ 86/ 82)  lpt
+  GLM@3.05          8  16384    247        5           4930 (  5/ 86/197)           5407 (  5/ 86/197)  order
+  GLM@3.05          8  16384    247       30           3936 ( 30/ 86/172)           4379 ( 30/ 86/172)  order
+  GLM@3.05          8  16384    247      120           2040 (120/ 86/ 82)           1951 (120/ 86/ 82)  lpt
+  GLM@3.05         16  16384    371        5           8593 (  5/ 86/197)           9425 (  5/ 86/197)  order
+  GLM@3.05         16  16384    371       30           6860 ( 30/ 86/172)           7634 ( 30/ 86/172)  order
+  GLM@3.05         16  16384    371      120           3496 (120/ 86/ 82)           3400 (120/ 86/ 82)  lpt
+  (cells are wall us/layer, then expert slots on 3090/B70/CPU. parent floor = measured non-expert cost (out_parent_leg.txt); parent expert bytes charged at the measured fused-kernel rate (190 GB/s), not a byte rate; CPU home measured per-assignment; streamed reads at 860 GB/s measured)...

@@ -36,6 +36,7 @@ transposed family (rev J/L) does not - it serves K = 2..6 verified, 2..16 compil
 
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 
+joint-launch selftest ran: per-KS tables agree with the legacy DPAS_* tables, best_launch picks the measured winner in each cell, ties inside 3% are marked ~tie, and passing bytes adds a warning without changing the pick (out_fusion_penalty_k.txt)
 joint (fusion, split-K) choice - us per (expert, gate+up pair), from measured cells
     E               rows=1               rows=8              rows=16
     2           4.75 fused KS=4            5.35 fused KS=4            5.70 fused KS=4 

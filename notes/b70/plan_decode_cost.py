@@ -271,8 +271,27 @@ def should_fuse(tn, KS, E, hw_threads=HW_THREADS):
     return tn * KS * 2 * E < 0.6 * hw_threads
 
 
+def layer_us_joint(picks, rows, tn, gate_mib, scale=1.0):
+    """Per-layer B70 time from the MEASURED joint (fusion, split-K) choice.
+
+    Replaces the older should_fuse(tn, KS=1, E) + layer_us_fused() pairing, which could only ask "fuse or not, at
+    KS=1". out_low_e_grid.txt and out_ks_grid.txt showed the levers are chosen together - at E=2 the best schedule
+    is fused AND KS=4 - so the joint table is what should be consulted. Returns
+    (us_per_layer, shape, KS, note); `note` carries the cache-band warning and any nearest-E substitution.
+
+    `gate_mib` is per-expert bytes for ONE projection: used only for the cache warning, never to decide, because
+    out_fusion_penalty_k.txt showed bytes cannot predict the sign near the band edges. `tn` is this model's
+    gate/up column-tile count.
+    """
+    us_pair, fused, KS, note = best_launch(max(1, int(round(picks))), rows, tn=tn, bytes_per_expert=gate_mib)
+    if rows not in DPAS_FUSE_DOWN:
+        raise ValueError(f"rows={rows} outside the fused measurement set {sorted(DPAS_FUSE_DOWN)}")
+    return (us_pair + DPAS_FUSE_DOWN[rows]) * picks * scale, ("fused" if fused else "separate"), KS, note
+
+
 def layer_us_fused(picks, rows, scale=1.0):
-    """Per MoE layer time with the E25a schedule: gate+up fused (KS=1) + down separate (KS=1)."""
+    """Per MoE layer time with the E25a schedule: gate+up fused (KS=1) + down separate (KS=1). Superseded by
+    layer_us_joint(), which also chooses split-K; kept because it is the shape the E25a artifact quotes."""
     if rows not in DPAS_FUSE_GU:
         raise ValueError(f"rows={rows} outside the fused measurement set {sorted(DPAS_FUSE_GU)}")
     return (DPAS_FUSE_GU[rows] + DPAS_FUSE_DOWN[rows]) * picks * scale
@@ -380,6 +399,9 @@ def main():
     print(__doc__.split("Usage:")[0].strip())
     print(f"\ncost spread note: {SPREAD}\n")
     assert selftest_launch(), "joint-launch chooser selftest failed"
+    print("joint-launch selftest ran: per-KS tables agree with the legacy DPAS_* tables, best_launch picks the "
+          "measured winner in each cell, ties inside 3% are marked ~tie, and passing bytes adds a warning "
+          "without changing the pick (out_fusion_penalty_k.txt)")
     print("joint (fusion, split-K) choice - us per (expert, gate+up pair), from measured cells")
     print(f"{'E':>5} " + " ".join(f"{'rows=' + str(r):>20}" for r in (1, 8, 16)))
     for E in sorted(KS_SEP):
