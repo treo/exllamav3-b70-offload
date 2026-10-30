@@ -1,0 +1,85 @@
+Weights shared across row-slabs: the cache hierarchy already does it, and SLM staging is 2.5-6x worse
+=======================================================================================================
+The first measurement for the now-in-scope B70 prefill work (doc/port/b70-prefill.md §4 proposed a mechanism;
+this probe prices it, and the proposal does not survive).
+
+QUESTION. Prefill on the B70 stands or falls on one property: an expert's weight bytes must reach the math ONCE
+per chunk however many token rows hit that expert. Today's answer is row buckets, which E29 measured as
+additive in traffic (x2.00/x2.98/x3.96 at 32/48/64 rows), and at the measured prefill rows/expert (~105 for a
+2048-token chunk on Qwen3.8@2.68) that is ~7x. Two candidate mechanisms for getting reuse:
+  (a) stage the tile set into SLM once per work-group, then let each work-item own a 16-row slab (my §4 proposal);
+  (b) let the group's items simply read the same global bytes at the same time and hope the hierarchy dedupes.
+This probe measures both against a no-reuse baseline, with identical ALU and - after the first run proved
+otherwise - identical load WIDTHS.
+
+PROTOCOL. notes/b70/probe_slm.cpp; WARM_S=1 of executed work with q.wait() every 8 dispatches; min of 3;
+2 GiB of unique bytes = 341x the 24 MiB L2, so nothing here measures cache warm-up; region sizes are real
+(Qwen3.8@2.68 gate tiles: 80 KiB per expert-projection, 40 KiB at KS=2, 20 KiB at KS=4); 32 items per group =
+32 row-slabs sharing one weight pass. Anchor on the decode probe read 19.2 us in this window.
+
+  region    mode      ms      GB/s(unique)     reading
+  20 KiB    OWNED    5.762   1388             each dword read once, by one item            (roofline control)
+            DRAM     4.636   1726             every item sweeps the whole region from global
+            SLM      8.325    961             staged to local memory, then swept from SLM
+  40 KiB    OWNED    5.934   1348
+            DRAM     4.735   1689             FASTER than reading once
+            SLM     14.920    536             2.5x slower than DRAM, 3.1x slower than OWNED
+  80 KiB    OWNED    7.082   1130
+            DRAM     5.060   1581
+            SLM     42.669    188             6.0x slower than DRAM; 128 KiB/group is the ceiling
+(GB/s is unique bytes / time; app-visible traffic in DRAM mode is 32x that, i.e. the hierarchy absorbed 31/32
+of it. SLM at 80 KiB is also within 12% of the largest group footprint the SLM budget allows, so this is the
+mechanism's best case, not its worst.)
+
+ISA EVIDENCE (IGC_ShaderDumpEnable=1, kernels identified by their mangled template args, archived in
+notes/b70/asm_slm/) - this is what turned a surprising number into an explanation, and it also caught a flaw in
+my own first version:
+  * First version compared unfairly without my noticing: the shared-walk loops lowered to scalar
+    `load.ugm.d32.a64` x320 while the baseline got `load.ugm.d32x4.a64` x80. Rewritten lane-contiguously
+    (lane li takes dwords [j+li*4, j+li*4+3]), all three kernels now emit exactly **80 vector d32x4 loads per
+    item** - identical instruction counts, so the remaining differences are memory-system, not codegen.
+  * enqueue<10240,32,1> (DRAM-reuse): 719 instructions, 80 load.ugm.d32x4.a64, 1 store.
+  * enqueue<10240,32,2> (SLM):          1177 instructions, 80 load.ugm.d32x4.a64 (the staging read) PLUS 80
+    load.slm.d32x4.a32 (the walk) PLUS 77 store.slm.d32x4.a32 + 12 store.slm.d32.a32 (the cooperative stage)
+    and a `send.slm` barrier sequence - 64% more instructions to do "the same" work.
+  * `%scratchloc` is declared in every kernel (it is a builtin) and no scratch ld/st appears: none of this is a
+    spill story. That distinction matters, because the chapter's M<=16 limit IS a spill story.
+
+WHAT IT MEANS
+1. **Mechanism (b) wins, and by a lot.** Concurrent global reads of the same bytes by one work-group are
+   effectively free: DRAM-reuse is *faster* than reading each byte once (1689 vs 1348 GB/s at 40 KiB), because
+   the hierarchy dedupes the 32 copies and the extra hits land in L1/L2 rather than on DRAM. The reuse property
+   prefill needs therefore does NOT require a staging pass - it requires the row-slabs to be **in flight
+   together**, which is a scheduling constraint on the kernel, not a memory technique.
+2. **E29's additive bucket law is explained, not contradicted.** Buckets are separate LAUNCHES: by the time
+   bucket 2 streams the same expert, thousands of other MiB have passed through the hierarchy, so the reuse
+   distance exceeds L2 and the bytes come back from DRAM. Same bytes, same kernel, different co-scheduling.
+3. **SLM staging is the wrong tool here, and the ISA says why**: it converts one cache-coherent stream into a
+   global read + a local write + a local read (160 loads + 89 stores vs 80), and it burns the group's SLM
+   budget, which is also an occupancy budget - the penalty grows 1.4x -> 2.5x -> 6.0x as the staged region goes
+   20 -> 40 -> 80 KiB, which is the occupancy signature, not a bandwidth one.
+4. Consequence for the prefill kernel design (rewriting b70-prefill.md §4): map **(expert, column tile,
+   k-slice) -> work-group**, and **(16-row slab) -> work-item**, all in ONE launch per chunk; read B straight
+   from global as today; do not add an SLM staging pass. The E25c 64-items-per-group cap allows 64 x 16 = 1024
+   rows of M coverage per group, against the ~105 rows/expert the measured distribution needs, so the cap is
+   not binding - unlike E25c's cross-dependency case, where one group had to cover an expert's whole tile set.
+
+WHAT THIS DOES NOT ESTABLISH
+  * It is a traffic/hierarchy probe, not a GEMM: no trellis unpack, no DPAS, no epilogue. The unpack ALU is
+    where route R1 vs R2 will differ, and that is still unmeasured.
+  * It does not prove a real prefill kernel hits these rates; it proves the reuse mechanism is not the obstacle,
+    which is the question §4 posed. The next step is the actual kernel at rows/expert 32/64, scored on bytes
+    moved per chunk against the one-read ideal.
+  * Concurrency realism: 64 groups x 40 KiB ~= 2.6 MiB of simultaneously-live region, comfortably inside L2 -
+    which is what a real kernel would also have in flight. If a future kernel widened the per-group region or
+    ran far more groups, the dedupe could stop being free; the sizes where it breaks are a cheap extension of
+    this probe (320 KiB already shows OWNED degrading to 949 GB/s while DRAM-reuse holds 1279).
+  * The all-GPU prefill baseline is still owed (b70-prefill.md §5), and today's measured CPU-split prefill
+    baselines are 655 / 479 tok/s.
+
+Reproduce:
+    icpx -fsycl -O2 -o probe_slm probe_slm.cpp
+    WARM_S=1 ./probe_slm [tile_KiB] [items] [unique_MiB] [reps]      # e.g. 40 32 2048 3
+    NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=/tmp/asm_slm2 \
+        WARM_S=0.2 ./probe_slm 40 32 256 1
+    # identify kernels by the mangled template args: enqueueILi<TILE_DW>ELi<ITEMS>ELi<MODE>E

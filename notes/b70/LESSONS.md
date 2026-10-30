@@ -1243,6 +1243,24 @@ nothing that is the sole instance of a measurement.
     decision flipped" as a finding; (3) two paths computing the same quantity must agree to the digit or be
     reconciled in the artifact - a mismatch is a cheap, high-signal bug detector that only works if you look.
 
+68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
+    `probe_slm` exists to answer one question: is the reuse prefill needs cheaper via SLM staging or via letting
+    a work-group's items read the same global bytes concurrently. I made the three modes do the same ALU chain
+    per dword and considered that fair. The ISA said it was not: the baseline's loop lowered to 80
+    `load.ugm.d32x4.a64` (four dwords per lane per instruction) while the two shared-read loops - written with
+    lane-strided indexing `p[j + li], p[j + ITEMS + li], ...` - lowered to 320 scalar `load.ugm.d32.a64`. I was
+    partly measuring vectorisation, and reaching for a memory-hierarchy explanation of a codegen difference.
+    Rewriting the loops lane-contiguously gave all three modes exactly 80 d32x4 loads and the comparison became
+    honest - the headline conclusion survived (concurrent global reuse is free, SLM staging is 2.5-6x worse), but
+    the intermediate numbers moved by 5-10% and, more importantly, the *reason* changed: the SLM penalty is
+    +458 instructions of extra on-chip traffic (89 `store.slm` + 80 `load.slm` on top of the 80 global loads)
+    plus occupancy, visible only in the dump. Rules: (1) when two kernels are compared on a memory question,
+    prove from the ISA that they are equal on load width, load count, and scratch traffic - not from the source
+    you meant; (2) `%scratchloc` is declared in every kernel on this target, so "there is a scratch reference"
+    is not evidence of a spill - check for scratch ld/st, or you will explain your result with a thing that is
+    always true; (3) a surprising result is an invitation to look at the generated code before the narrative,
+    not after.
+
 63. **Recompute the statistic per unit; never collapse the distribution first.** The planners took `counts_for()`
     = *layer 0's* expert-selection array and treated it as "the routing distribution" for every batch-scaling
     number. A live trace showed how bad that proxy was (layer 0 of Qwen3.8@2.68 touched 289 of 512 experts in

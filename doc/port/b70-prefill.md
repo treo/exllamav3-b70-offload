@@ -51,7 +51,7 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    one 31.9 GiB card across 42 layers (106 GiB), so prefill there is a residency-policy question first - and
    its rows/expert at R=2048 is ~2048×8/288 = 57, i.e. four buckets today.
 
-4. THE DESIGN THAT AVOIDS THE SPILL - AND THE EXPERIMENT THAT TESTS IT
+4. THE DESIGN THAT AVOIDS THE SPILL — SUPERSEDED BELOW by `probe_slm` measurements; read §4a as the design
    Register pressure is what caps M at 16, so do not raise M per thread. Keep **an expert's B tile resident in
    SLM and loop its row-slabs inside the kernel**: each work-item still computes a 16-row slab (the shape that
    provably fits 128 GRFs), but the weights come from SLM instead of DRAM, so the DRAM traffic per chunk is
@@ -78,6 +78,30 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    of M coverage per group per K-chunk - comfortably above the 105 rows/expert the measured distribution
    needs, so the cap is not the binding term for prefill (it was, decisively, for E25c's cross-dependency
    fusion, where one group had to cover a whole expert's tiles).
+
+**4a. WHAT MEASUREMENT SAID (probe_slm, `notes/b70/out_prefill_gemm.txt`) — the SLM mechanism above is
+   refuted, and the replacement is cheaper than the proposal.** With identical ALU per dword and, after the ISA
+   showed the first comparison was scalar-vs-vector, identical `load.ugm.d32x4` widths in all three modes:
+     * reading the same bytes concurrently from **global** by all 32 items is *faster* than reading each byte
+       once (1689 vs 1348 GB/s of unique bytes at 40 KiB/group, 1581 vs 1130 at 80 KiB): L1/L2 absorb 31 of
+       every 32 copies, so the reuse prefill needs costs essentially nothing.
+     * **SLM staging is 1.44× / 2.51× / 6.03× slower** at 20 / 40 / 80 KiB per group, degrading as the staged
+       region grows — the occupancy signature of spending the 128 KiB/group SLM budget. The ISA gives the
+       mechanism: the same walk costs 1177 instructions instead of 719, because staging adds 89 `store.slm`
+       plus 80 `load.slm` on top of the 80 global loads it was meant to replace. No scratch traffic in any
+       mode, so this is not a spill story.
+   Design that follows: **(expert, column tile, k-slice) → work-group**, **(16-row slab) → work-item**, one
+   launch per chunk, B read from global exactly as decode does it today. No staging pass. The E25c cap of 64
+   work-items/group allows 1,024 rows of M coverage per group against the ~105 rows/expert measured, so the cap
+   is not binding here (unlike E25c's cross-dependency case).
+   This also *explains* E29's additive bucket law instead of contradicting it: buckets are separate launches,
+   so by the time bucket 2 revisits an expert far more than L2 has streamed past and the reuse distance is
+   gone. Same bytes, same kernel, different co-scheduling — which is why the fix is a mapping change.
+   The experiment list above stands with one amendment: variant (B) becomes the group-mapped global-read kernel
+   (not SLM-staged), and the pass criterion stays traffic-based (≤1.15× one read per expert per chunk at
+   rows/expert 64) with the ISA checked for scratch. The failure mode to watch for is a kernel that puts row-
+   slabs in successive iterations of *one item's* loop — that recreates the bucket pattern's reuse distance
+   inside a single thread and will look correct while paying 7×.
 
 5. WHAT THIS DOES NOT CLAIM
    * No prefill number in this note is measured on the B70 yet: §3's throughput figures are the card's own

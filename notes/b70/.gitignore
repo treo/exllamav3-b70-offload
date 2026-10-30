@@ -33,3 +33,4 @@ __pycache__/
 probe_barrier
 
 probe_groupfused
+probe_slm
