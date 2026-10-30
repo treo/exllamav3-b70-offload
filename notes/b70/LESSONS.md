@@ -1154,6 +1154,25 @@ nothing that is the sole instance of a measurement.
     it costs 27%. (3) Same root as LESSONS 55 — never reason about a kernel without its working-set size beside
     it; the first time it corrected a *rate*, this time it corrected a *decision*.
 
+59. **Price the mechanism before building the feature — a go/no-go instrument is often a tenth of the work and
+    sometimes the whole answer.** E25c (gate+up+down in one launch) would have meant a three-phase ESIMD kernel
+    with per-slice geometry, an intermediate hand-off and the register consequences of sequential phases. Instead
+    I wrote probe_barrier.cpp — the same body with and without an atomic spin barrier, 8 rounds, min of 5 — and
+    the answer arrived in one build: a device-wide barrier costs 1.6 µs at 256 work-items, 2.5 at 1024 and 6.2 at
+    2048, against the ~2.9 µs the saved launch is worth, on the most favourable geometry available. Net negative
+    before any of the hard parts exist. Habit: for every "fuse X into Y" proposal, first name the mechanism the
+    fusion requires (here: grid-wide sync) and measure *that* in isolation; the feature is only worth building if
+    the mechanism is cheaper than what it saves. This is the fourth such refutation on this device and all four
+    were cheap: the recurring truth is that launches cost ~3 µs while in-kernel coordination and atomics cost
+    multiples of it.
+    Subsidiary, and the fifth appearance of the LESSONS 42/45 trap: the probe's built-in correctness check
+    reported zero mismatches for BOTH the barrier runs and the unbarriered runs, so it could not distinguish a
+    working barrier from no barrier at all — a check that cannot fail proves nothing, and I nearly quoted its
+    zeros as evidence the barrier delivered visibility. The cost conclusion survived because it is a within-run
+    delta between identical bodies, but the artifact now says plainly that the ordering question is unresolved and
+    that any future attempt needs a wider write→read window first. When a check comes back uniformly clean, ask
+    what it would have looked like had the thing been broken; if the answer is "the same", it is decoration.
+
 
 
 

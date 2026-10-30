@@ -72,6 +72,11 @@ echo "built probe_dpas9"
 icpx -fsycl -O2 -o probe_combine probe_combine.cpp
 echo "built probe_combine"
 
+# probe_barrier: E25c go/no-go - what a device-wide barrier costs vs the launch it would save. Never builds a
+# fused kernel, because the arithmetic killed the idea first (out_e25c_barrier.txt).
+icpx -fsycl -O2 -o probe_barrier probe_barrier.cpp
+echo "built probe_barrier"
+
 # dp4a path: one binary per trellis K, since compile-time K is worth x1.2-1.5 at rows=1 (out_gemv.txt).
 # gate_dpas.py expects /tmp/pgK<K>; it reports a clear SKIP when one is missing rather than passing silently.
 for k in 2 3 4 5 6; do

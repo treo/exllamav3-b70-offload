@@ -1,0 +1,79 @@
+E25c: three projections in one launch - REFUTED before building it (a device-wide barrier costs more than the
+launch it saves)
+==============================================================================================================
+The last "fewer launches" idea in the chapter: gate, up AND down in a single gemm launch, which would take the
+layer from 4 launches (fused gate+up gemm, combine_both, down gemm, combine) to 3.
+
+Why it needs a barrier rather than a trick: down's input is silu(gate·x) * (up·x), produced by OTHER work-items
+(the intermediate is tiled 16 columns wide across the grid), and down's k-range is the full n of gate/up. So one
+kernel must write the intermediate, synchronise the whole grid, and read it back. That is a device-wide barrier,
+and this device has no cooperative launch in the stack in use - only an atomic-arrival spin barrier, which is
+legal solely when every work-item is resident.
+
+So the go/no-go is two numbers, both cheap, and neither required writing the fused kernel (probe_barrier.cpp):
+
+       G   barrier us     plain us   us per barrier   ns/wi/barrier
+     256       25.35        12.65          1.587           6.20
+    1024       32.69        12.78          2.489           2.43
+    2048       62.46        13.13          6.166           3.01     <- the device's whole capacity
+    3072      144.20        13.29         16.363           5.33     OVER SUBSCRIBED (completion = luck)
+    4096      175.51        12.81         20.338           4.97     OVER SUBSCRIBED (completion = luck)
+
+Same kernel body, same work per item, 8 barriers per launch, min of 5 rounds; the delta column is the barrier
+and nothing else. "plain" is flat in G (~12.8 us: launch + 8 rounds of a store and a load), so the growth is the
+synchronisation, not the work.
+
+THE ARITHMETIC, using the friendliest possible geometry
+  * Prize: ONE saved gemm launch. A launch's protocol cost on this device is ~2.9 us measured standalone
+    (out_e25b_combine.txt), and E25b already established that saving launches without saving work buys little in
+    situ.
+  * Cost, best case: E=10, rows=1, KS=1. The gate+up phase is 1600 threads; down alone would be 3200, so the
+    design has each thread take two down tiles to stay at 1600 - i.e. the barrier is priced at G ~ 1600, which
+    interpolates to ~4 us. 4 us paid to save 2.9 us: already -1.1 us, and that is the BEST cell.
+  * Cost at capacity (G=2048, which is where E=16 or rows>1 lands): 6.2 us to save 2.9 us: -3.3 us.
+  * Beyond capacity the design is not merely slow, it is illegal-by-API: a spin barrier needs co-residence, and
+    3072/4096 completed here only because the scheduler happened to make progress. Those rows are a warning, not
+    a pass: the cost also explodes (16-20 us per barrier).
+  * Not even counted: phases are sequential in one kernel, so the register budget becomes max(phase1, phase2).
+    At rows > 1 the register file is already zero-sum against the prefetch ring (E29: 128 GRF holds 16 rows plus
+    the operands, and every attempt to carry more row state cost prefetch depth, not a constant factor). A
+    fused three-projection kernel inherits that bill on top.
+  * No traffic prize either: the intermediate round-trips through memory either way, and it is already L2-warm
+    because the consumer follows the producer immediately.
+
+DECISION: do not build E25c. Keep kernel boundaries where the data dependency is, and buy the launch-count
+reduction where it is free - which E25a/E25b already did (gate+up share a launch because they are INDEPENDENT,
+and one combine_both serves both).
+
+THE GENERAL PATTERN this closes, and it is the reason the item is worth a file rather than a line
+  Four separate attempts to reduce per-layer overhead by merging work inside the device have now failed, and
+  three of them failed for the same reason - device-side coordination is priced above the launch it removes:
+    * rev K: atomically combining split-K partials inside the gemm: +6.4-8.4 us gate / +13.6-15.8 us down to save
+      a 1.9 us round trip (D2).
+    * rev K floor mode: the combine protocol alone measured ~8.7 us, which is why "just fuse it in" looked
+      attractive and was not.
+    * E25b: one combine launch instead of two: neutral at rows=1, +1.9/+3.5 us above it, until the fix turned out
+      to be grid SHAPE rather than launch count.
+    * E25c (here): one gemm launch for all three projections: a device-wide barrier costs 2.5-6.2 us at the
+      occupancy needed, to save a 2.9 us launch.
+  Read together, the rule for this device is: **launches are cheap; in-kernel coordination is not.** Prefer more,
+  smaller, independent kernels and merge work only where it is embarrassingly parallel (same launch, no sync -
+  exactly what D8/D9 exploit). Any future "fuse across a dependency" proposal should be priced against
+  ~1.6 us/256 work-items rising to ~6.2 us at 2048 before it gets a kernel written.
+
+LIMITATIONS OF THIS INSTRUMENT, stated because one of them bit
+  * The ordering check did NOT discriminate: mismatch counts were 0 for BOTH the barrier runs and the plain
+    (unbarriered) runs. The plain runs were expected to show some, so either the window between write and read is
+    too short for a miss to materialise or the read is being satisfied in a way that hides it. Consequence: this
+    probe shows what a barrier-shaped kernel COSTS, but does not prove that the barrier actually delivers
+    visibility - so it cannot be cited as evidence that a spin barrier works on this device. The cost conclusion
+    does not depend on it (both variants run the identical body; only the delta is quoted), but a future attempt
+    at E25c would need a working ordering check first, which means forcing a much wider write->read window.
+  * Single-work-group-size (64) spin barrier with one counter per round; a hierarchical or cluster-based barrier
+    could be cheaper, but the shapes here (2048 slots, no cooperative launch) leave no obvious lever, and the
+    3072/4096 numbers show the direction of the slope, not a plateau.
+  * Window health: this run was not anchored (no timing comparison to earlier batches is being made); the
+    quantity measured is a within-run delta.
+
+Reproduce:
+    icpx -fsycl -O2 -o /tmp/pb probe_barrier.cpp && /tmp/pb 8        # 8 barriers per launch, min of 5 rounds
