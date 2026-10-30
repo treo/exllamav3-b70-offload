@@ -58,7 +58,50 @@ ramp in the stream), while the standalone probe bursts 200 iterations of nothing
 is therefore a protocol test, not a hardware one: re-measure the in-situ arms at burst length 1 (sync per
 iteration) as well as 3, which needs the merged arm reinstated in probe_dpas9 temporarily. Until that runs, the
 kept schedule stays split because that is the only form measured in situ, but the honest expectation from the
-standalone data is that split is the WRONG choice and the in-situ result is a scheduling artifact., even though the protocol
+standalone data is that split is the WRONG choice and the in-situ result is a scheduling artifact.
+
+IN-SITU ISA, READ (asm_insite/) — the mechanism, not a guess. Dumping the two combine bodies AS COMPILED INSIDE
+probe_dpas9 and identifying them by mangled name:
+
+  combine (split body)      869 lines   mov 158  mul 47  mad 17  cmp.eq 6   or 6  asr 4   3 loads / 1 store
+  combine_pair (merged)    1105 lines   mov 229  mul 51  mad 19  cmp.eq 12  or 10 asr 8   3 loads / 1 store
+
++27 % instructions, concentrated in mov (+71) and the selection/predication ops (cmp.eq, or, asr, shr): the
+`PART = a ? PA : PB` select duplicates 64-bit address setup for the two candidate bases, because the base is not
+known until run time *inside* the k-slice loop. Memory-op shape is identical, so this is pure address arithmetic
+- the LESSONS 49 cost class again.
+
+The tell: in the STANDALONE dumps both schedules reach the second k-slice through a folded immediate
+(`flat[V0308+0x64000]`) and the bodies are near-clones. Neither in-situ body has ANY immediate offset - every
+address is a computed register - because `KS` is a runtime int in probe_dpas9 while probe_combine.cpp declares
+`constexpr int KS = 1`. Identical source loop, different folding, and it lands entirely on the merged form
+because the select multiplies the unfolded address math.
+
+Falsifiable prediction: make `KS` a compile-time parameter of the in-situ kernel (D7 already treats it as a
+dispatch parameter) and the merged body's +27 % should collapse toward the standalone near-clone, at which point
+the merged combine should win in situ by roughly the ~3 us it wins standalone.
+
+Protocol hypothesis, tested and DEAD (anchor interleaved at 19.4 us, healthy, so both columns are trustworthy):
+
+  rows=1    burst-of-8: split 21.50  pair 21.60 (+0.10)    single-launch: split 28.60  pair 28.00 (-0.60)
+  rows=8    burst-of-8: split 26.90  pair 28.80 (+1.90)    single-launch: split 33.00  pair 35.80 (+2.80)
+  rows=16   burst-of-8: split 34.60  pair 38.10 (+3.50)    single-launch: split 40.80  pair 44.90 (+4.10)
+
+PREDICTION TESTED AND WRONG (same session): making KS a template parameter of both combine bodies (revL3,
+anchor 19.4 interleaved, both arms bit-exact) did NOT change the sign or the size of the penalty -
+rows=1/8/16 burst: +0.00 / +2.00 / +3.40 us (was +0.10 / +1.90 / +3.50). So the missing immediate offset was
+not the cause; the +27 % instruction count of the merged body may still be the cost, but it is not mediated by
+KS folding. The templated combine is kept anyway - KS is compile-time-known by D7, and LESSONS 49 stands on
+its own evidence (the band case), not on this failed inference.
+
+Ruled out so far for the in-situ inversion: dirty L2 (refuted), measurement protocol / burst depth (refuted),
+KS immediate folding (refuted), combine-body memory-op shape (identical 3 loads / 1 store).
+Still open, and the next test: partials may not be L2-resident in situ the way they are standalone - the
+standalone probe writes 2 x 800 KB once and re-reads it hot, while in situ the fused gemm writes both partial
+regions and the layer's other traffic may have evicted them. Test: producer -> scrub a ~32 MB buffer ->
+combine, in probe_combine.cpp; if the merged arm loses there, the mechanism is dual-stream DRAM fetch vs
+single-stream, and the engine answer is to combine each projection right after its own producer (which argues
+against gemm-level fusion of gate+up at rows>1, where E25a already measured the win shrinking). `DPAS_SPLIT` stays in probe_dpas9 as a temporary marker until the eviction test below decides which ships., even though the protocol
 is genuinely ~7.8 us at rows=1: the merged launch reads the same partials and writes the same floats, and above
 rows=1 it gives up whatever overlap the two smaller grids enjoyed. Neutral at rows=1, monotonically worse with
 rows - the shape you expect when the saving is real (one dispatch, fixed) and the loss scales with the work

@@ -1,0 +1,156 @@
+---
+version:         '1.73'
+kernels:
+  - name:            _ZTSZL12combine_pairRN4sycl3_V15queueEPKiS4_PKfS4_PfS7_RK4MetaiiEUlNS0_2idILi1EEEE_
+    user_attributes:
+      intel_reqd_workgroup_walk_order: [ 0, 1, 2 ]
+    execution_env:
+      grf_count:       128
+      has_4gb_buffers: true
+      has_no_stateless_write: true
+      indirect_stateless_count: 3
+      inline_data_payload_size: 32
+      offset_to_skip_per_thread_data_load: 128
+      simd_size:       32
+      subgroup_independent_forward_progress: true
+      eu_thread_count: 8
+    payload_arguments:
+      - arg_type:        global_id_offset
+        offset:          0
+        size:            12
+      - arg_type:        enqueued_local_size
+        offset:          12
+        size:            12
+      - arg_type:        arg_bypointer
+        offset:          24
+        size:            8
+        arg_index:       1
+        addrmode:        stateless
+        addrspace:       global
+        access_type:     readwrite
+      - arg_type:        arg_bypointer
+        offset:          32
+        size:            8
+        arg_index:       2
+        addrmode:        stateless
+        addrspace:       global
+        access_type:     readwrite
+      - arg_type:        arg_bypointer
+        offset:          40
+        size:            8
+        arg_index:       3
+        addrmode:        stateless
+        addrspace:       global
+        access_type:     readwrite
+      - arg_type:        arg_bypointer
+        offset:          48
+        size:            8
+        arg_index:       4
+        addrmode:        stateless
+        addrspace:       global
+        access_type:     readwrite
+      - arg_type:        arg_bypointer
+        offset:          56
+        size:            8
+        arg_index:       8
+        addrmode:        stateless
+        addrspace:       global
+        access_type:     readwrite
+      - arg_type:        arg_bypointer
+        offset:          64
+        size:            8
+        arg_index:       9
+        addrmode:        stateless
+        addrspace:       global
+        access_type:     readwrite
+      - arg_type:        arg_byvalue
+        offset:          72
+        size:            8
+        arg_index:       0
+      - arg_type:        arg_byvalue
+        offset:          80
+        size:            4
+        arg_index:       6
+      - arg_type:        arg_byvalue
+        offset:          84
+        size:            4
+        arg_index:       7
+      - arg_type:        arg_byvalue
+        offset:          88
+        size:            37
+        arg_index:       5
+        source_offset:   0
+      - arg_type:        arg_byvalue
+        offset:          128
+        size:            1
+        arg_index:       5
+        source_offset:   37
+      - arg_type:        arg_byvalue
+        offset:          132
+        size:            1
+        arg_index:       5
+        source_offset:   38
+      - arg_type:        arg_byvalue
+        offset:          136
+        size:            1
+        arg_index:       5
+        source_offset:   39
+    per_thread_payload_arguments:
+      - arg_type:        local_id
+        offset:          0
+        size:            64
+kernels_misc_info:
+  - name:            _ZTSZL12combine_pairRN4sycl3_V15queueEPKiS4_PKfS4_PfS7_RK4MetaiiEUlNS0_2idILi1EEEE_
+    args_info:
+      - index:           0
+        address_qualifier: __private
+        access_qualifier: NONE
+        type_name:       'long;8'
+        type_qualifiers: NONE
+      - index:           1
+        address_qualifier: __global
+        access_qualifier: NONE
+        type_name:       'char*;8'
+        type_qualifiers: NONE
+      - index:           2
+        address_qualifier: __global
+        access_qualifier: NONE
+        type_name:       'char*;8'
+        type_qualifiers: NONE
+      - index:           3
+        address_qualifier: __global
+        access_qualifier: NONE
+        type_name:       'float*;8'
+        type_qualifiers: NONE
+      - index:           4
+        address_qualifier: __global
+        access_qualifier: NONE
+        type_name:       'float*;8'
+        type_qualifiers: NONE
+      - index:           5
+        address_qualifier: __private
+        access_qualifier: NONE
+        type_name:       'struct Meta;40'
+        type_qualifiers: NONE
+      - index:           6
+        address_qualifier: __private
+        access_qualifier: NONE
+        type_name:       'int;4'
+        type_qualifiers: NONE
+      - index:           7
+        address_qualifier: __private
+        access_qualifier: NONE
+        type_name:       'int;4'
+        type_qualifiers: NONE
+      - index:           8
+        address_qualifier: __global
+        access_qualifier: NONE
+        type_name:       'float*;8'
+        type_qualifiers: NONE
+      - index:           9
+        address_qualifier: __global
+        access_qualifier: NONE
+        type_name:       'int*;8'
+        type_qualifiers: NONE
+l1_cache_policy: wbp
+...

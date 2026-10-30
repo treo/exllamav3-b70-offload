@@ -457,8 +457,13 @@ static void permute_tiles(const std::vector<char> &raw, uint32_t *dst, size_t nt
             for (int i = 0; i < K; ++i) dst[t * NW + i * 8 + q] = src[t * NW + q * K + i];
 }
 
+// KS is a template parameter here (E25b): with a runtime KS the in-situ combine lost the folded immediate
+// offset for the second k-slice that the standalone probe had, and the merged body paid +27 % instructions for
+// it (asm_insite/, out_e25b_combine.txt). Dispatching on the value instead of passing it costs 4 host-side
+// kernels per body, which is nothing next to the gemm's instantiation count.
+template <int KSn>
 static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const int32_t *SX8,
-                    float *Y, const Meta &m, int KS, int rpad)
+                    float *Y, const Meta &m, int rpad)
 {
     const size_t total = (size_t)m.E * m.R * m.n;
     q.parallel_for(sycl::range<1>(total), [=](sycl::id<1> id)
@@ -468,7 +473,7 @@ static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const i
         const int row = (int)((i / m.n) % m.R);
         const int col = (int)(i % m.n);
         int32_t s = 0;
-        for (int p = 0; p < KS * 2; ++p)
+        for (int p = 0; p < KSn * 2; ++p)
             s += PART[(((size_t)p * m.E + e) * rpad + row) * m.n + col];   // contiguous in col
         Y[i] = m.kinv * Q[row] * ((float)s - 510.0f * (float)SX8[row]);
     });
@@ -494,6 +499,30 @@ static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const i
 // less. The hypothesis that survives is a different one and cannot be expressed here: fold SiLU-mul into a
 // combine that reads both partial sets and writes ONE product tensor - a traffic win (one pass fewer, half the
 // writes), not a launch win. Needs the engine-shaped harness, since the probe has no elementwise stage.
+
+// TEMPORARY (E25b tie-breaker): the merged combine, re-added only so both protocols can be read from one
+// binary - see out_e25b_combine.txt. Remove whichever form loses.
+template <int KSn>
+static void combine_pair(sycl::queue &q, const int32_t *PA, const int32_t *PB, const float *Q,
+                         const int32_t *SX8, float *YA, float *YB, const Meta &m, int rpad)
+{
+    const size_t one = (size_t)m.E * m.R * m.n;
+    q.parallel_for(sycl::range<1>(2 * one), [=](sycl::id<1> id)
+    {
+        const size_t i = id[0];
+        const bool a = i < one;
+        const int32_t *PART = a ? PA : PB; float *Y = a ? YA : YB; const size_t j = a ? i : i - one;
+        const int e = (int)(j / ((size_t)m.R * m.n)), row = (int)((j / m.n) % m.R), col = (int)(j % m.n);
+        int32_t s = 0;
+        for (int p = 0; p < KSn * 2; ++p) s += PART[(((size_t)p * m.E + e) * rpad + row) * m.n + col];
+        Y[j] = m.kinv * Q[row] * ((float)s - 510.0f * (float)SX8[row]);
+    });
+}
+
+#define DISPATCH_COMBINE(F, KSV, ...) do { switch (KSV) { \
+    case 1: F<1>(__VA_ARGS__); break; case 2: F<2>(__VA_ARGS__); break; \
+    case 4: F<4>(__VA_ARGS__); break; case 8: F<8>(__VA_ARGS__); break; \
+    default: fprintf(stderr, "no combine instantiated for KS %d\n", (int)(KSV)); exit(2); } } while (0)
 
 static void check_against(const std::string &path, const std::vector<float> &y, bool quiet_if_missing)
 {
@@ -530,6 +559,7 @@ int main(int argc, char **argv)
     if (argc < 2) { fprintf(stderr, "usage: %s CASE_DIR [reps] [rows] [ks] [layout] [dir2]\n", argv[0]); return 2; }
     const std::string dir = argv[1];
     const int reps = argc > 2 ? atoi(argv[2]) : 5;
+    static const bool PAIR = getenv("DPAS_SPLIT") != nullptr;   // true = two combine launches (see above)
     const int rows_arg = argc > 3 ? atoi(argv[3]) : 0;
     const int KS = argc > 4 ? atoi(argv[4]) : 1;
     const std::string layout = argc > 5 ? argv[5] : "native";      // native | staged | staged2 | staged8
@@ -675,11 +705,12 @@ int main(int argc, char **argv)
     auto dispatch = [&]
     {
         dispatch_k(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
-        combine(q, PART, Q, SX8, Y, m, KS, RPAD);
-        // Two combine launches, one per projection: E25b's merged combine was measured slower above rows=1, so
-        // the loser exists only as a comment above and in out_e25b_combine.txt.
-        if (!dir2.empty()) combine(q, PART2, Q, SX8, Y2, m2, KS, RPAD);
-    };
+        DISPATCH_COMBINE(combine, KS, q, PART, Q, SX8, Y, m, RPAD);
+        if (!dir2.empty())
+        {
+            if (PAIR) DISPATCH_COMBINE(combine, KS, q, PART2, Q, SX8, Y2, m2, RPAD);
+            else DISPATCH_COMBINE(combine_pair, KS, q, PART, PART2, Q, SX8, Y, Y2, m, RPAD);
+        }    };
 
     // Sustained CONTINUOUS work in this process before timing. The device downclocks when idle, so warming up
     // with a chain of short separate runs (each with its own idle gap) measures whatever clock it happens to sit
