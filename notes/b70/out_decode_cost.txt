@@ -48,6 +48,13 @@ than dominated: NO_MAD (12.5) sits above both FETCH_ONLY (8.9) and ALU_ONLY (10.
 components sum to 21.3 against a full 14.0 (~35% overlap). The remaining levers are bytes and
 locality - placement, ordering, the 18.35 GiB threshold - not instructions.
 
-rows > 16 is outside the measured set; the DPAS path uses two M=8 fragments above 8 rows and its
-cost slope is still rising at 16, so quoting a 64- or 256-token decode number from this table
-would be an extrapolation, not a measurement.
+rows > 16 - measured, not clamped (out_rows_gt16.txt). Above the kernel's 16-row coverage the
+engine buckets, and bucketing is ADDITIVE: x2.00 / x2.98 / x3.96 at 32 / 48 / 64 rows, on both
+projections - no L2 sharing between buckets of the same expert, so each re-pays the stream.
+  rows=32   ( 2 buckets)  bucketed schedule    14.18 us/expert-layer   shared-stream kernel ~   9.83 us   (worth x1.44)
+  rows=64   ( 4 buckets)  bucketed schedule    28.36 us/expert-layer   shared-stream kernel ~  15.30 us   (worth x1.85)
+  rows=128  ( 8 buckets)  bucketed schedule    56.72 us/expert-layer   shared-stream kernel ~  26.24 us   (worth x2.16)
+  rows=256  (16 buckets)  bucketed schedule   113.44 us/expert-layer   shared-stream kernel ~  48.13 us   (worth x2.36)
+The bucketed column is what the engine does today. The shared-stream column is an UNIMPLEMENTED
+projection from two measured points (stream ~ rows=1, row work ~ rows=16 minus rows=1): it bounds
+an optimization opportunity and must not be quoted as a measurement.

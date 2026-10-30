@@ -601,6 +601,19 @@ int main(int argc, char **argv)
         combine(q, PART, Q, SX8, Y, m, KS, RPAD);
     };
 
+    // DPAS_WARM_S=<seconds>: sustained continuous work IN THIS PROCESS before timing. The device downclocks
+    // when idle and needs sustained load to ramp, so warming up with a sequence of separate short runs (or
+    // separate process invocations, each with its own idle gap) measures it at whatever clock it happens to
+    // sit at - which showed up as a uniform ~2x across binaries that had not been touched. Ramp has to be
+    // earned inside the process that does the timing, and the measured section has to keep work flowing.
+    const double WARM_S = getenv("DPAS_WARM_S") ? atof(getenv("DPAS_WARM_S")) : 0.0;
+    if (WARM_S > 0.0)
+    {
+        auto tw0 = std::chrono::steady_clock::now();
+        do { dispatch(); } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count() < WARM_S);
+        q.wait();
+    }
+
     double best = 1e30;
     for (int r = 0; r < reps + 2; ++r)
     {
@@ -620,6 +633,88 @@ int main(int argc, char **argv)
         q.wait();
         double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / BURST;
         if (s < tpbest) tpbest = s;
+    }
+
+    // --- DPAS_BUCKETS=B: the naive rows>16 schedule, measured without touching device code ----------
+    // The kernel covers XROWS=16 token rows per launch. Above 16 the engine has no choice but to run
+    // several 16-row buckets over the SAME experts, re-walking the weight stream each time. Everything the
+    // planning artifacts say about rows 32..1024 currently rests on CLAMPING this number, so measure the
+    // schedule instead: one activation-tile set / per-row scale / row-sum / output per bucket, identical W,
+    // B gemm+combine pairs per rep, and each bucket's result checked against its own slice of y_ref.
+    const int NB = getenv("DPAS_BUCKETS") ? atoi(getenv("DPAS_BUCKETS")) : 1;
+    const int rows_avail = (int)(xbuf.size() / (size_t)m.k);
+    if (NB > 1)
+    {
+        if (m.R != 16) { fprintf(stderr, "DPAS_BUCKETS needs rows=16 per bucket (got %d)\n", m.R); return 2; }
+        if (rows_avail < NB * 16) { fprintf(stderr, "case holds %d rows, %d buckets need %d\n",
+                                            rows_avail, NB, NB * 16); return 2; }
+        const int8_t *x8b = (const int8_t *)xbuf.data();
+        std::vector<uint32_t *> XAb(NB);
+        std::vector<int32_t *> SX8b(NB);
+        std::vector<float *> Qb(NB), Yb(NB);
+        for (int b = 0; b < NB; ++b)
+        {
+            std::vector<int8_t> hx((size_t)m.tk * 2 * RPAD * 32);
+            for (int kt = 0; kt < m.tk; ++kt)
+                for (int kb = 0; kb < 2; ++kb)
+                    for (int row = 0; row < RPAD; ++row)
+                    {
+                        const int src_row = b * 16 + (row < m.R ? row : m.R - 1);
+                        const int8_t *s = x8b + (size_t)src_row * m.k + kt * 16 + kb * 8;
+                        int8_t *d = &hx[(((size_t)kt * 2 + kb) * RPAD + row) * 32];
+                        for (int w = 0; w < 8; ++w)
+                            for (int bb = 0; bb < 4; ++bb) d[w * 4 + bb] = s[w];
+                    }
+            XAb[b] = (uint32_t *)sycl::malloc_device(hx.size(), q);
+            q.memcpy(XAb[b], hx.data(), hx.size());
+            Qb[b] = (float *)sycl::malloc_device(16 * 4, q);
+            q.memcpy(Qb[b], (const float *)qbuf.data() + b * 16, 16 * 4);
+            SX8b[b] = (int32_t *)sycl::malloc_device(16 * 4, q);
+            q.memcpy(SX8b[b], (const int32_t *)sbuf.data() + b * 16, 16 * 4);
+            Yb[b] = (float *)sycl::malloc_device((size_t)m.E * 16 * m.n * 4, q);
+            q.memset(Yb[b], 0, (size_t)m.E * 16 * m.n * 4);
+        }
+        q.wait();
+
+        auto dispatch_b = [&](int b)
+        {
+            Launch Lb = L;
+            Lb.XA = XAb[b];
+            dispatch_k(K, MR, NF, Lb, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
+            combine(q, PART, Qb[b], SX8b[b], Yb[b], m, KS, RPAD);
+        };
+
+        for (int w = 0; w < 3; ++w) for (int i = 0; i < 3; ++i) for (int b = 0; b < NB; ++b) dispatch_b(b);
+        q.wait();
+        if (WARM_S > 0.0)   // ramp on the bucketed schedule itself: more launches, same W
+        {
+            auto tw0 = std::chrono::steady_clock::now();
+            do { for (int b = 0; b < NB; ++b) dispatch_b(b); }
+            while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count() < WARM_S);
+            q.wait();
+        }
+        double gb = 1e30;
+        for (int r = 0; r < 5; ++r)
+        {
+            auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < BURST; ++i) for (int b = 0; b < NB; ++b) dispatch_b(b);
+            q.wait();
+            double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / BURST;
+            gb = std::min(gb, s);
+        }
+        for (int b = 0; b < NB; ++b)   // per-bucket output for the harness to check against y_ref slices
+        {
+            std::vector<float> yb((size_t)m.E * 16 * m.n);
+            q.memcpy(yb.data(), Yb[b], yb.size() * 4); q.wait();
+            char path[256];
+            snprintf(path, sizeof path, "%s/y_dev_revi_bk%d_ks%d.bin", dir.c_str(), b, KS);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(yb.data(), 4, yb.size(), f); fclose(f); }
+        }
+        printf("BUCKETS %d x rows16 (E %d, ks %d): group %8.1f us  per-bucket %7.1f us  vs single %7.1f us"
+               "  -> x%.2f of %d separate launches  |  %6.1f G-weight-tokens/s\n",
+               NB, m.E, KS, gb * 1e6, gb * 1e6 / NB, tpbest * 1e6, (gb / NB) / tpbest,
+               NB, (double)m.E * m.k * m.n * NB / gb / 1e9);
     }
 
     std::vector<float> y((size_t)m.E * m.R * m.n);

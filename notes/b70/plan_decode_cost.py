@@ -110,19 +110,30 @@ def scale_from_eb(eb_mib, bpw):
     return w / REF_WEIGHTS_3PROJ
 
 
-def per_proj_us(rows, kernel, proj="gate_proj"):
-    """us per (expert, proj) at `rows`. Raises for rows outside the measured range."""
-    if rows not in MEASURED_ROWS:
-        raise ValueError(f"rows={rows} is outside the measured set {MEASURED_ROWS}; "
-                         "extrapolating across the M=8 fragment boundary or past 16 tokens is not "
-                         "supported by any measurement here")
+BUCKET_ROWS = 16       # rev J (and revs G/H/I) cover XROWS = 16 token rows per launch
+
+
+def n_buckets(rows):
+    """Buckets needed above BUCKET_ROWS, and the law that prices them. Measured (out_rows_gt16.txt):
+    16-row buckets over the SAME experts are ADDITIVE to within 1-2 % - no L2 sharing between buckets, so
+    each bucket re-pays the whole weight stream. DPAS families only; dp4a above 16 rows is unmeasured."""
+    return -(-rows // BUCKET_ROWS)
+
+
 def per_proj_us(rows, kernel, proj="gate_proj", K=3):
     """us per (expert, proj) at `rows`. Raises for rows outside the measured range.
 
     The DPAS families cannot serve K > K_LIMIT_GATHER (their unpack reads four windows from one 32-bit
     funnel-shifted word, which needs 3K + 16 <= 32), so for those recipes dispatch() falls back to dp4a
     rather than extrapolating.
+
+    Above BUCKET_ROWS the cost follows the measured additive bucket law, not an extrapolation of the rows
+    curve: the engine runs ceil(rows/16) launches over the same experts and each re-streams the weights.
     """
+    if rows > BUCKET_ROWS:
+        if kernel == "dp4a":
+            raise ValueError(f"rows={rows} is above 16, where dp4a was never measured")
+        return n_buckets(rows) * per_proj_us(BUCKET_ROWS, kernel, proj, K)
     if rows not in MEASURED_ROWS:
         raise ValueError(f"rows={rows} is outside the measured set {MEASURED_ROWS}; "
                          "extrapolating across the M=8 fragment boundary or past 16 tokens is not "
@@ -203,9 +214,20 @@ def main():
           "than dominated: NO_MAD (12.5) sits above both FETCH_ONLY (8.9) and ALU_ONLY (10.9), and the\n"
           "components sum to 21.3 against a full 14.0 (~35% overlap). The remaining levers are bytes and\n"
           "locality - placement, ordering, the 18.35 GiB threshold - not instructions.")
-    print("\nrows > 16 is outside the measured set; the DPAS path uses two M=8 fragments above 8 rows and its")
-    print("cost slope is still rising at 16, so quoting a 64- or 256-token decode number from this table")
-    print("would be an extrapolation, not a measurement.")
+    print("\nrows > 16 - measured, not clamped (out_rows_gt16.txt). Above the kernel's 16-row coverage the")
+    print("engine buckets, and bucketing is ADDITIVE: x2.00 / x2.98 / x3.96 at 32 / 48 / 64 rows, on both")
+    print("projections - no L2 sharing between buckets of the same expert, so each re-pays the stream.")
+    for r in (32, 64, 128, 256):
+        j = sum(per_proj_us(r, "dpas_transposed", p) for p in PROJS)
+        nb = n_buckets(r)
+        ideal = sum(per_proj_us(1, "dpas_transposed", p)
+                    + nb * (per_proj_us(16, "dpas_transposed", p) - per_proj_us(1, "dpas_transposed", p))
+                    for p in PROJS)
+        print(f"  rows={r:<4} ({nb:>2} buckets)  bucketed schedule {j:8.2f} us/expert-layer   "
+              f"shared-stream kernel ~{ideal:7.2f} us   (worth x{j / ideal:.2f})")
+    print("The bucketed column is what the engine does today. The shared-stream column is an UNIMPLEMENTED")
+    print("projection from two measured points (stream ~ rows=1, row work ~ rows=16 minus rows=1): it bounds")
+    print("an optimization opportunity and must not be quoted as a measurement.")
 
 
 if __name__ == "__main__":

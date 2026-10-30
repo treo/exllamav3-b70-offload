@@ -1,0 +1,63 @@
+rows > 16: the bucketed schedule is additive, and the shared-stream version is worth ~1.6-1.9x
+===============================================================================================
+rev J covers XROWS = 16 token rows per launch, so above 16 the engine has no choice but to run several 16-row
+buckets over the SAME experts. Every 32..1024-token figure in the planning artifacts rested on CLAMPING the
+measured table at 16; this measures the schedule instead (probe_dpas7 + DPAS_BUCKETS, host-side only - one
+activation-tile set, per-row scale, row-sum and output per bucket, identical W, no device-code change).
+
+Case dirs /tmp/gemv_R64 (gate, tn=40, ks2) and /tmp/rc_down_R64 (down, tn=160, ks1), E=10, K=3, 64 rows each,
+dumped with --with-reference --with-sx8.
+
+Measured, sustained in-process warm-up, min of 4 interleaved rounds (us):
+
+  gate tn=40     rows=1 13.7   rows=16 21.4   rows=32 41.9   rows=48 62.1   rows=64 82.5
+                     per-bucket:              20.9          20.7          20.6      -> x2.00 / x2.97 / x3.95
+  down tn=160    rows=1 15.2   rows=16 29.8   rows=32 59.0   rows=48 88.1   rows=64 117.1
+                     per-bucket:              29.5          29.4          29.3      -> x1.99 / x2.98 / x3.96
+
+So bucketing is **additive to within 1-2 %**: there is no L2 sharing between buckets of the same expert, and
+every bucket re-pays the whole weight stream. Exactness of the schedule was checked, not assumed: each
+bucket's output is bit-exact against its own slice of y_ref (b0..b3 OK on both projections, 64 rows total).
+
+THE SIZE OF THE PRIZE - the shared-stream kernel
+------------------------------------------------
+The stream is the dominant term, so a kernel that accumulates several 16-row buckets per weight pass would
+pay the stream once and the row work per bucket. Splitting the two measured points (rows=1 is nearly pure
+stream; the rows=1 -> rows=16 delta is row work) projects:
+
+    gate: stream ~13.7 us + row work ~7.7 us/bucket  -> rows=64 ideal ~44.5 us  vs 82.5 measured  =  x1.85
+    down: stream ~15.2 us + row work ~14.6 us/bucket -> rows=64 ideal ~73.6 us  vs 117.1 measured =  x1.59
+
+That is the largest remaining compute lever in the chapter - bigger than anything left in the unpack - and it
+is a scheduling/register question, not a data-movement one: 4 buckets x M=8 fragments of int32 accumulators,
+plus the activation tiles, against the 128-GRF budget that rev J already spends on its prefetch ring. The
+trade should be measured at 2 and 4 buckets, watching for spills (the census method in b70-harness.md).
+
+HOW THIS GOT MEASURED RIGHT, AND WHAT NEARLY BROKE IT
+-----------------------------------------------------
+The first sweep looked impossible: rev J rows=1 at 31 us where it had published 14.0, and every OTHER binary
+slower too - rev I 19.4 -> 44.0, rev G 36.5 -> 58.9. I first called it "thermal", which was nonsense (these
+runs are seconds long), and the real cause was the instrument: the device downclocks when idle, and a
+sequence of short separate runs never sustains enough load to ramp - each process's idle gap lets the clocks
+decay again. Proof, and the calibration that came out of it:
+
+    warm-up in the timing process:   0 s      1 s      3 s      5 s     20 s
+      rev J gate rows=1            31.1    13.9    13.7    13.7    13.7
+      rev J gate rows=16           25.1    21.2    21.3    21.3    21.4
+      rev J gate rows=32           43.7    41.7    41.9    42.1    41.9
+      rev J down rows=16           32.6    30.1    29.8    29.9    29.8
+      rev J down rows=64          126.6   116.8   117.2   116.9   116.5
+
+**1-5 s of continuous work is enough; ~20 s is waste, and a post-compile sleep is waste.** What matters is
+that the ramp happens inside the process that times, and that the timed section keeps work flowing. Two
+habits follow, both now in b70-harness.md: (1) every measurement batch carries an anchor - an unchanged
+binary on an unchanged case, here rev I gate rows=1 = 19.4 us - so a whole-window shift is visible
+immediately instead of being narrated; (2) cross-window absolute comparisons are forbidden, which the
+standing +-15-20 % note was too generous about (the observed swing was 2.3x).
+
+Reproduce:
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas7 probe_dpas7.cpp
+    DPAS_WARM_S=3 ./probe_dpas7 /tmp/gemv_R64 5 16 2                     # rows=16 baseline
+    DPAS_WARM_S=3 DPAS_BUCKETS=4 ./probe_dpas7 /tmp/gemv_R64 1 16 2      # rows=64 as 4 buckets
+    python3 -c "import numpy as np; r=np.load('/tmp/gemv_R64/y_ref.npy'); ..."   # slice b: r[:,b*16:(b+1)*16,:]
+    # anchor: ./probe_dpas6 /tmp/gemv_dpE10 1000 1 2   (DPAS_X=1) -> 19.0-19.4 us when clocks are healthy

@@ -932,6 +932,22 @@ nothing that is the sole instance of a measurement.
     chain should not be described to myself as protection. Cost here was one amend; the class of bug is the one
     that silently reaches the repo.
 
+46. **When a whole batch of numbers moves together, suspect the instrument before the code — and prove it with
+    an anchor, never with a story.** rev J's rows>16 sweep came back with every binary ~1.6–2.3× slower than
+    published, including binaries untouched for hours (rev I 19.4 → 44.0 µs, rev G 36.5 → 58.9). I wrote it off
+    as thermal. It wasn't: these runs last seconds. The actual cause was that the device downclocks when idle
+    and my "warm-up" was a sequence of *separate short processes*, each with its own idle gap, so nothing ever
+    sustained long enough to ramp — and because I had no anchor in the batch, the only signal was that a number
+    I liked had gotten worse, which is precisely when a fabricated explanation is most tempting. Two fixes,
+    both cheap. (a) **Put the warm-up inside the timing process**: 1 s of continuous work converges (31.1 → 13.9
+    → 13.7 µs at 0/1/3 s) and 20 s buys nothing, so the old 15–20 s protocol note was wrong in *duration* while
+    being right about continuity, and post-compile sleeps were pure waste. (b) **Run a fixed anchor kernel in
+    every batch** — an unchanged binary on an unchanged case — so a window shift is visible as a number rather
+    than as a narrative; the moment I added one it read 19.2 µs and the mystery collapsed. Corollary for the
+    artifacts: ±15–20 % between windows was a wild underestimate (2.3× observed), so cross-window absolute
+    comparisons are banned outright, and any claim that survives a window change must be stated as a ratio
+    measured within a window.
+
 
 
 

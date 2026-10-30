@@ -50,7 +50,7 @@ What is left, in measured order of size:
 
 | Item | Why it matters | Cheapest way to close it |
 |---|---|---|
-| Rows > 16 unmeasured | every 64–1024 token figure in the planning artifacts is clamped-to-16 and therefore optimistic | bucketed row-tiling probe, or one measurement at rows=32/64 |
+| ~~Rows > 16 unmeasured~~ | **done** — bucketing 16-row launches is additive: x2.00 / x2.98 / x3.96 at 32 / 48 / 64 rows, both projections, each bucket bit-exact against its own `y_ref` slice (`out_rows_gt16.txt`) | follow-up: a **shared-stream** bucket kernel would pay the weight stream once — projected x1.44 at rows=32 rising to x2.36 at rows=256 (upper bound from two measured points, unimplemented) |
 | ~~D3 pricing (permute)~~ | **done** — `probe_permute` / `out_permute.txt`: 3.46 ms per 512 MiB device-side, host permute-copy below link rate for K=3, so permute on the device at admit | — |
 | Parent side past b=1, and attention | at low batch the parent binds again, and it is calibrated only at b=1 | parent-budget re-run at b=4/8/16 with an attention term |
 | Low-E models | X/EPT=1 was validated at E=10 | one case with E=2/4 and large tn |
@@ -242,9 +242,13 @@ python3 notes/b70/gate_dpas.py                       # 112 comparisons: dp4a/rev
 python3 notes/b70/plan_decode_cost.py                # measured cost model + dispatch (rev J wins everywhere)
 ```
 
-Timing discipline (violating any of these produced a wrong number somewhere in §2c): ~15–20 s sustained
-warm-up before timing, round-robin interleaving of configurations, min-of-N with per-round drift reported,
-absolute µs read as ±15–20 % between windows (ratios are only meaningful within one window), and no number
-enters a doc unless a finished command printed it. ISA dumps need
+Timing discipline, calibrated by measurement rather than habit (`out_rows_gt16.txt` has the sweep): warm up with
+**1–5 s of continuous work inside the process that times** (an earlier version of this note said 15–20 s; a
+0/1/3/5/20 s sweep converges by 1 s — 31.1 → 13.9 → 13.7 µs — and post-compile sleeps buy nothing), then
+round-robin interleaving of configurations, min-of-N with per-round drift reported. **Cross-window absolute µs
+must not be compared at all** — the earlier ±15–20 % allowance was too generous by an order of magnitude, a
+2.3× swing was observed — and every batch carries an **anchor**: an unchanged binary on an unchanged case (here
+rev I, gate rows=1, 19.4 µs), so a whole-window shift announces itself instead of being explained away. No
+number enters a doc unless a finished command printed it. ISA dumps need
 `NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 IGC_DumpToCustomDir=<dir>` — without the first variable the
 Level-Zero shader cache means IGC never runs and the dump is silently empty.
