@@ -163,10 +163,11 @@ def staged_checks(fails):
 def revl_checks(fails):
     """rev L (probe_dpas9) is the kernel the engine will implement, so it gets the same certification as the
     research line: native input, verbatim parent-staged input (staged2), and the fused gate+up launch - each
-    bit-exact against its own y_ref. Requires /tmp/revL (build.sh builds it)."""
-    bin_ = "/tmp/revL"
-    if not os.path.exists(bin_):
-        print("  SKIP  revL: /tmp/revL not built (build.sh builds probe_dpas9)")
+    bit-exact against its own y_ref. Requires probe_dpas9 (build.sh builds it, or /tmp/revL)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bin_ = next((p for p in (os.path.join(here, "probe_dpas9"), "/tmp/revL") if os.path.exists(p)), None)
+    if bin_ is None:
+        print("  SKIP  revL: probe_dpas9 not built (build.sh builds it)")
         return 0
     n = 0
     print("\nrev L (probe_dpas9) - the clean-line kernel:")

@@ -197,15 +197,17 @@ struct Launch
     const uint32_t *W2 = nullptr;
     int32_t *PART2 = nullptr;
     int tn2 = 0;
-    size_t band = 0;                // staged tile banding g: 0 = checkpoint (kt,nt); g = (nt/g, kt, nt%g)
+    int band = 0;                 // dispatch KEY for the templated tile order: 0 = checkpoint (kt,nt),
+                                  // 2 = AVX2 staged, 8 = AVX-512 tiers staged. The kernel never sees it as
+                                  // a runtime value - dispatch_band picks a specialized instance instead.
     Meta m;
     int KS = 1;                     // k-slices
     int zero = 0;                   // always 0; a kernel argument, so the device compiler cannot fold it
 };
 
 // K = trellis bits per weight, MR = token rows per DPAS (repeat count), NF = DPAS per byte-block (1, or 2
-// for 9-16 rows). One ESIMD thread = one (column tile, k-slice half, group of EPT experts).
-template <int K, int MR, int NF>
+// for 9-16 rows). One ESIMD thread = one (column tile, k-slice, expert) - one expert per thread (D4).
+template <int K, int MR, int NF, int Band>
 static void submit(const Launch &L)
 {
     constexpr int NW = 8 * K;                 // dwords per trellis tile
@@ -272,11 +274,16 @@ static void submit(const Launch &L)
             });
 
             simd<uint32_t, XW> pf[NSET];
-            // Tile order. band == 0 is the checkpoint's (kt, nt). band == g is the order the PARENT stages
+            // Tile order. Band == 0 is the checkpoint's (kt, nt). Band == g is the order the PARENT stages
             // in: moe_cpu_host._copy_repacked puts tile (kt, nt) at (nt/g, kt, nt%g) within each expert
             // (g = exl3_moe_cpu_swizzle_group: 2 on AVX2, 8 on the AVX-512 BW tiers, 0 for no repack), so the
             // B70 takes the staged bytes verbatim (D3-alt). Consecutive kt for a fixed nt are g apart.
-            const size_t band = L.band;
+            //
+            // Band is a TEMPLATE parameter, not a runtime field, and that is worth ~19% by itself: with the
+            // stride coming from the Launch struct the same kernel measured 23.1 us against 19.6-19.7 us for
+            // the constant-folded version, on bit-identical inputs (out_revl.txt). Anything the admit path
+            // already knows belongs here rather than in a parameter block.
+            constexpr size_t band = Band;
             const size_t kstride = (band ? band : (size_t)tn) * NW;                     // next kt, same expert
             const size_t estride = (size_t)tk * tn * NW - (size_t)(ntile - 1) * kstride; // last kt -> next expert
             const size_t tbase = band ? (nt / band) * (tk * band) + (size_t)kt0 * band + (nt % band)
@@ -375,8 +382,7 @@ static void submit(const Launch &L)
                     }
             };
 
-            // One tile; U is its ring slot as a compile-time constant. The normal path (mode == ALL) is
-            // straight-line; the diagnostic modes take the other branch.
+            // One tile; U is its ring slot as a compile-time constant.
             int ce = 0, cti = 0;                      // current tile (expert within this thread, k tile)
             const uint32_t *ap0 = XA + (size_t)kt0 * ADW;
             const uint32_t *ap = ap0;                 // activation tile of the current k tile
@@ -405,23 +411,37 @@ static void submit(const Launch &L)
     });
 }
 
-template <int K>
-static void submit_k(int mr, int nf, const Launch &L)
+template <int K, int Band>
+static void submit_kb(int mr, int nf, const Launch &L)
 {
-    if (nf == 2) { submit<K, 8, 2>(L); return; }   // 9-16 rows: two M=8 fragments
+    if (nf == 2) { submit<K, 8, 2, Band>(L); return; }   // 9-16 rows: two M=8 fragments
     switch (mr)
     {
-    case 1: submit<K, 1, 1>(L); break;
-    case 2: submit<K, 2, 1>(L); break;
-    case 4: submit<K, 4, 1>(L); break;
-    default: submit<K, 8, 1>(L); break;
+    case 1: submit<K, 1, 1, Band>(L); break;
+    case 2: submit<K, 2, 1, Band>(L); break;
+    case 4: submit<K, 4, 1, Band>(L); break;
+    default: submit<K, 8, 1, Band>(L); break;
+    }
+}
+
+// The staged forms this device will actually be handed: none, AVX2's group 2, the AVX-512 tiers' group 8.
+template <int K, int... B>
+static void dispatch_band(int band, int mr, int nf, const Launch &L, std::integer_sequence<int, B...>)
+{
+    const bool hit = ((band == B ? (submit_kb<K, B>(mr, nf, L), true) : false) || ...);
+    if (!hit)
+    {
+        fprintf(stderr, "no kernel for band %d (specialized: %s)\n", band, "0, 2, 8");
+        exit(2);
     }
 }
 
 template <int... I>
 static void dispatch_k(int K, int mr, int nf, const Launch &L, std::integer_sequence<int, I...>)
 {
-    const bool hit = ((K == K_MIN + I ? (submit_k<K_MIN + I>(mr, nf, L), true) : false) || ...);
+    const bool hit = ((K == K_MIN + I
+        ? (dispatch_band<K_MIN + I>(L.band, mr, nf, L, std::integer_sequence<int, 0, 2, 8>{}), true)
+        : false) || ...);
     if (!hit) { fprintf(stderr, "no kernel for K %d\n", K); exit(2); }
 }
 
@@ -432,13 +452,9 @@ static void permute_tiles(const std::vector<char> &raw, uint32_t *dst, size_t nt
 {
     const int NW = 8 * K;
     const uint32_t *src = (const uint32_t *)raw.data();
-#ifdef DPAS_STAGED_LAYOUT
-    memcpy(dst, src, ntiles * NW * 4);              // already staged in the B70 order
-#else
     for (size_t t = 0; t < ntiles; ++t)
         for (int q = 0; q < 8; ++q)
             for (int i = 0; i < K; ++i) dst[t * NW + i * 8 + q] = src[t * NW + q * K + i];
-#endif
 }
 
 static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const int32_t *SX8,
@@ -497,7 +513,7 @@ int main(int argc, char **argv)
     const int KS = argc > 4 ? atoi(argv[4]) : 1;
     const std::string layout = argc > 5 ? argv[5] : "native";      // native | staged | staged2 | staged8
     const std::string dir2 = argc > 6 ? argv[6] : "";              // optional: fuse this projection too
-    size_t band = 0;                                               // staged tile banding g (0 = checkpoint)
+    int band = 0;                                                // staged tile banding g (0 = checkpoint)
     const bool staged = layout != "native";
     if (layout == "native") band = 0;
     else if (layout == "staged") band = 0;    // planar dwords, checkpoint tile order: isolates the two
@@ -538,10 +554,10 @@ int main(int argc, char **argv)
     // Transposed tiles: within each tile, dword q*K + i (row i of column group q) moves to i*8 + q.
     // A permutation inside each 32K-byte tile - in a real pipeline, done once when the weights load.
     //
-    // -DDPAS_STAGED_LAYOUT says the input is ALREADY in that order, which is the production AVX2 staged
+    // layout=staged* means the bytes are ALREADY in that order, which is the production AVX2 staged
     // form: moe_cpu_host._copy_repacked swaps each tile's trailing (8, bits) dword dims, i.e. dword w ->
     // 8*(w%bits) + w/bits - byte-identical to the map below (verified on /tmp/gemv_dpE10: 1.536M dwords).
-    // So the B70 can consume the CPU's staged bytes verbatim; this build is how that claim is tested.
+    // So the B70 can consume the CPU's staged bytes verbatim; the staged* layouts are how that is tested.
     std::vector<uint32_t> hW(ntiles * NW);
     // Intra-tile transpose (rev J). Skipped when the input is already the parent's staged form, because the
     // planar dword order IS this transpose (verified byte-identical over 1.536 M dwords, out_cpu_layout.txt).

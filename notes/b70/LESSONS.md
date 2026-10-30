@@ -975,6 +975,26 @@ nothing that is the sole instance of a measurement.
     mystery), and re-read preprocessor structure after editing comments — a comment glued to `#ifndef X`
     silently disables the directive.
 
+49. **A value the caller already knows must be a template parameter, not a struct field — and when a new kernel
+    disagrees with an old one about a *layout*, suspect parameterization before hardware.** rev L measured the
+    parent's banded tile order as +19 % (23.10 µs vs 19.60 µs), contradicting rev J's recorded "banding is free"
+    and implying that a CPU win (3.4× cold traversal) was a B70 tax. Both measurements were correct on
+    bit-identical data: rev J took the band from `#define`, so `kstride`/`estride`/`tbase` folded to immediates;
+    rev L read it from `Launch`, leaving runtime address arithmetic. Same source, same bytes, band forced
+    compile-time: 19.70 µs at group 2 *and* group 8. `Band` is now a template parameter (`dispatch_band` over
+    {0, 2, 8}) and one binary serves every staged form at 19.2–19.6 µs.
+    Three transferable habits. (1) Audit the parameter block of any kernel that reaches steady-state perf: every
+    field that is fixed per admit (band, KS, shape constants) is a specialization candidate. The cost of getting
+    this wrong was larger than several algorithmic wins in the chapter, and no swept knob could have shown it.
+    (2) When a rewrite of verified code measures worse, run the OLD binary in the same window against the same
+    bytes before believing the result — that comparison, not analysis, is what localized this. (3) Specializing
+    has a price worth stating in the artifact: 75 → 225 device instantiations took the probe build from 1.7 s to
+    2 m 11 s. The engine avoids it by compiling per shape; the probe pays it per rebuild, so record it rather
+    than letting the next reader think the build is broken.
+    Subsidiary, and the third recurrence of LESSONS 42's vacuous verdict: my earlier "the staged arms are
+    bit-exact" had been read from `<case>/y_dev_*.bin` while those runs wrote to `<case>_planar`/`_full`. Always
+    derive the output path from the argv you passed, never from the case you meant.
+
 
 
 

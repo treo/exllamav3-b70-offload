@@ -156,20 +156,17 @@ actually run:
    reached for it first, which is why the two layouts coincide rather than merely being compatible.
 
 So on this host the 3.46 ms per 512 MiB device permute is simply not paid: staging already emits the bytes the
-B70's fastest kernel wants, and the copy is verbatim. **Correction from rev L (`out_revl.txt`): "verbatim" was
-only half right.** Isolated with an anchor in one window — same kernel binary, only the `layout` argument
-differing (gate, rows=16, ks2, min of 4 interleaved rounds): native 19.40 µs, planar-dwords-unbanded 19.50 µs,
-planar+banded (what AVX2 stages) **23.10 µs**, planar+banded8 23.20 µs. So the intra-tile dword permutation is
-indeed free, but the **tile banding the parent applies for its own DRAM traversal costs the B70 ~19 %** on the
-gemm, independent of `g`. That is a real conflict rather than a tuning detail — the CPU swizzles because it
-measured a 3.4× cold-traversal win, and the B70 would rather it did not — and it turns normalize-at-admit from a
-convenience into the fix: reorder tiles during the admit copy (a tile-order pass at the measured 144 GiB/s, so
-~3.5 ms per 512 MiB, once) instead of paying 19 % on every launch.
-**Open discrepancy, stated rather than papered over:** `out_e25_fuse.txt` and `out_rows_gt16.txt` record banding
-as free-to-positive (−4.6 % … +1.0 %), measured without an anchor, and the case dirs from that test were cleared
-from `/tmp` before it could be re-run. Today's figure is anchored, isolated across four configurations and
-reproducible across repeats, so it is the one to act on; resolving the conflict means regenerating those dirs and
-re-measuring both binaries interleaved with the anchor.
+B70's fastest kernel wants, and the copy is verbatim — and rev L confirms that at the rate, not just the byte
+level (`out_revl.txt`): native 19.60 µs, planar-dwords-unbanded 19.60 µs, planar+banded (AVX2's group 2)
+19.20 µs, group 8 19.30 µs, all bit-exact, anchor 19.5 µs. Getting to that sentence required killing a false
+alarm: the first rev L measurement said banding cost the B70 **+19 %** (23.10 µs), which would have made the
+parent's swizzle — worth 3.4× cold-traversal on the CPU — a tax on every B70 gemm, and would have revived the
+admit-time reordering pass. It was a parameterization bug in the probe. Rev J read the band from
+`#define DPAS_BAND`, so its stride arithmetic constant-folded; rev L read it from a struct field at run time.
+Same source, same bytes, band forced to a compile-time constant: 19.70 µs for group 2 *and* group 8. `Band` is
+now a template parameter specialized on {0, 2, 8}, and the engine inherits the rule:
+**anything the admit path already knows belongs in the template parameter list, not a parameter block** — worth
+19 % here, more than several algorithmic wins in this chapter, and invisible to every knob the harness swept.
 
 **Two things stood between the verbatim-copy claim and shipping it.**
 
