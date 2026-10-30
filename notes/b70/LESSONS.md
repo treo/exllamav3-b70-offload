@@ -1026,6 +1026,50 @@ nothing that is the sole instance of a measurement.
     correction that changes nothing is still worth committing, because it retires a number someone will lean on
     in a configuration where it does bite; announcing "1.9× error!" without the binding check oversells it.
 
+52. **A run that printed nothing is a crashed run until proven otherwise — check exit codes, and read the
+    output directory before re-running the world.** rev L's fused runs at some shapes returned no timing line
+    while neighbours were fine, which read as "device/config problem" and nearly sent me into another 54-run
+    sweep. Two facts settled it in two commands: the surviving output files were bit-exact (so the kernel was
+    fine), and one direct run with stderr captured gave SIGABRT/`UR_RESULT_ERROR_INVALID_MEM_OBJECT` with the
+    backtrace `main -> sycl::free -> usm::free -> throw`. Cause: a genuine double free I had introduced (my
+    replacement text repeated `free(Y); free(PART)` while the original line was still below it). The systemic
+    part is what it did to the data: an abort discards block-buffered stdout, so those rounds yielded `None`
+    and `min()`-of-N continued without them — 27 core dumps from that binary against the handful of holes I
+    noticed. Rules adopted: every measurement loop checks `returncode` and reports nonzero exits explicitly;
+    when a probe's usefulness depends on its print, run it line-buffered (`stdbuf -oL`) or flush before exit;
+    and diagnose from artifacts already on disk (outputs, cores via `coredumpctl dump` + `gdb -batch -ex bt`)
+    before spending device time — the E≠10 correctness answer came entirely from files, zero runs.
+
+53. **Define a warm-up in units of executed device work, not elapsed submit time.** `do { dispatch(); } while
+    (wall < WARM_S)` is only correct while host submit and device execution cost about the same. At E=10 they did
+    (~40 us each), so the chapter never noticed; at E=96 a dispatch runs ~400 us of GPU work for ~40 us of submit,
+    so a "1 s" warm-up queued ~30 s of work and dumped the backlog on the first `q.wait()` — 44.2 s wall for
+    1.0 s of intended warm-up, reproducibly (44.0), and a 54-cell sweep that crawled through one loop in 50
+    minutes. Fix: wait every 8 dispatches so the loop measures executed work. Wall time 44.2 s → 1.6 s with the
+    measured kernel time unchanged (402.9 → 410.0 us), which also shows the old behaviour was not biasing results,
+    only wasting clock. Verified afterwards rather than assumed: sweeping WARM_S = 0..20 s on the corrected loop
+    gives a flat 404-413 us at E=96 and 37.5 us unwarmed -> 33.5 us flat from 1 s at E=10, so the accidental 30 s
+    backlog had not been providing extra ramp that the honest 1 s would lose. The reason warm-up length barely
+    moves these numbers is that timing takes min-of-several-rounds, and the first rounds ramp the clock — so
+    warm-up mainly prevents a throwaway first round; several timed rounds are what make the estimate stable, and
+    both are needed. General form: any loop that enqueues asynchronously and bounds itself by wall time is
+    measuring the host, not the device — check it whenever per-launch work grows (bigger E, bigger rows, fused
+    multi-projection grids).
+
+54. **This box's benchmark GPU is shared with the desktop, and the anchor is the detector.** A batch whose anchor
+    (rev I gate rows=1, healthy 19.4 us) could not get below 20.6 us across six interleaved samples, with one
+    43.7 us outlier, was not a thermal mystery: `fuser -v /dev/dri/renderD128` shows firefox holding the same
+    render node as the probes (plus the niri compositor on the card). Every absolute figure in this chapter was
+    measured over a browser. Three consequences. (1) Report ratios, not absolute us, from any batch where the
+    anchor is not healthy — within-cell back-to-back comparisons survive a noisy neighbour, cross-window absolute
+    values do not. (2) The old observation that absolute us swung by up to 2.3x between windows, which I had
+    attributed to clock state, now has a concrete mechanism and should be re-attributed to contention (or both).
+    (3) The real fix is structural and still outstanding: timing batches should run where no compositor or browser
+    owns that card (headless runner, VT with the desktop stopped, second GPU), and `fuser` output should be
+    captured alongside the numbers so a future reader can tell a contaminated batch from a clean one. Until then,
+    the close-out's absolute decode figures carry a shared-device asterisk even though the protocol (warm
+    continuous work, round-robin arms, anchor) limits the damage.
+
 
 
 

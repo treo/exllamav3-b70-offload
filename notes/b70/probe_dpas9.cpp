@@ -747,12 +747,20 @@ int main(int argc, char **argv)
     // with a chain of short separate runs (each with its own idle gap) measures whatever clock it happens to sit
     // at - which has shown up as a uniform ~2x shift across binaries that were never touched. 3 s is enough
     // (measured: 0/1/3/5/20 s -> 31.1/13.9/13.7/13.7/13.7 us); WARM_S overrides.
+    //
+    // The wait INSIDE the loop matters: enqueueing is much cheaper than executing once the per-launch work grows
+    // (host submit ~40 us vs 400 us of GPU time at E=96), so a loop that only measures wall time while submitting
+    // builds a backlog - a nominal 1 s warm-up at E=96 queued ~30 s of work and dumped it all on the first
+    // q.wait(). Draining in batches makes WARM_S mean "seconds of work actually executed", which is what the
+    // clock cares about, and keeps large-E runs from taking half a minute each.
     const double WARM_S = getenv("WARM_S") ? atof(getenv("WARM_S")) : 3.0;
     if (WARM_S > 0.0)
     {
         auto tw0 = std::chrono::steady_clock::now();
-        do { dispatch(); } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count() < WARM_S);
-        q.wait();
+        do {
+            for (int k = 0; k < 8; ++k) dispatch();
+            q.wait();
+        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count() < WARM_S);
     }
 
     // DPAS_PROF=1: attribute time per stage, in situ - placed after the warm-up deliberately, since a cold

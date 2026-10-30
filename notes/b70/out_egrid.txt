@@ -1,0 +1,127 @@
+Grid / fusion behaviour at E != 10, and two harness defects found on the way
+=============================================================================
+Why: every decode number in this chapter was measured on E=10 case dirs. D4 (one expert per thread) and D8
+(fuse gate+up when the separate launches under-fill the device) are both stated in terms of grid occupancy, so
+both are E-dependent claims that had never been tested off E=10. Cases: Qwen3.8 gate/up, K=3, tk=160, tn=40,
+dumped at E=32 (/tmp/f32_*) and E=96 (/tmp/f96_*); rev L (probe_dpas9, /tmp/revL9), min of 2 rounds, KS is the
+probe's split-K argument, "separate" = sum of the two single-projection runs, "fused" = one launch of both.
+
+TIMING GRID (us/layer-part; anchor after the sweep read 22.9 us against a healthy 19.4 - see CAVEAT)
+
+   E rows KS |  gemm grid | separate   fused   ratio | D8 predicts  measured | agrees
+  10   1  1 |        800 |     33.7    20.7  1.63x |     fuse     fuse     | yes
+  10   1  2 |       1600 |     23.4    23.7  0.99x | separate separate     | yes
+  10   8  1 |        800 |     40.2    26.0  1.55x |     fuse     fuse     | yes
+  10   8  2 |       1600 |     29.2    29.9  0.98x | separate separate     | yes
+  10  16  1 |        800 |     45.8    34.0  1.35x |     fuse     fuse     | yes
+  10  16  2 |       1600 |     38.0    38.1  1.00x | separate separate     | yes
+  32   1  1 |       2560 |     80.5    83.5  0.96x | separate separate     | yes
+  32   1  2 |       5120 |     64.3    81.4  0.79x | separate separate     | yes
+  32   8  1 |       2560 |    102.0    97.4  1.05x | separate fuse         | no (5%)
+  32  16  1 |       2560 |    120.2   120.8  1.00x | separate separate     | yes
+  32   8  2 |       5120 |     92.7   103.7  0.89x | separate separate     | yes
+  32  16  2 |       5120 |    114.8   126.6  0.91x | separate separate     | yes
+  96   1  1 |       7680 |    239.8   240.7  1.00x | separate separate     | yes
+  96   1  2 |      15360 |    251.7   238.2  1.06x | separate fuse         | no (6%)
+  96   8  1 |       7680 |    289.8   292.8  0.99x | separate separate     | yes
+  96   8  2 |      15360 |    322.6   313.3  1.03x | separate fuse         | no (3%)
+  96  16  1 |       7680 |    356.6   361.4  0.99x | separate separate     | yes
+  96  16  2 |      15360 |    407.5   413.3  0.99x | separate separate     | yes
+
+Three cells were re-measured interleaved with the anchor (min of 3, anchor samples 20.6-23.1 us) and the
+disagreements reproduced rather than evaporating: E32 r8 ks1 101.7 -> 97.0 (1.048x), E96 r1 ks2 250.6 -> 238.0
+(1.053x), E96 r8 ks2 320.9 -> 310.7 (1.033x).
+
+WHAT IT MEANS
+
+1. One expert per thread (D4) scales cleanly with E. Single-projection gate time: 16.9 us at E=10, 40.0 at E=32
+   (2.4x for 3.2x the experts), 120.0 at E=96 (7.1x for 9.6x) at rows=1/KS=1. No grid pathology, no cliff: the
+   extra experts simply add threads, and the device chews through 1.25-7.5 waves without incident.
+
+2. D8 survives where it matters and is imprecise exactly where precision is worthless. Every cell where the rule
+   says "fuse" (grid 800, E=10 KS=1) fuses by 1.35-1.63x. Every cell where the grid is already >= 1.25 waves
+   either ties (0.96-1.00x against fusing) or loses by <= 6%. So the 0.6*HW_THREADS threshold should be read as
+   "the point past which fusion stops buying anything", not as "past which fusion hurts": the three rule breaks
+   are all fusion winning by 3-5%, i.e. harmless to have predicted wrong about.
+   Amended rule (close-out D8): fuse when the separate launches under-fill the device; beyond that the choice is
+   a wash within +-6%, so pick on launch-count grounds (fewer launches is preferable, and combine_both already
+   depends on the fused gemm having produced both partial regions).
+
+3. Efficiency falls with rows at large E, as the cost model says it should: E=96 rows=1 KS=1 runs 2x56.2 MiB in
+   240.7 us = 492 GB/s, while E=96 rows=16 KS=2 runs the same bytes in 413.3 us = 287 GB/s. The arithmetic
+   (rows of DPAS per tile) overtakes the weight stream, which is the same transition that motivated rev J's
+   one-expert-per-thread layout at small E.
+
+WARM-UP ADEQUACY AFTER FIXING THE BACKLOG (asked as a fair objection: the bug used to drain ~30 s of work, so
+maybe it was warming the device and the honest 1 s is too short). Sweeping WARM_S on the corrected loop,
+min of 2 reps each:
+
+  E96 fused rows16 ks2:  0s 404.3 | 1s 410.1 | 2s 409.9 | 3s 409.9 | 5s 410.9 | 10s 410.1 | 20s 412.6 us
+  E10 fused rows16 ks1:  0s  37.5 | 1s  33.5 | 2s  33.5 | 3s  33.5 | 5s  33.8 | 10s  33.6 | 20s  33.8 us
+
+No trend at E=96 (1.4% spread, unwarmed marginally the fastest - within noise, and no interpretation is
+warranted from a 1.4% span), and at E=10 the familiar picture: +12% when unwarmed, then flat from 1 s to 20 s,
+which reproduces the original 0/1/3/5/20 s calibration under the new definition. Two reasons this is reassuring
+rather than lucky: the corrected loop really does execute WARM_S seconds of work (wall time tracks it 1:1 in the
+table above), and the timing loop takes min-of-4-rounds AFTER the earliest rounds have already ramped the clock,
+so the estimator is insensitive to warm-up length as long as several rounds run. What WARM_S still buys is that
+the FIRST timed round is not thrown away on a downclocked device - so keep it at 1-3 s, but do not treat it as
+the thing that makes numbers comparable.
+
+Anchor during this sub-experiment: 24.7 us (unhealthy), which is the contamination described next - absolute us
+here are pessimistic; the 0s-vs-20s *differences* are what is being read.
+
+CAVEAT - these absolute numbers are contaminated, and the cause is now identified
+----------------------------------------------------------------------------------
+The anchor (rev I, gate rows=1, an unchanged binary whose healthy value is 19.4 us) read 22.9 us after this sweep
+and 20.6-23.1 us across six interleaved samples, with one 43.7 us outlier. That is not thermal soak from the run:
+`fuser -v /dev/dri/renderD128` shows **firefox holding the same render node** as these probes (RSS 1.75 GB, plus
+isolated web-content processes, plus the niri Wayland compositor on the card). Every number in this chapter was
+therefore measured on a GPU shared with a desktop browser.
+
+Consequences, stated plainly:
+  * absolute us in the table above are probably 6-19% pessimistic and must not be compared with published values
+    from an anchor-healthy window;
+  * within-cell ratios (fused vs separate, g vs u) remain valid because both arms were measured back to back in
+    the same window, which is the discipline the whole chapter has relied on;
+  * the historical cross-window swings that motivated "never compare absolute us" (once measured at 2.3x) now
+    have a plausible mechanism: browser activity, not just clock state.
+  * Before trusting an absolute number, check the anchor AND the render-node users:
+      fuser -v /dev/dri/renderD128
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2       # 19.4 us when the device is quiet and ramped
+    A batch whose anchor cannot reach ~19.4 us after several tries is contaminated: report ratios, not us.
+  * Proper fix, not attempted here: run timing batches from a session without a compositor/browser on that card
+    (VT switch, headless runner, or a second GPU). Until then the chapter's absolute figures carry a shared-device
+    asterisk.
+
+HARNESS DEFECTS FOUND WHILE DOING THIS (both fixed in probe_dpas9.cpp)
+----------------------------------------------------------------------
+a) Double free in teardown. `sycl::free(Y,...); sycl::free(PART,...)` appeared twice (my own edit duplicated a
+   line I had not removed), so every rev L binary freed two buffers twice. It raised
+   UR_RESULT_ERROR_INVALID_MEM_OBJECT from sycl::free at process exit - SIGABRT, rc=134 - and because stdout was
+   block-buffered into a pipe, the aborted run LOST ITS TIMING LINE. Measurement drivers took min-of-N over the
+   runs that printed, so killed rounds vanished silently: 27 core dumps from /tmp/revL7 against the handful of
+   missing cells I noticed. Latent because the second free only throws when nothing reuses the address in
+   between, which is why it hit some shapes and not others and looked data-dependent.
+b) Warm-up enqueued without ever waiting. `do { dispatch(); } while (wall < WARM_S)` submits until wall time
+   elapses, then the first q.wait() drains the backlog. At E=10 host submit (~40 us) and device work (~40 us)
+   match, so it is invisible. At E=96 a dispatch costs ~400 us of GPU time per ~40 us of submit, so a nominal
+   1 s warm-up queued ~30 s of work: E=96 fused runs took 44.2 s wall for 1.0 s of intended warm-up (measured
+   twice: 44.2, 44.0), and this is why a 54-run sweep "went just through the first for loop" in 50 minutes.
+   Fixed by waiting every 8 dispatches, which makes WARM_S mean "seconds of work executed". Result: E=96 fused
+   44.2 s -> 1.6 s wall, with the measured kernel time unchanged (402.9 us -> 410.0 us, within noise).
+
+Also worth noting on method: the fix in (a) was located by reading the surviving outputs and the core dump
+(`main -> sycl::free -> usm::free -> throw`) rather than by re-running anything - 26 outputs on disk were
+certified bit-exact first (all six E=96 fused configurations, E=32 fused rows=16, and the singles), which
+answered the E!=10 correctness question without a single device run.
+
+Reproduce:
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revL9 probe_dpas9.cpp
+    WARM_S=2 /tmp/revL9 /tmp/f96_gate 2 16 2 native /tmp/f96_up        # fused, E=96
+    WARM_S=2 /tmp/revL9 /tmp/f96_gate 2 16 2                           # single projection
+    case dirs: python3 notes/b70/dump_gemv_case.py /tmp/f96_gate 96 16 0 --with-reference
+               python3 notes/b70/dump_gemv_case.py /tmp/f96_up 96 16 0 --with-reference --proj up_proj
+    anchor + contamination check:
+      fuser -v /dev/dri/renderD128
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2
