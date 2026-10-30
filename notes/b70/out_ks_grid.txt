@@ -107,6 +107,34 @@ Untested predictions this makes: the band should move with quantization (K=6 at 
 E ~ 10-20) and should narrow as rows grows (more compute per byte, less cache leverage). Each is a couple of runs
 of sweep_ks_grid.py.
 
+PREDICTION TESTED (same day, independent checkpoint) - crossover CONFIRMED, magnitude NOT explained
+----------------------------------------------------------------------------------------------------
+The band claim says the fusing regime is set by BYTES, not by E alone, so switching to the 6.05 bpw recipe
+(b = 1.17 MiB/expert for gate) should move the crossover from E ~ 20 to E = L2/(2b) = 24/2.34 = 10.3 - the SAME
+E=10 that fused 1.62x better at K=3 should stop paying. Measured at K=6, rows=1, anchors 19.1-19.2 us, every
+fused cell bit-exact for both projections:
+
+   E   matched KS=1: separate/pair   fused/pair   gain          2*E*b (L2 = 24 MiB)
+  10          3.550                  2.830      1.254x fused         23.4 MiB  ~= L2
+  16          2.650                  4.731      0.560x  SEPARATE by 1.79x      37.4 MiB  > L2
+   E   matched KS=2:
+  10          2.700                  2.870      0.941x  SEPARATE (fusion already losing at E=10)
+  16          3.332                  4.419      0.754x  SEPARATE
+
+Sign and location: CONFIRMED. Fused gain at E=10 KS=1 fell from 1.62x (K=3) to 1.25x (K=6); by KS=2 fusion was
+already losing at E=10; and at E=16 - where K=3 still preferred fusion by 1.29x - K=6 loses by 1.79x. The crossover
+landed between E=10 and E=16 against a predicted E ~ 10.3, on a different checkpoint, with nothing refitted.
+
+Magnitude: NOT explained. At the same absolute live footprint (37.4 MiB) the K=6/E=16 penalty is 1.79x while the
+K=3/E=32 penalty was 1.27x. So 2*E*b vs L2 predicts WHEN fusion turns bad, not HOW bad; the remainder needs a term
+the simple model omits - most plausibly that a miss at K=6 exposes more uncovered arithmetic per byte (denser
+unpack), so latency costs more. Testable by holding 2*E*b fixed and sweeping K = 2..6 with E inversely proportional
+to b, which would turn the rule from directional to quantitative. Until then: the L2 test is the switch, the
+measured tables are the size.
+
+Rows dependence: still untested - the runs above are rows=1. "The band narrows as rows grows" remains a
+prediction, not a result.
+
 This is LESSONS 55 (never quote a rate without its working-set size) paying rent a second time: the curve looked
 non-monotonic only because one of the two shapes' footprints was being ignored.
 
@@ -117,8 +145,9 @@ LIMITS OF THIS TABLE
   * E is experts-in-launch (the grid axis) - what the planners call `picks` when all owned experts run here.
     Fractional ownership means interpolating on E, which the chooser refuses to do silently: nearest measured E,
     flagged.
-  * K=3 only. The quant ladder says time is nearly K-independent at small resident sets, so the shape should
-    transfer, but the K=6 numbers at E=2 are unmeasured and low E is where that assumption is least tested.
+  * K=3 for the model tables. K=6 was measured at rows=1, E=10/16 to test the band claim (section above), so a
+    K axis in KS_SEP/KS_FUSED is now backed by data at two points - but the planners still run K=3 tables and
+    should not be assumed quantitative for the dense recipes.
   * KS is limited by tk/KS needing even halves (tk=160 allows up to 20; only 1/2/4/8 were run).
   * down_proj keeps its measured factor (DPAS_TRANSPOSED_DOWN_FACTOR) applied to the chosen single-projection cost.
 
