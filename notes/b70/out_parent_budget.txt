@@ -36,18 +36,19 @@ GLM@3.05:  checkpoint 116.56 GiB, 45 layers, 288 experts/layer, expert block 9.0
 
 ========================================================================================================
 PLACEMENT: P_order (hottest->3090 first, the plan today) vs P_lpt (hot list, each expert to the
-least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/rate_b, S_c/47.4)
+least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/rate_b, CPU leg)
+  CPU home (S_c): measured per-assignment cost at 16 threads (out_cpu_worker_calib.txt) when the profile is calibrated; profiles without t0 fall back to bytes/47.4 GiB/s, labelled
   model          rows  T_par  S_g slots                      P_order                        P_lpt  verdict
-  Qwen3.8@2.68      1    250          5            251 (  5/464/ 43)            251 (  5/436/ 71)  tie
-  Qwen3.8@2.68      1    250         30            253 ( 29/464/ 19)            253 ( 29/415/ 68)  tie
-  Qwen3.8@2.68      1    250        120            257 (119/393/  0)            257 (119/338/ 55)  tie
-  Qwen3.8@2.68      4    250          5            252 (  5/464/ 43)            252 (  5/436/ 71)  tie
-  Qwen3.8@2.68      4    250         30            261 ( 29/464/ 19)            260 ( 29/415/ 68)  tie
+  Qwen3.8@2.68      1    250          5            251 (  5/464/ 43)            251 (  5/446/ 61)  tie
+  Qwen3.8@2.68      1    250         30            253 ( 29/464/ 19)            253 ( 29/425/ 58)  tie
+  Qwen3.8@2.68      1    250        120            257 (119/393/  0)            257 (119/346/ 47)  tie
+  Qwen3.8@2.68      4    250          5            252 (  5/464/ 43)            252 (  5/437/ 70)  tie
+  Qwen3.8@2.68      4    250         30            261 ( 29/464/ 19)            260 ( 29/416/ 67)  tie
   Qwen3.8@2.68      4    250        120            279 (119/393/  0)            276 (119/338/ 55)  lpt
   Qwen3.8@2.68      8    250          5            356 (  5/464/ 43)            317 (  5/436/ 71)  lpt
   Qwen3.8@2.68      8    250         30            314 ( 29/464/ 19)            278 ( 29/415/ 68)  lpt
   Qwen3.8@2.68      8    250        120            304 (119/393/  0)            299 (119/338/ 55)  lpt
-  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home)
+  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU leg measured per-assignment)
   GLM@3.05          1    150          5            715 (  5/ 86/197)            782 (  5/ 86/197)  order
   GLM@3.05          1    150         30            571 ( 30/ 86/172)            623 ( 30/ 86/172)  order
   GLM@3.05          1    150        120            203 (120/ 86/ 82)            229 (120/ 86/ 82)  order
@@ -75,28 +76,4 @@ least-loaded home, sets still disjoint).  wall = max(T_parent + S_g/rate_g, S_b/
   GLM@3.05          8    400          5           4930 (  5/ 86/197)           5385 (  5/ 86/197)  order
   GLM@3.05          8    400         30           3936 ( 30/ 86/172)           4292 ( 30/ 86/172)  order
   GLM@3.05          8    400        120           1266 (120/ 86/ 82)           1577 (120/ 86/ 82)  order
-  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home)
-THE 3090 SLICE IS THE BIGGEST PLACEMENT LEVER FOUND, and it came from pricing the parent's other work.
-plan_placement.py at three S_g sizes, B70 fixed at 31.9 GiB (columns: model L E k exp totGiB res h sigma
-CPU ms/tok |res| fill s h_min):
-  S_g=    2 GiB   GLM-5.3-Flash-exl3@3.05bpw                42  288  8  9.00   108.84   91  70.8%  99.2%      19.55    197     5.4  92.4%
-  S_g=    2 GiB   Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8    48  512 10  1.76    36.33  411  97.6%  97.1%       0.42     33     0.2  68.8%
-  S_g=    8 GiB   GLM-5.3-Flash-exl3@3.05bpw                42  288  8  9.00   108.84  107  75.5%  99.9%      16.42    181     5.0  92.4%
-  S_g=    8 GiB   Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8    48  512 10  1.76    36.33  484  99.6%  99.1%       0.07      5     0.0  68.8%
-  S_g= 16.6 GiB   GLM-5.3-Flash-exl3@3.05bpw                42  288  8  9.00   108.84  130  81.1%  99.1%      12.62    158     4.3  92.4%
-  S_g= 16.6 GiB   Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8    48  512 10  1.76    36.33  512 100.0%  99.0%      -0.00      0     0.0  68.8%
-
-Why the sizes: plan_parent_budget.py's capacity bill. The 2 GiB in the plan was a guess that treated the
-3090 as mostly full of KV. These checkpoints are hybrid linear-attention with compressed KV:
-  Qwen3.8  36/48 layers linear, 12 full with 2 KV heads -> 24 KiB KV/token, 108 MiB state/sequence
-  GLM      34/45 linear, 11 MLA-sparse with kv_lora_rank 512 -> 22 KiB/token, 136 MiB state/sequence
-and the big tables that would have eaten the card - 49.91 GiB of per-layer n-gram embeddings plus
-embed/lm_head on Qwen3.8 - are NOT resident: modules/row_table.py row-gathers them from host/disk
-(ngram_gather_cpu). What actually has to be in VRAM is 4.05 / 5.67 GiB of streamed non-expert weights,
-leaving 16.6 GiB (Qwen3.8, 4k ctx, b=1) and 16.6 GiB (GLM) for experts.
-Effect, from the rows above:
-  Qwen3.8@2.68  h 97.6% -> 100.0%, CPU residue 0.42 -> 0.00 ms/token  (all 512 experts per layer homed)
-  GLM@3.05      h 70.8% -> 81.1%, CPU residue 19.6 -> 12.6 ms/token  (91 -> 130 of 288 per layer)
-Both effects are larger than anything the hot/cold ordering choices produce, and the slice should be
-computed at load from the config (KV/token x ctx x rows + state x rows + streamed non-expert + reserve),
-not set to a constant.
+  (cells are wall us/layer, then expert slots on 3090/B70/CPU; b is varied only through the pick count feeding each home; CPU leg = bytes/47.4 GiB/s (UNCALIBRATED))

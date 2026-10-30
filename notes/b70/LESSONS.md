@@ -1013,6 +1013,19 @@ nothing that is the sole instance of a measurement.
     ±1e8), so the gate must keep bit-exactness where the arithmetic is identical and take an explicit relative
     tolerance where it is not — an intentional loosening, never a silent one.
 
+51. **Name the leg you measured, and check whether a wrong number was ever binding before promoting the fix to
+    a conclusion.** I benchmarked the CPU home (`S_c`) at b=1..16 and wrote the artifact under the heading "parent
+    calibration". In this design the parent is the 3090 — `wall = max(T_parent + S_g/936, S_b/rate_b, S_c/47.4)` —
+    and the CPU cores are just another home. The slip is easy to make because the host machine *is* the parent
+    machine, but the model has three named legs; re-read the formula before naming a file after it. Second half,
+    and the more useful habit: that leg was wrong by up to 1.9× (assumed 47.4 GiB/s against a best observed 37.9,
+    and the regime is compute-bound rather than byte-bound, so the units themselves were wrong) — and after
+    swapping in the measured model the placement walls moved by 0-1 us and no verdict changed, because `S_c` was
+    never binding in the tested configs. Report both facts together: "the input was wrong AND it did not matter
+    here", plus where it would start to matter (large CPU residue — which is the uncalibrated GLM profile). A
+    correction that changes nothing is still worth committing, because it retires a number someone will lean on
+    in a configuration where it does bite; announcing "1.9× error!" without the binding check oversells it.
+
 
 
 
