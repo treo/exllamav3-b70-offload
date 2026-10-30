@@ -948,6 +948,16 @@ nothing that is the sole instance of a measurement.
     comparisons are banned outright, and any claim that survives a window change must be stated as a ratio
     measured within a window.
 
+47. **A modeling error that points the way you want will survive review; look hardest where the numbers flatter
+    the thesis.** Two planning scripts charged every touched expert the *global* batch as its per-expert row
+    count, so at topk=8 a b=8 step priced 65 experts at 8 rows each when each saw ~1 — inflating device time
+    25-35 % and making the B70 the bottleneck at mid batch, which is the conclusion the chapter was oriented
+    toward. It survived several rounds of exactly this kind of scrutiny, and the damning detail: the correct
+    statistic (`rows/exp`) was printed in the same table, one column away from the number that ignored it. Two
+    habits follow. (a) When a model's output agrees with what you expected, audit that model's *assumptions*
+    before moving on — agreement is not evidence. (b) Check whether any column already in your own artifact
+    contradicts another; the cheapest bug-finder is arithmetic consistency inside a table you already trust.
+
 
 
 
