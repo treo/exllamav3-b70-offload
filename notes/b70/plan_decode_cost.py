@@ -97,6 +97,12 @@ DPAS_FUSE_GU = {1: 2.57, 2: 2.59, 4: 2.56, 8: 2.87, 16: 3.50}
 DPAS_FUSE_DOWN = {1: 1.52, 2: 1.62, 4: 1.84, 8: 2.29, 16: 2.98}
 HW_THREADS = 2048        # B70 slots reported by the probe banner (32 Xe cores x 8 vector engines x 8 threads)
 
+# Gate/up column-tile count per model, needed by should_fuse(). DERIVED FROM DUMPED GEOMETRY, not assumed:
+# Qwen3.8 gate/up is n=640 -> tiles_n = 640/16 = 40 (notes/b70/out_gemv.txt; /tmp/gemv_R64 meta tk=160 tn=40).
+# Models are absent until their projection widths are actually read from a checkpoint dump - a missing entry
+# means "fusion not evaluated", and planners must say so rather than guess.
+GATE_TILES_N = {"Qwen3.8": 40}
+
 
 def should_fuse(tn, KS, E, hw_threads=HW_THREADS):
     """E25/D8: fuse projections only when the separate launches under-fill the device.

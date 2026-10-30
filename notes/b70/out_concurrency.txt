@@ -3,7 +3,7 @@ XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte -> a GEMM become
 
 Qwen3.8 2.05 bpw: eb 1.215 MiB, h 100.0 %, parent bill 69 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 165 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       44        0  parent    12.00      83    1.0x       1.0
+      1    10.0      250       41        0  parent    12.00      83    1.0x       1.0
       2    19.4      257       89        0  parent    12.35     162    1.9x       1.0
       4    36.4      272      167        0  parent    13.05     307    3.7x       1.1
       8    65.1      301      299        0  parent    14.45     554    6.6x       1.2
@@ -12,10 +12,11 @@ Qwen3.8 2.05 bpw: eb 1.215 MiB, h 100.0 %, parent bill 69 MiB/layer weights + 4.
      64   207.6      709     1002        0   B70:D    48.09    1331   16.0x       3.1
     128   243.0     1175     1396        0   B70:D    67.01    1910   22.9x       5.3
     256   262.4     2107     1882        0  parent   101.13    2531   30.4x       9.8
+  B70 pricing: E25a fused gate+up (KS=1) applied at rows 1; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       43        0  parent    12.00      83    1.0x       1.0
+      1    10.0      250       41        0  parent    12.00      83    1.0x       1.0
       2    19.8      257       89        0  parent    12.35     162    1.9x       1.0
       4    38.4      272      174        0  parent    13.05     307    3.7x       1.0
       8    72.9      301      330        0   B70:D    15.83     505    6.1x       1.1
@@ -24,10 +25,11 @@ Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.
      64   329.2      709     1489        0   B70:D    71.47     895   10.7x       1.9
     128   428.2     1175     2033        0   B70:D    97.58    1312   15.7x       3.0
     256   488.7     2107     2762        0   B70:D   132.56    1931   23.2x       5.2
+  B70 pricing: E25a fused gate+up (KS=1) applied at rows 1; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       42       28  parent    12.00      83    1.0x       1.0
+      1    10.0      250       39       28  parent    12.00      83    1.0x       1.0
       2    19.8      257       86       55  parent    12.35     162    1.9x       1.0
       4    38.4      272      168      107  parent    13.05     307    3.7x       1.0
       8    72.9      301      319      203   B70:D    15.31     523    6.3x       1.1
@@ -36,10 +38,11 @@ Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5
      64   331.3      709     1450      922   B70:D    69.58     920   11.0x       1.9
     128   430.1     1175     1976     1197   B70:D    94.86    1349   16.2x       3.0
     256   490.0     2107     2680     1364   B70:D   128.62    1990   23.9x       5.2
+  B70 pricing: E25a fused gate+up (KS=1) applied at rows 1; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill 94 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 138 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       44        0  parent    12.00      83    1.0x       1.0
+      1    10.0      250       42        0  parent    12.00      83    1.0x       1.0
       2    19.2      257       89        0  parent    12.35     162    1.9x       1.0
       4    35.3      272      163        0  parent    13.05     307    3.7x       1.1
       8    60.9      301      281        0  parent    14.45     554    6.6x       1.3
@@ -48,10 +51,11 @@ Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill 94 MiB/layer weights + 4.
      64   158.7      709      917        0   B70:D    44.00    1454   17.5x       4.0
     128   177.6     1175     1026        0  parent    56.39    2270   27.2x       7.2
     256   190.3     2107     1372        0  parent   101.13    2531   30.4x      13.5
+  B70 pricing: E25a fused gate+up (KS=1) applied at rows 1; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 Qwen3.8 6.05 bpw: eb 3.608 MiB, h 90.4 %, parent bill 101 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 129 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      250       40       77  parent    12.00      83    1.0x       1.0
+      1    10.0      250       38       77  parent    12.00      83    1.0x       1.0
       2    19.7      257       82      151  parent    12.35     162    1.9x       1.0
       4    38.0      272      159      292     CPU    13.99     286    3.4x       1.1
       8    71.2      301      298      546     CPU    26.23     305    3.7x       1.1
@@ -60,6 +64,7 @@ Qwen3.8 6.05 bpw: eb 3.608 MiB, h 90.4 %, parent bill 101 MiB/layer weights + 4.
      64   288.2      709     1264     2212     CPU   106.16     603    7.2x       2.2
     128   358.1     1175     1572     2749     CPU   131.95     970   11.6x       3.6
     256   405.2     2107     2116     3110     CPU   149.27    1715   20.6x       6.3
+  B70 pricing: E25a fused gate+up (KS=1) applied at rows 1; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 Prefill: a chunk of R tokens touches (almost) all E experts per layer, so the B70's byte
 cost per LAYER is capped at E*expert_bytes regardless of R, while its MAC cost grows with R*topk. With

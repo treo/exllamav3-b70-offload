@@ -111,6 +111,10 @@ def main():
               f"fixed overhead {fixed:.0f} us")
         print(f"  {'rows':>5s} {'union':>7s} {'parent':>8s} {'B70':>8s} {'CPU':>8s} {'binds':>7s} "
               f"{'ms/step':>8s} {'tok/s':>7s} {'vs b=1':>7s} {'rows/exp':>9s}")
+        # E25a/D8: price gate+up as one launch where that is cheaper, using the SAME shared rule and geometry
+        # as plan_operating_point (plan_decode_cost.GATE_TILES_N) so the two planners cannot drift apart.
+        tiles_n = pdc.GATE_TILES_N.get("Qwen3.8")
+        fused_rows = []
         base = None
         band = pq.BANDS[bandk]
         for rows in (1, 2, 4, 8, 16, 32, 64, 128, 256):
@@ -129,6 +133,11 @@ def main():
             rpe = rows * topk / max(u, 1.0)
             rr = next((m for m in pdc.MEASURED_ROWS if m >= rpe), rpe)
             tb, kern = pdc.layer_us(u * h, rr, pdc.scale_from_eb(eb, float(lab)))
+            if tiles_n and rr in (1, 2, 4, 8, 16) and pdc.should_fuse(tiles_n, 1, max(1, int(round(u * h)))):
+                tf_ = pdc.layer_us_fused(u * h, rr, pdc.scale_from_eb(eb, float(lab)))
+                if tf_ < tb:
+                    tb, kern = tf_, "E25a-fused"
+                    fused_rows.append(rows)
             tc_ = us(u * (1 - h) * eb, ppb.CPU_RATE)
             wall = max(tp, tb, tc_)
             binds = "parent" if wall == tp else (f"B70:{kern[0].upper()}" if wall == tb else "CPU")
@@ -138,6 +147,10 @@ def main():
                 base = tput
             print(f"  {rows:5d} {u:7.1f} {tp:8.0f} {tb:8.0f} {tc_:8.0f} {binds:>7s} "
                   f"{step:8.2f} {tput:7.0f} {tput/base:6.1f}x {u and rows*topk/max(u,1):9.1f}")
+        print("  B70 pricing: E25a fused gate+up (KS=1) applied at rows " +
+              (", ".join(str(r) for r in fused_rows) if fused_rows else "(none)") +
+              f"; elsewhere three separate projections. tiles_n={tiles_n} from plan_decode_cost.GATE_TILES_N"
+              " (absent for a model means fusion was not evaluated there).")
         print()
     print("""Prefill: a chunk of R tokens touches (almost) all E experts per layer, so the B70's byte
 cost per LAYER is capped at E*expert_bytes regardless of R, while its MAC cost grows with R*topk. With

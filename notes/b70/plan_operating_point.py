@@ -41,9 +41,9 @@ BANDS = {
                      (512, 252.4, 300.0), (1024, 254.7, 321.3), (2048, 260.3, 321.9)],
 }
 MODELS = [("Qwen3.8@2.68", "2.68bpw", 512, 1.465, 48, 250.0, 0.976,
-           "Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8"),
+           "Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8", None),   # tiles_n resolved from plan_decode_cost below
           ("GLM@3.05", "3.05bpw", 288, 9.000, 42, None, 0.708,
-           "GLM-5.3-Flash-exl3@3.05bpw")]
+           "GLM-5.3-Flash-exl3@3.05bpw", None)]               # no measured gate geometry -> fusion not evaluated
 ROOT = "/home/treo/projects/vendor/tabbyAPI/models"
 L2_MIB = 18.0
 
@@ -116,11 +116,13 @@ def main():
     print(__doc__.split("Usage:")[0].replace("plan_operating_point.py -", "plan_operating_point.py", 1).strip())
     print(f"\nL2 is {L2_MIB:.0f} MiB, so a per-layer footprint under that can be served with reuse across tokens;")
     print("above it every token starts cold. The two reference models fall on opposite sides.\n")
-    for name, sub, E, eb, layers_hint, tlayer, h, dirname in MODELS:
+    for name, sub, E, eb, layers_hint, tlayer, h, dirname, tiles_n in MODELS:
         cnt = counts_for(sub, E)
         topk, cfg_layers, H = config_for(dirname)
         layers = layers_hint          # MoE layers, counted from the profile (GLM: 42 of 45 have experts)
         band = BANDS[name]
+        tiles_n = tiles_n or pdc.GATE_TILES_N.get(name.split("@")[0])   # one shared source for gate geometry
+        fused_any = False                          # did E25a pricing apply anywhere in this model's table?
         print(f"{name}:  topk={topk} (config.json), expert block {eb:.3f} MiB, {E} experts/layer, "
               f"{layers} MoE layers ({cfg_layers} total, H={H}), "
               f"all-experts set {E*eb/1024:.2f} GiB, h={h:.3f} [profile upper bound]")
@@ -148,6 +150,14 @@ def main():
             rpe = B * topk / max(d, 1.0)
             rr = next((m for m in pdc.MEASURED_ROWS if m >= rpe), rpe)
             us_layer, kern = pdc.layer_us(dev, rr, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
+            # E25a/D8: price gate+up as ONE launch when the separate launches under-fill the device. Only
+            # applies where tiles_n is measured for this model and per-expert rows stay within the fused
+            # measurement set (rows>16 would need bucketing, which was never measured for the fused kernel).
+            if tiles_n and rr in (1, 2, 4, 8, 16) and pdc.should_fuse(tiles_n, 1, max(1, int(round(dev)))):
+                fus = pdc.layer_us_fused(dev, rr, pdc.scale_from_eb(eb, float(sub.replace("bpw", ""))))
+                if fus < us_layer:
+                    us_layer, kern = fus, "E25a-fused"
+                    fused_any = True
             usc = c            # clustered-rate column is now diagnostic only
             us = us_layer
             if B == 1:
@@ -155,9 +165,17 @@ def main():
             cards = f"{us / tlayer:.1f}" if tlayer else "   ?"
             print(f"{B:5d} {d:7.1f} {dev:10.1f} {mib:9.1f}M {'yes' if mib < L2_MIB else 'no':>7s} {s:6.0f} "
                   f"{us:9.0f} {us/base:5.1f}x {usc:6.0f} {us*layers/1000:9.2f} {cards:>6s}")
+        print(f"  fusion (E25a/D8): " + (f"applied where the separate launches under-fill the device "
+              f"(gate tiles_n={tiles_n}, KS=1 grid = tiles_n*2*experts threads vs ~{pdc.HW_THREADS} slots)"
+              if (tiles_n and fused_any) else
+              ("not evaluated - no measured gate geometry for this model" if not tiles_n else "not applicable at these grids")))
         d1 = distinct_experts(cnt, topk, 1, rng=rng)
         mib1 = d1 * h * eb
         us1, kern1 = pdc.layer_us(d1 * h, 1, pdc.scale_from_eb(eb, bpw_note))
+        if tiles_n and pdc.should_fuse(tiles_n, 1, max(1, int(round(d1 * h)))):
+            f1 = pdc.layer_us_fused(d1 * h, 1, pdc.scale_from_eb(eb, bpw_note))
+            if f1 < us1:
+                us1, kern1 = f1, "E25a-fused"
         print(f"  b=1: {layers} layers x {us1:.0f} us = {layers*us1/1000:.2f} ms/token of B70 time "
               f"({mib1:.1f} MiB/layer read while doing {d1*h:.1f} expert-projection-layers of work; "
               f"dispatch picks {kern1})")
