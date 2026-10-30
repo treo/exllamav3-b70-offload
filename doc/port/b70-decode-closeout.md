@@ -214,6 +214,53 @@ kernel-configuration cases and become one branch inside admit.
 The last "the handoff must carry X" item thus becomes a locality property: the layout is a fact about one
 function, checked where the bytes arrive, and invisible to the decode kernel that measured 437 GB/s.
 
+## E29 spec: the shared-stream row-bucket kernel (design is done; implementation is not)
+
+**Why it should work, structurally.** In `probe_dpas7.cpp` the unpacked weight tile already lives in registers
+(`simd<uint32_t, 128> Bop[2]`, line 296) and `mad(a_tile)` consumes it (line 359). A second 16-row bucket is
+therefore *another `mad` against the same `Bop`* plus its own accumulator set and partial store — **not a second
+pass over the weight stream**. That is what makes the projected x1.44 (rows=32) … x2.36 (rows=256) plausible, and
+it is a ~5-site change in one kernel, not a rewrite.
+
+**Supporting measurement.** Bucketed launches are additive even though 5.86 MiB of weights would in principle
+sit in L2, so the second launch is served from DRAM (13.7 µs for 5.86 MiB ≈ 450 GB/s, matching the 484 GB/s
+stream slope) — whatever is evicting between launches (activation + partial traffic) does not discriminate
+between "cache-friendly" and "cache-hostile" cases. The shared-stream kernel does not depend on retention at
+all: the tile is read once and reused from registers, which is exactly why it should capture the projection
+rather than a partial version of it.
+
+**The five edits.**
+
+| # | site | change |
+|---|---|---|
+| 1 | `acc[NF]` (345) | → `acc[BKT][NF]`; zero all buckets when `cti == 0` |
+| 2 | `mad(a_tile)` (359) | → `mad(a_tile, int b)` writing `acc[b][f]`; `Bop` untouched — that is the whole point |
+| 3 | `step()` (~398) | `for b < BKT: mad(ap + b * XBUCKET)`; `ap` still advances `ADW` per k-tile; `XBUCKET = ntile * ADW` |
+| 4 | `store_part(e)` (346) | loop `b`, base `PART + b * PARTBUCKET` (bucket region = current `KS*2*E*RPAD*n`) |
+| 5 | host | one contiguous `XA` of `BKT` buckets and one `PART` of `BKT` regions; `combine()` once per bucket against its own `Q`/`SX8`/`Y` (the `DPAS_BUCKETS` path already builds these per-bucket tensors — it currently hands them to separate launches) |
+
+**Register budget (the risk).** Per bucket at `MR=8, NF=2` (16 rows): accumulators `2 × 8 = 16` GRF-equivalents
+(each `simd<int32_t, MR*NCOL>` = 128 ints over 16 lanes = 8 regs). Plus `Bop` 16, activation tile `At`
+(`ADW = 256` dwords = 16, transient per bucket), prefetch ring (`NSET × XW` ≈ 8), addressing/shift constants —
+so `BKT=2` lands near **72–80 of 128 GRF** and should be spill-free; **`BKT=4` needs ~64 GRF of accumulators
+alone (≈110 total)**, where spill is the likely outcome and the gain may invert. Consequences: build `BKT=2`
+first (rows=32), check the ISA census for spills before believing any `BKT=4` number, and consider
+`BKT=4 @ MR=8, NF=1` (8-row buckets) as the alternative shape if 16-row buckets do not fit.
+
+**Second-order risk to watch:** per bucket the kernel loads a full activation tile (~1 KB) from L2 while the
+weight tile is 96 B, so `BKT` multiplies L2 activation traffic even as it divides DRAM weight traffic. Above
+~32 rows that traffic, not the stream, may become the wall — the `FETCH_ONLY` / `ALU_ONLY` switches separate
+them, and the row-work slope measured so far (7.7 µs per 16 rows on gate) is the bound to compare against.
+
+**Acceptance criteria (all measurable with what exists now).**
+1. Each bucket bit-exact against its own `y_ref` slice — `gate_dpas.py` already has per-bucket slice checking.
+2. Beat the additive baseline it replaces: rows=32 must come in under ~41.9 µs (target ≈ 29–31 µs from the
+   two-point projection); anything above ~36 µs means the activation-traffic or spill cost ate the stream win.
+3. Spill-free ISA census for every `BKT`/`M` combination actually shipped (`NEO_CACHE_PERSISTENT=0`, the
+   archived-file rule from LESSONS 41).
+4. In the cost model, `dpas_shared` becomes a family with its own measured table; `n_buckets()`'s additive law
+   stays as the fallback for row counts the shared kernel does not cover.
+
 ## Verification consequence of D3 (new gate needed)
 
 Device bytes no longer match checkpoint bytes, so "the staging path is correct" is no longer something Gate A
