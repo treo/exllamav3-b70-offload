@@ -1,0 +1,78 @@
+E25c revisited: can the three-projection fusion be delivered WITHOUT a device-wide barrier?
+=============================================================================================
+Asked after out_e25c_barrier.txt rejected E25c on a 7.6 us grid-wide barrier. The question is right: that barrier
+was a consequence of the MAPPING I assumed, not of the goal. Down needs the whole intermediate row, and the row
+is produced by 40 column-tile items - but "40 items" is small. It could fit inside one work-group, in which case
+the sync is a work-group barrier, which is hardware and legal without any residency gamble.
+
+Short answer: **yes, it is expressible - and it is still the wrong trade, for a different and better reason than
+before.** Four measurements, all in anchor-healthy windows (19.1-19.3 us).
+
+1. THE SYNC IS NOT THE PROBLEM (probe_groupfused.cpp, 2048 items, 8 rounds, matched bodies, min of 5)
+
+     grid-wide spin barrier, 2048 work-items        +7.58 us per barrier
+     work-group barrier, wg = 64..1024              -0.03 .. +0.22 us  -> below the probe's resolution
+     work-group barrier + global/L2 hand-off        ~ 0
+     device local memory: 128 KiB per group, max work-group 1024 items
+
+   So the coordination primitive that killed E25c costs ~7.6 us only because it spans the device. Confined to a
+   group it is free, and the intermediate (h = rows x 640 = 2.5 KiB at rows=1, 40 KiB at rows=16) fits in SLM
+   with room to spare.
+
+2. BUT THE BACKEND LIMITS THIS KERNEL TO 64 WORK-ITEMS PER GROUP. Forcing more fails outright:
+       "Total number of work-items in a work-group cannot exceed 64 for this kernel"
+   (device-wise max_work_group_size says 1024; the ESIMD path caps it at 64, and 8 hardware threads per EU means
+   a group of 64 already spans EUs, which is where the "group barrier is local and cheap" intuition starts to
+   weaken.) An expert's dependency closure is 40 gate tiles + 40 up tiles + 160 down tiles, so a group can hold
+   the *gate/up half* (40 items, each doing both projections' tile) and must then chew down's 160 tiles at 2.5
+   items each - possible inside 64, with no slack at all.
+
+3. RE-GROUPING PER SE IS CHEAP (DPAS_WG added to probe_dpas9: same grid, same work, larger groups; WARM_S=2,
+   min of 2 passes; anchor 19.1 before / 19.3 after):
+
+     case                 wg=2    wg=4    wg=8   wg=16   wg=32   wg=64
+     E10 r1  fused       20.80   20.70   21.00   22.60   22.60   22.80     (+10% at wg=64)
+     E10 r16 fused       33.60   33.80   34.00   35.00   35.30   34.90     (+4%)
+     E32 r1  fused       83.50   84.40   84.70   85.30   86.50   88.20     (+6%)
+     E10 r1  separate    16.80   16.80   16.80   17.50   17.70    n/a      (800 items / 64 does not divide)
+
+   Groups of 8 - exactly one EU - are free (+1%). So "big groups are slow" is NOT the objection either.
+
+4. THE REAL OBJECTION IS THE ONE THIS CHAPTER KEEPS HITTING: CONCURRENCY. One group per expert means the device
+   runs E groups. At E=10 that is 640 items in flight instead of 1600 - a 2.5x loss of fill, in the regime where
+   fill is what binds. The cost of losing fill is already measured, not guessed: the same gate+up work at 800
+   items (separate, KS=1) takes 33.7 us against 20.8 us at 1600 items (fused) - +62%. Route 1 would start from
+   640 items, i.e. worse than that, to save two launches worth ~6 us on a ~36 us layer. Even granting the +10%
+   grouping cost and nothing else, it is a multiple-of-six loss.
+
+   And the fix for fill is the wrong direction: restoring 2048 items by holding ~32 experts resident on the
+   device means ~2.6 MiB x 32 = 83 MiB of weights on the B70, which stops being an offload accelerator for a
+   *subset* of experts and starts being a full-resident card.
+
+ALTERNATIVE ROUTE 3, considered and dismissed on arithmetic (not measured): make the hand-off unnecessary by
+having each group accumulate its own slice of down's contribution directly (h_slice x Wd[slice, :] -> partial y).
+No barrier at any level. But that writes a full-width y partial per slice: 40 slices x rows x 2560 x 4 B =
+410 KiB per expert per layer at rows=1, against ~5 KiB of h today - an 80x partial-traffic explosion, which is
+the E7 item-5 problem this chapter already solved structurally by keeping one expert per thread.
+
+REVISED DECISION (supersedes the wording in D10)
+  E25c stays rejected, but the reason is not "a device-wide barrier is required" - a group-scoped design exists,
+  its sync is free, its SLM fits, and large groups are only ~10% expensive. It is rejected because the
+  dependency closure per expert (>= 40 items, <= 64 by backend limit) forces one group per expert, and that
+  collapses in-flight work from 1600 to 640 items at E=10 in exactly the small-E, rows=1 regime where fill
+  decides everything (fill loss measured at +62% going 1600 -> 800; prize ~6 us of launches). The barrier was an
+  incidental cost of my first mapping; the *granularity* is the inherent cost.
+
+  What would change the answer: a geometry where experts-per-launch is large (E >= ~32 so E*64 items >= 2048) AND
+  the device is not fill-limited - i.e. high rows, where the kernel is throughput-bound rather than
+  latency-bound. At rows=16 the fill penalty is visibly milder (33.6 -> 34.9 for wg=64) and each item carries
+  more work, so a group-scoped three-projection kernel is worth revisiting FIRST at large rows, not at rows=1.
+  That is a concrete, cheaper place to test the idea than a full prototype, and it is the only follow-up this
+  file recommends.
+
+Reproduce:
+    icpx -fsycl -O2 -o /tmp/pg probe_groupfused.cpp && /tmp/pg 2048 1 && /tmp/pg 2048 16
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revL10 probe_dpas9.cpp
+    DPAS_WG=64 WARM_S=2 /tmp/revL10 /tmp/gemv_R64 2 1 1 native /tmp/gemv_up_R64      # re-grouping cost
+    DPAS_WG=-1 ...                                                                    # one group per expert (fails: >64)
+    anchor: DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 6000 1 2                           # 19.1-19.4 us

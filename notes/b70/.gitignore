@@ -32,3 +32,4 @@ isa_*/
 __pycache__/
 probe_barrier
 
+probe_groupfused

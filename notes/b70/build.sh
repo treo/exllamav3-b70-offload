@@ -77,6 +77,11 @@ echo "built probe_combine"
 icpx -fsycl -O2 -o probe_barrier probe_barrier.cpp
 echo "built probe_barrier"
 
+# probe_groupfused: E25c without a device-wide barrier - prices work-group barriers and the SLM hand-off of the
+# intermediate against the grid-wide barrier in probe_barrier. Not an engine kernel.
+icpx -fsycl -O2 -o probe_groupfused probe_groupfused.cpp
+echo "built probe_groupfused"
+
 # dp4a path: one binary per trellis K, since compile-time K is worth x1.2-1.5 at rows=1 (out_gemv.txt).
 # gate_dpas.py expects /tmp/pgK<K>; it reports a clear SKIP when one is missing rather than passing silently.
 for k in 2 3 4 5 6; do

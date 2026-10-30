@@ -1173,6 +1173,21 @@ nothing that is the sole instance of a measurement.
     that any future attempt needs a wider write→read window first. When a check comes back uniformly clean, ask
     what it would have looked like had the thing been broken; if the answer is "the same", it is decoration.
 
+60. **A rejection is a claim about the mechanism you chose, not about the goal — re-read it that way before it
+    hardens.** D10 was written as "E25c needs a device-wide barrier, which costs 7.6 us, so no". Asked whether it
+    could be delivered without one, the answer turned out to be yes: confine the dependency to a work-group and the
+    sync measures free (-0.03..+0.22 us), the intermediate fits SLM (40 KiB of 128 KiB), and large groups cost only
+    +4-10%. My barrier was not the obstacle - I had picked the one mapping that required it. The design still
+    fails, but for a reason I had not considered at all: the backend caps groups at 64 work-items, the dependency
+    closure needs ~40-64, so one group per expert drops in-flight items from 1600 to 640 at E=10, and the fill cost
+    of a far gentler loss is measured at +62%. Three habits. (1) When rejecting on cost, say which part of the cost
+    is inherent to the goal and which belongs to your sketch: "requires a grid-wide barrier" and "the mapping I
+    first imagined requires a grid-wide barrier" are different claims and only the second was earned. (2) Look for
+    the *second* limiter before publishing the first - the honest answer was never the barrier, it was concurrency,
+    which this chapter had already found binding twice (D4, E29) and still did not get consulted first. (3) A
+    corrected rejection is worth more than an untested one: the real reason points at where the idea could still
+    work (large rows, where fill matters less), which the wrong reason had quietly closed off.
+
 
 
 

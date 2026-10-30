@@ -202,6 +202,7 @@ struct Launch
                                   // a runtime value - dispatch_band picks a specialized instance instead.
     Meta m;
     int KS = 1;                     // k-slices
+    int wgsize = 2;                 // work-group size (see submit()); 2 = the shipped mapping
     int zero = 0;                   // always 0; a kernel argument, so the device compiler cannot fold it
 };
 
@@ -241,7 +242,13 @@ static void submit(const Launch &L)
 
     L.q->submit([&](sycl::handler &cgh)
     {
-        cgh.parallel_for(sycl::nd_range<1>(sycl::range<1>(threads), sycl::range<1>(2)),
+        // DPAS_WG (E25c route 1 probe): work-group size. Default 2 = the shipped mapping (a group is two Xe
+        // threads). Larger groups put a whole expert's tiles, or several experts, inside one group - which is
+        // what would let the gate/up -> down hand-off use a WORK-GROUP barrier (measured free, probe_groupfused)
+        // instead of a grid-wide one (7.6 us). Caveat the probe exists to expose: the device hosts 8 hardware
+        // threads per EU, so any group above 8 spans EUs and loses the locality that made the group barrier cheap.
+        const size_t wgsize = L.wgsize && L.wgsize <= threads ? (size_t)L.wgsize : (size_t)2;
+        cgh.parallel_for(sycl::nd_range<1>(sycl::range<1>(threads), sycl::range<1>(wgsize)),
                          [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL
         {
             const int gid = (int)it.get_global_id(0);
@@ -722,6 +729,14 @@ int main(int argc, char **argv)
 
     Launch L;
     L.q = &q; L.W = W; L.XA = XA; L.PART = PART; L.m = m; L.KS = KS; L.band = band;
+    // DPAS_WG: 0/absent = 2 (shipped); N = that work-group size; -1 = one group per expert (TN*KS*2 items).
+    if (const char *w = getenv("DPAS_WG"))
+    {
+        int v = atoi(w);
+        L.wgsize = v == -1 ? (int)((m.tn + (dir2.empty() ? 0 : m.tn)) * KS * 2) : v;
+        printf("work-group size forced to %d (device hosts ~8 hw threads per EU; above that a group spans EUs)\n",
+               L.wgsize);
+    }
     L.W2 = W2; L.PART2 = PART2; L.tn2 = dir2.empty() ? 0 : m.tn;
     L.zero = 0;
 
