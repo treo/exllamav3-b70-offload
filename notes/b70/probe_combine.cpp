@@ -50,6 +50,15 @@ static void pair(sycl::queue &q, const int32_t *PA, const int32_t *PB, const flo
 // as they do in situ. E25b's whole anomaly is that merging the combines wins standalone and loses after the
 // gemm, and the two kernels are ISA near-clones - so whatever inverts the sign has to be the state the gemm
 // leaves behind, not the combine's own work.
+// E25b, next hypothesis: in situ the partials may not be L2-resident when the combine runs - the fused gemm is
+// a full-device kernel and the layer moves other traffic through L2 - whereas the hot arm above re-reads the
+// same 1.6 MB forever. Scrub writes a 32 MB buffer (> the 16 MB L2) between producer and combine to evict them.
+static void scrub(sycl::queue &q, char *S, size_t n)
+{
+    q.parallel_for(sycl::range<1>(n / 64), [=](sycl::id<1> id)
+    { for (int k = 0; k < 16; ++k) ((int *)S)[id[0] * 16 + k] = 0x5a5a5a5a; });
+}
+
 static void producer(sycl::queue &q, int32_t *PA, int32_t *PB, int R)
 {
     const size_t n = (size_t)KS * 2 * E * RPAD * N;   // one projection's full partial region
@@ -75,12 +84,18 @@ int main(int argc, char **argv)
     float *YA = (float *)sycl::malloc_device(ob, q), *YB = (float *)sycl::malloc_device(ob, q);
     q.memset(PA, 1, partb); q.memset(PB, 1, partb); q.memset(SX8, 0, 64 * 4); q.memset(Q, 0, 64 * 4);
     q.memset(YA, 0, ob); q.memset(YB, 0, ob); q.wait();
+    const size_t scn = (size_t)32 << 20;
+    char *SC = (char *)sycl::malloc_device(scn, q);
+    q.memset(SC, 0, scn); q.wait();
     for (int R : {1, 8, 16})
     {
         auto a = [&](void) { split(q, PA, PB, Q, SX8, YA, YB, R); };
         auto b = [&](void) { pair(q, PA, PB, Q, SX8, YA, YB, R); };
         auto ca = [&](void) { producer(q, PA, PB, R); split(q, PA, PB, Q, SX8, YA, YB, R); };
         auto cb = [&](void) { producer(q, PA, PB, R); pair(q, PA, PB, Q, SX8, YA, YB, R); };
+        auto ea = [&](void) { producer(q, PA, PB, R); scrub(q, SC, scn); split(q, PA, PB, Q, SX8, YA, YB, R); };
+        auto eb = [&](void) { producer(q, PA, PB, R); scrub(q, SC, scn); pair(q, PA, PB, Q, SX8, YA, YB, R); };
+        auto s_only = [&](void) { scrub(q, SC, scn); };
         auto burst = [&](auto &f)
         {
             double bt = 1e30;
@@ -95,18 +110,24 @@ int main(int argc, char **argv)
             return bt;
         };
         auto t0 = std::chrono::steady_clock::now();
-        do { a(); b(); ca(); cb(); } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < ws);
+        do { a(); b(); ca(); cb(); ea(); eb(); } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < ws);
         q.wait();
-        double ta = 1e30, tb = 1e30, tc = 1e30, td = 1e30;
-        for (int r = 0; r < 4; ++r)
-        { ta = std::min(ta, burst(a)); tb = std::min(tb, burst(b)); tc = std::min(tc, burst(ca)); td = std::min(td, burst(cb)); }
-        // Producer-alone cost is subtracted from the dirty arms so the comparison is combine-only.
-        double tp = 1e30;
+        double ta = 1e30, tb = 1e30, tc = 1e30, td = 1e30, te = 1e30, tf = 1e30, tp = 1e30, tq = 1e30;
         auto p_only = [&](void) { producer(q, PA, PB, R); };
-        for (int r = 0; r < 4; ++r) tp = std::min(tp, burst(p_only));
-        printf("combine rows=%-2d  clean: split %6.2f  pair %6.2f (%+5.2f)   |  L2-dirty: split %6.2f  pair %6.2f (%+5.2f)"
-               "   [producer %5.2f]\n",
-               R, ta * 1e6, tb * 1e6, (tb - ta) * 1e6, (tc - tp) * 1e6, (td - tp) * 1e6, (td - tc) * 1e6, tp * 1e6);
+        for (int r = 0; r < 4; ++r)
+        {
+            ta = std::min(ta, burst(a)); tb = std::min(tb, burst(b));
+            tc = std::min(tc, burst(ca)); td = std::min(td, burst(cb));
+            te = std::min(te, burst(ea)); tf = std::min(tf, burst(eb));
+            tp = std::min(tp, burst(p_only)); tq = std::min(tq, burst(s_only));
+        }
+        // Producer / scrub cost subtracted so each column compares combine-only; the last figure in each pair
+        // is merged-minus-split, which is the quantity at issue.
+        printf("rows=%-2d  resident: split %6.2f pair %6.2f (%+5.2f)  |  producer: split %6.2f pair %6.2f (%+5.2f)"
+               "  |  evicted: split %6.2f pair %6.2f (%+5.2f)   [prod %5.2f scrub %5.2f]\n",
+               R, ta * 1e6, tb * 1e6, (tb - ta) * 1e6,
+               (tc - tp) * 1e6, (td - tp) * 1e6, (td - tc) * 1e6,
+               (te - tp - tq) * 1e6, (tf - tp - tq) * 1e6, (tf - te) * 1e6, tp * 1e6, tq * 1e6);
     }
     return 0;
 }

@@ -479,43 +479,66 @@ static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const i
     });
 }
 
-// E25b, MIXED - and the mixed result is the finding, so it is recorded rather than tidied away. In situ (after
-// the fused gemm, which is what matters) merging the two combines measured neutral-to-worse; STANDALONE, the
-// same merged kernel measures ~2x FASTER (probe_combine.cpp: rows=1 2.87 vs 5.89 us, rows=8 2.86 vs 5.92,
-// rows=16 3.76 vs 5.81 - split costs ~2.9 us per launch, which is the protocol cost, and merging removes one).
-// The ISA does not adjudicate: dumping both schedules (asm_e25b/, 4 files) gives 565-994 lines with mov 93-193
-// and mul 27-53, no spill/scratch indications, but which dump belongs to which schedule was never established,
-// so no per-item claim is supportable from it. So the in-situ loss is an interaction with the preceding gemm (L2 state of
-// freshly written partials, or queue behaviour), not the combine's own cost - UNRESOLVED. Kept schedule: split,
-// because that is what was measured in situ.
-// Merging the pair's two combine launches into ONE grid measured neutral at rows=1 (+0.10 us) and worse above it
-// (+1.90 us at rows=8, +3.50 us at rows=16; anchor 19.4, both arms bit-exact vs their own y_ref):
-//   rows=1  21.50 -> 21.60   rows=8  26.80 -> 28.70   rows=16  34.60 -> 38.10 us
-// So a combine's cost is mostly the memory work it performs, NOT the per-launch protocol - even though
-// DPAS_FLOOR prices that protocol at ~7.8 us per projection at rows=1. One launch still reads the same partials
-// and writes the same floats; merging only removes a dispatch and, above rows=1, gives up whatever overlap the
-// two smaller grids had. Launch-count reduction per se is therefore not a lever on this device, which also
-// retroactively explains why E25a's win came from PARALLELISM (an under-filled grid at KS=1), not from launching
-// less. The hypothesis that survives is a different one and cannot be expressed here: fold SiLU-mul into a
-// combine that reads both partial sets and writes ONE product tensor - a traffic win (one pass fewer, half the
-// writes), not a launch win. Needs the engine-shaped harness, since the probe has no elementwise stage.
+// E25b, RESOLVED - three shapes of "fewer combine launches", measured in situ (anchor 19.4 us, all arms
+// bit-exact; combine-section time at rows 1 / 8 / 16):
+//   split  two launches, grid N each              9.54 / 11.29 / 13.20 us   (pre-E25b main path)
+//   merged one launch,  grid 2N, one item/output  9.57 / 13.19 / 16.96 us   <- loses by 1.9-3.8 us
+//   both   one launch,  grid N, item does BOTH    9.57 / 10.18 / 12.97 us   <- ADOPTED (combine_both below)
+// Standalone, with no gemm ahead of it in the stream, the merged form is ~2x faster than two launches (rows=1
+// 2.90 vs 5.86 us; rows=8 2.99 vs 5.99; rows=16 3.80 vs 5.95 - probe_combine.cpp), which is what the ~2.9 us
+// per-launch protocol cost predicts. The reversal in situ was not L2 dirtiness, not the timing protocol (it held
+// for burst-of-8 and for sync-per-iteration), not KS address folding (templatizing KS moved +3.5 to +3.4), and
+// not the two partial regions being far apart (allocating them contiguously moved +3.5 to +3.6). What remained
+// was GRID SIZE: doubling a grid dispatched immediately after a full-device ESIMD gemm costs more than the
+// launch it saves. One item producing both projections keeps the single launch AND the original grid - and it is
+// where the engine folds SiLU-mul, since both values land in registers, writing one product tensor instead of two
+// outputs plus an elementwise pass. Noise floor: the gemm column of the same per-stage run varies +-1 us across
+// arms with byte-identical code, so only the 3-4 us separations are meaningful. Full history, including how the
+// ISA was read (both bodies: 3 lsc_load.ugm + 1 lsc_store; merged +27 % instructions), in out_e25b_combine.txt.
 
-// TEMPORARY (E25b tie-breaker): the merged combine, re-added only so both protocols can be read from one
-// binary - see out_e25b_combine.txt. Remove whichever form loses.
+
+// E25b main path: ONE combine launch whose grid is the OUTPUT count (not 2x), each work-item producing BOTH
+// projections' values. Keeping the grid at N is what made the single launch pay off in situ - the 2N-grid
+// version, one item per output element per projection, lost to two separate launches (table above). It is also
+// the natural home for SiLU-mul, since both values are already in registers: see combine_silu.
 template <int KSn>
-static void combine_pair(sycl::queue &q, const int32_t *PA, const int32_t *PB, const float *Q,
+static void combine_both(sycl::queue &q, const int32_t *PA, const int32_t *PB, const float *Q,
                          const int32_t *SX8, float *YA, float *YB, const Meta &m, int rpad)
 {
     const size_t one = (size_t)m.E * m.R * m.n;
-    q.parallel_for(sycl::range<1>(2 * one), [=](sycl::id<1> id)
+    q.parallel_for(sycl::range<1>(one), [=](sycl::id<1> id)
     {
-        const size_t i = id[0];
-        const bool a = i < one;
-        const int32_t *PART = a ? PA : PB; float *Y = a ? YA : YB; const size_t j = a ? i : i - one;
+        const size_t j = id[0];
         const int e = (int)(j / ((size_t)m.R * m.n)), row = (int)((j / m.n) % m.R), col = (int)(j % m.n);
-        int32_t s = 0;
-        for (int p = 0; p < KSn * 2; ++p) s += PART[(((size_t)p * m.E + e) * rpad + row) * m.n + col];
-        Y[j] = m.kinv * Q[row] * ((float)s - 510.0f * (float)SX8[row]);
+        const size_t base = (((size_t)e)* rpad + row) * m.n + col;
+        const size_t sl = (size_t)m.E * rpad * m.n;
+        int32_t sa = 0, sb = 0;
+        for (int p = 0; p < KSn * 2; ++p) { sa += PA[p * sl + base]; sb += PB[p * sl + base]; }
+        const float sc = m.kinv * Q[row], bias = 510.0f * (float)SX8[row];
+        YA[j] = sc * ((float)sa - bias);
+        YB[j] = sc * ((float)sb - bias);
+    });
+}
+
+// E25b's payoff for the engine: same single launch, one item per output element, but writing only the product
+// silu(gate) * up - the only consumer of both projections - so the layer drops an elementwise pass and half the
+// combine's writes. Selected by DPAS_SILU=1 so both forms can be timed from one binary; exactness is checked
+// against silu(y_ref_gate) * y_ref_up, computed on the host from the two cases' own references.
+template <int KSn>
+static void combine_silu(sycl::queue &q, const int32_t *PA, const int32_t *PB, const float *Q,
+                        const int32_t *SX8, float *YOUT, const Meta &m, int rpad)
+{
+    const size_t one = (size_t)m.E * m.R * m.n;
+    q.parallel_for(sycl::range<1>(one), [=](sycl::id<1> id)
+    {
+        const size_t j = id[0];
+        const int e = (int)(j / ((size_t)m.R * m.n)), row = (int)((j / m.n) % m.R), col = (int)(j % m.n);
+        const size_t base = (((size_t)e) * rpad + row) * m.n + col, sl = (size_t)m.E * rpad * m.n;
+        int32_t sa = 0, sb = 0;
+        for (int p = 0; p < KSn * 2; ++p) { sa += PA[p * sl + base]; sb += PB[p * sl + base]; }
+        const float sc = m.kinv * Q[row], bias = 510.0f * (float)SX8[row];
+        const float g = sc * ((float)sa - bias), u = sc * ((float)sb - bias);
+        YOUT[j] = (g / (1.0f + expf(-g))) * u;
     });
 }
 
@@ -559,7 +582,8 @@ int main(int argc, char **argv)
     if (argc < 2) { fprintf(stderr, "usage: %s CASE_DIR [reps] [rows] [ks] [layout] [dir2]\n", argv[0]); return 2; }
     const std::string dir = argv[1];
     const int reps = argc > 2 ? atoi(argv[2]) : 5;
-    static const bool PAIR = getenv("DPAS_SPLIT") != nullptr;   // true = two combine launches (see above)
+    // (E25b settled: combine_both is the fused main path; the 2N-grid and two-launch forms were deleted.)
+    static const bool SILU = getenv("DPAS_SILU") != nullptr;   // write silu(gate)*up instead of both outputs
     const int rows_arg = argc > 3 ? atoi(argv[3]) : 0;
     const int KS = argc > 4 ? atoi(argv[4]) : 1;
     const std::string layout = argc > 5 ? argv[5] : "native";      // native | staged | staged2 | staged8
@@ -652,7 +676,8 @@ int main(int argc, char **argv)
     float *Q = (float *)sycl::malloc_device(qbuf.size(), q);
     int32_t *SX8 = (int32_t *)sycl::malloc_device(sbuf.size(), q);
     float *Y = (float *)sycl::malloc_device((size_t)m.E * m.R * m.n * 4, q);
-    int32_t *PART = (int32_t *)sycl::malloc_device((size_t)KS * 2 * m.E * RPAD * m.n * 4, q);
+    const size_t pb = (size_t)KS * 2 * m.E * RPAD * m.n * 4;
+    int32_t *PART = (int32_t *)sycl::malloc_device(pb, q);
     q.memcpy(W, hW.data(), hW.size() * 4);
     q.memset(XA, 0, hXA.size());
     q.memset(PART, 0, (size_t)KS * 2 * m.E * RPAD * m.n * 4);
@@ -685,10 +710,10 @@ int main(int argc, char **argv)
         std::vector<uint32_t> hW2(wb / 4);
         if (staged) memcpy(hW2.data(), w2.data(), wb);          // already in the B70 order
         else permute_tiles(w2, hW2.data(), ntiles, K);          // same single definition of the map
-        const size_t pb = (size_t)KS * 2 * m.E * RPAD * m.n * 4;
+        const size_t ob = (size_t)m.E * m.R * m.n * 4;
         W2 = (uint32_t *)sycl::malloc_device(wb, q);
         PART2 = (int32_t *)sycl::malloc_device(pb, q);
-        Y2 = (float *)sycl::malloc_device((size_t)m.E * m.R * m.n * 4, q);
+        Y2 = (float *)sycl::malloc_device(ob, q);
         q.memcpy(W2, hW2.data(), wb);
         q.memset(PART2, 0, pb);
         q.memset(Y2, 0, (size_t)m.E * m.R * m.n * 4);
@@ -702,15 +727,21 @@ int main(int argc, char **argv)
 
     // gemm + a SEPARATE combine kernel. Fusing the combine with per-expert atomics was measured 4.5x more
     // expensive than the partial round trip it removes (D2), so the two-launch structure is the main path.
-    auto dispatch = [&]
+    auto gemm = [&] { dispatch_k(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{}); };
+    auto combines = [&]
     {
-        dispatch_k(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
         DISPATCH_COMBINE(combine, KS, q, PART, Q, SX8, Y, m, RPAD);
+        // E25b: fused gate+up get ONE combine whose grid is N (not 2N) - each item produces both projections.
+        // Measured in situ against rows 1/8/16, anchor 19.4: this beats the 2N-grid merge by 3.0-4.0 us and
+        // beats or ties the two-launch form, and it is where the engine folds SiLU-mul (both values are in
+        // registers, so it can write one product tensor and halve the output traffic).
         if (!dir2.empty())
         {
-            if (PAIR) DISPATCH_COMBINE(combine, KS, q, PART2, Q, SX8, Y2, m2, RPAD);
-            else DISPATCH_COMBINE(combine_pair, KS, q, PART, PART2, Q, SX8, Y, Y2, m, RPAD);
-        }    };
+            if (SILU) DISPATCH_COMBINE(combine_silu, KS, q, PART, PART2, Q, SX8, Y, m, RPAD);
+            else DISPATCH_COMBINE(combine_both, KS, q, PART, PART2, Q, SX8, Y, Y2, m, RPAD);
+        }
+    };
+    auto dispatch = [&] { gemm(); combines(); };
 
     // Sustained CONTINUOUS work in this process before timing. The device downclocks when idle, so warming up
     // with a chain of short separate runs (each with its own idle gap) measures whatever clock it happens to sit
@@ -724,14 +755,28 @@ int main(int argc, char **argv)
         q.wait();
     }
 
+    // DPAS_PROF=1: attribute time per stage, in situ - placed after the warm-up deliberately, since a cold
+    // device shifts every stage. The combine SECTION is timed as ONE block whether it holds one launch or two,
+    // so both arms pay exactly two waits and the timing protocol itself cannot account for the difference,
+    // which is the whole point: the E25b anomaly only appears here, not standalone.
+    if (getenv("DPAS_PROF"))
+    {
+        double tg = 1e30, tc = 1e30;
+        for (int r = 0; r < 40; ++r)
+        {
+            auto t0 = std::chrono::steady_clock::now();
+            gemm(); q.wait();
+            auto t1 = std::chrono::steady_clock::now();
+            combines(); q.wait();
+            auto t2 = std::chrono::steady_clock::now();
+            tg = std::min(tg, std::chrono::duration<double>(t1 - t0).count());
+            tc = std::min(tc, std::chrono::duration<double>(t2 - t1).count());
+        }
+        printf("PROF %-5s rows %2d ks %d: gemm %7.2f us   combine section %7.2f us   total %7.2f us\n",
+               dir2.empty() ? "1proj" : "fused", m.R, KS, tg * 1e6, tc * 1e6, (tg + tc) * 1e6);
+    }
+
     double best = 1e30;
-    // Multi-bucket builds (DPAS_BKT > 1) read/write BKT activation buckets and BKT partial regions on EVERY
-    // path, including this plain one - so the plain path's XA and PART are allocated for BKT buckets below
-    // (zero-filled beyond bucket 0). Skipping that sizing is what produced the MMU faults: the kernel walked
-    // off a one-bucket allocation, and the reported address moved between runs (…a01000, …a06000, …a0b000),
-    // which is what reading past a live allocation looks like - not spilling, not codegen. Consequence for
-    // reading the numbers: in a BKT>1 build the plain 'revI' line is NOT comparable to the BKT=1 baseline (it
-    // carries BKT-1 buckets of zero-filled work); use the SHARED line, or build DPAS_BKT=1.
     for (int r = 0; r < reps + 2; ++r)
     {
         auto t0 = std::chrono::steady_clock::now();

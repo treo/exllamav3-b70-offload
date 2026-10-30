@@ -101,7 +101,43 @@ standalone probe writes 2 x 800 KB once and re-reads it hot, while in situ the f
 regions and the layer's other traffic may have evicted them. Test: producer -> scrub a ~32 MB buffer ->
 combine, in probe_combine.cpp; if the merged arm loses there, the mechanism is dual-stream DRAM fetch vs
 single-stream, and the engine answer is to combine each projection right after its own producer (which argues
-against gemm-level fusion of gate+up at rows>1, where E25a already measured the win shrinking). `DPAS_SPLIT` stays in probe_dpas9 as a temporary marker until the eviction test below decides which ships., even though the protocol
+against gemm-level fusion of gate+up at rows>1, where E25a already measured the win shrinking). `DPAS_SPLIT` stays in probe_dpas9 as a temporary marker until the eviction test below decides which ships.
+
+RESOLVED — the fourth variable was GRID SHAPE, and E25b is adopted in a form nobody had tried
+------------------------------------------------------------------------------------------------
+The first merged form conflated two changes: one launch AND a 2x grid. Separating them (in-situ per-stage
+attribution, DPAS_PROF in probe_dpas9, anchor 19.4 us, every arm bit-exact against its own y_ref; combine-
+section time at rows 1/8/16):
+
+  split  two launches, grid N each              9.54 / 11.29 / 13.20 us
+  merged one launch,  grid 2N, one item/output  9.57 / 13.19 / 16.96 us   <- loses by 1.9-3.8 us
+  both   one launch,  grid N, item does BOTH    9.57 / 10.18 / 12.97 us   <- ADOPTED
+
+One work-item per output element computing BOTH projections keeps the single launch and the original grid, and
+it beats the two-launch form at rows=8 (-1.1 us) while tying at rows=1/16 - so the launch saving is real and
+the 2x grid was what cost 3-4 us. The gemm column of the same runs varies +-1 us across arms with
+byte-identical code, which is the noise floor these comparisons must clear; only the 3-4 us separations are
+strong, and "beats split at rows=8" should be read as "at least as good, with one fewer launch".
+
+Why the earlier four refutations were all consistent with this: each held the grid fixed or changed only
+memory state, and none of them touched the variable that mattered. Attributing the delta to a STAGE first
+(gemm unchanged, combine section +3.1 us) is what narrowed it to something grid-shaped.
+
+combine_silu, priced and honestly bounded (DPAS_SILU=1, rows 1/8/16): writing silu(gate)*up instead of both
+outputs changes the combine section by -0.06 / -0.06 / +0.15 us - i.e. nothing measurable. The combine's cost
+is dispatch plus reading the partials, not the ~0.4 MB of extra writes, so the engine's reason to fold SiLU is
+the ELIMINATED elementwise pass (a whole extra launch plus a round trip of the intermediate), not this kernel.
+The probe cannot price that pass because it has none.
+
+Correctness caveat, stated because it changes how the harness must check: the silu form is NOT bit-exact
+against a host silu(gate)*up - max abs diff 0.0078 on values spanning +-1.04e8, i.e. ~7.5e-11 relative, pure
+floating-point reassociation (the device evaluates sc*(s-bias) then a sigmoid; numpy associates differently).
+So gate_dpas.py must keep bit-exactness for the per-projection outputs and use a relative tolerance for any
+fused-epilogue output. Introducing that tolerance is a real loosening of the gate and should be done deliberately, not as a side effect.
+
+Engine-facing layer shape that falls out of E25a + E25b: gemm(gate+up fused, KS=1 when the grid underfills) ->
+combine_both (or combine_silu, one launch either way) -> gemm(down) -> combine = 4 launches for the layer, and
+D2 (combine never fused into the gemm with atomics) still holds., even though the protocol
 is genuinely ~7.8 us at rows=1: the merged launch reads the same partials and writes the same floats, and above
 rows=1 it gives up whatever overlap the two smaller grids enjoyed. Neutral at rows=1, monotonically worse with
 rows - the shape you expect when the saving is real (one dispatch, fixed) and the loss scales with the work

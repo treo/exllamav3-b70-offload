@@ -995,6 +995,24 @@ nothing that is the sole instance of a measurement.
     bit-exact" had been read from `<case>/y_dev_*.bin` while those runs wrote to `<case>_planar`/`_full`. Always
     derive the output path from the argv you passed, never from the case you meant.
 
+50. **When a fusion loses only in situ, attribute the loss to a stage before theorising — and remember that
+    "one launch" and "one grid" are two independent changes.** E25b's merged combine won standalone by ~3 µs and
+    lost in situ by up to 3.5 µs. Four explanations were tested and refuted in sequence: dirty L2 (producer pass —
+    merged still wins), measurement protocol (penalty present in burst-of-8 *and* sync-per-iteration),
+    runtime-`KS` address folding (templatizing KS: +3.5 → +3.4), non-contiguous partial allocations (one chunk:
+    +3.5 → +3.6). What the change had actually bundled was launch count *and* grid size — the merged body used a
+    2× grid. Separating them answered it at once: one launch with the original grid, each work-item producing
+    both projections, beats the two-launch form (rows 1/8/16 combine section 9.57/10.18/12.97 vs
+    9.54/11.29/13.20 µs) and is where SiLU-mul belongs. Two habits. (1) Time *stages* in situ, not only totals:
+    the per-stage mode showed the gemm unchanged and the entire delta inside the combine section, collapsing a
+    vague "fusion is slower" into "this grid is too large when it follows a full-device kernel" in one run. That
+    instrument paid for itself immediately; build it before the third failed hypothesis. (2) When a change
+    fuses, enumerate everything else its shape altered — grid size, work per item, item-to-data mapping — and
+    vary each alone before crediting the fusion. Subsidiary: a fused epilogue that recomputes in floating point
+    is not bit-exact against a host reference by construction (silu form: 7.5e-11 relative on values spanning
+    ±1e8), so the gate must keep bit-exactness where the arithmetic is identical and take an explicit relative
+    tolerance where it is not — an intentional loosening, never a silent one.
+
 
 
 
