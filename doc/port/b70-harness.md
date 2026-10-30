@@ -22,7 +22,12 @@ produced a wrong conclusion in `doc/prep/measured-costs.md`:
   `2.5 GT/s ×1` while carrying 14.4 GB/s).
 * **report profiled runs separately** — `EXL3_SPLIT_PROF`/`HANDOFF_PROF` cost ~30 % by themselves,
   and on the B70 side `.wait()`-based instrumentation costs 24 µs per call (**[M]** `LESSONS` 1).
-* **warm up** before timing, and take medians/p90 over ≥200 samples, never a mean of 3.
+* **warm up** before timing — and a warm-up is measured in *executed device work*, not sample count. This device
+  idles at 1200 MHz and needs ~40 ms of continuous work to leave it: the same kernel reads 44.0 µs after 200
+  repetitions (still 1200 MHz) and 19.2 µs after 2000 (2000 MHz), plateauing at 19.1 µs by 20 000 reps (2650 MHz).
+  Target >= 1 s of executed work (in the probes, `WARM_S`), take min/median over >= 4 interleaved rounds, and
+  apply the rule to health checks too — an anchor polled with a 2 ms burst is measuring the idle clock, not the
+  device. Read `xpu-smi stats -d 0 -j`'s frequency if a number looks off, before blaming anything else.
 
 ## Levels
 

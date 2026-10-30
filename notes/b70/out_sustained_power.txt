@@ -51,13 +51,17 @@ Planning consequences:
   2. Because the part is at its cap, the "spare bandwidth" argument in the cost model should be read as spare
      bandwidth *at the expense of clock*: bytes moved and GHz are trading against each other here, which is the
      mechanism behind the flat quant ladder.
-  3. Co-tenancy matters more than this chapter assumed: firefox holds the same render node (LESSONS 54), and
-     both parties draw on the same 275 W. Contaminated anchors (20-44 us readings against a healthy 19.4) are
-     expected on this box and were observed again during the batches adjacent to this soak.
+  3. Clock state dominates everything else on this box: the device idles at 1200 MHz and takes ~40 ms of
+     continuous work to leave it, which is a 2.2-2.3x effect on any measured time - larger than most things this
+     chapter measures. Check frequency (xpu-smi) before attributing a slow reading to contention or to heat. The
+     co-tenant is real (firefox holds the render node, LESSONS 54) and shares the same 275 W, but it has not been
+     shown to have affected any batch here.
 
 CAVEATS: single config, single card, one desktop box, no pinned clocks, co-tenant present (the memory counters
-include anything else using the device). Absolute us in this file came from a window whose anchor read 23.8 us,
-so treat 412.1 vs 410.1 as the ratio it is (+0.5%), not as microsecond-accurate absolutes.
+include anything else using the device). The +0.5% soak drift is the ratio that matters; the absolute 412.1 us
+was recorded in a window whose anchor initially read 23.8 us, though that turned out to be an under-warmed anchor
+rather than a slow device (LESSONS 54), so the absolutes are likely fine - re-verify against a 6000-rep anchor
+before quoting them as certified.
 
 Reproduce:
     # terminal 1: soak; WARM_S is the soak duration, the timed rounds run after it

@@ -53,10 +53,11 @@ KS=1, min of 2 rounds, WARM_S=2. "bytes/expert" is the gate_proj trellis alone (
    gate to iterate over these checkpoint-derived dirs would be cheap and would certify the whole shipped ladder.
 
 CAVEATS
-  * Window contamination, again: the anchor read 43.9 us before this batch and 23.8 us after (healthy 19.4),
-    because the desktop browser shares the render node (LESSONS 54). Within-ladder ratios stand - all six were
-    measured back to back, one process per config - but absolute us here are probably 6-20% pessimistic, which
-    if anything understates how flat the ladder is.
+  * Anchor readings, corrected: the anchor read 43.9 us before this batch and 23.8 us after, which I took for
+    contention. It was an under-warmed anchor (120-200 reps = 2-4 ms of work, device still at 1200 MHz); the same
+    window measured with 6000 reps reads 19.1 us at 2150 MHz. Since the ladder's own runs used WARM_S=2 of
+    executed work, the absolute us here are sound rather than pessimistic - and the within-ladder ratios were
+    always the basis of the conclusions anyway (all six measured back to back, one process per config).
   * The 2.68 row is the long-standing /tmp/gemv_dpE10 dir; the other five were dumped fresh by the same script.
     Same shapes (E=10, k=2560, n=640, tk=160, tn=40), different provenance.
   * 4.18 and 5.05 have the SAME expert K (5) and the same bytes/expert; they differ in non-expert tensors, so
@@ -71,3 +72,5 @@ Reproduce:
     (quants present: 2.05bpw_h4_ng4, 2.68bpw_h6_ng8, 4.05bpw_h6_ng6, 4.18bpw_h6_ng8, 5.05bpw_h6_ng8,
      6.05bpw_h6_ng8; expert K = 2, 3, 4, 5, 5, 6 respectively)
     L2 size: ./devinfo | grep -i "cache"        -> global cache (L2): 24.0 MiB
+    clock/health check (>= 2000 reps, or you are measuring the 1200 MHz idle clock - see LESSONS 54):
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 6000 1 2   # ~19.1-19.6 us when ramped; ~44 us when not

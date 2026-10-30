@@ -3,8 +3,11 @@ Low-E grid (E = 2, 4): fusion pays MORE as the grid empties, and the real rule c
 The last corner of the E-grid gap ("X/EPT=1 was validated at E=10"). Cases dumped at E=2 and E=4 (gate + up, K=3,
 same tk/tn as everything else), rev L (/tmp/revL9), rows 1/8/16 and, at rows=1, KS = 1/2/4.
 
-WINDOW WARNING FIRST: the anchor read 44.0 us at the start of this batch and 25.8 us at the end (healthy 19.4),
-so absolute us here are inflated by an unknown, drifting amount - firefox shares the render node (LESSONS 54).
+WINDOW NOTE, CORRECTED AFTER THE FACT: the anchor read 44.0 us at the start of this batch and 25.8 us at the end,
+and I blamed the browser. That was wrong - it was an under-warmed anchor: 200 reps is 3.8 ms of work and leaves
+the device at 1200 MHz (44.0 us), while 2000 reps reaches 2000 MHz and 19.2 us. The probes themselves ran with
+WARM_S=2 of executed work, so the absolute us below are probably sound; what remains true regardless is that the
+conclusions were drawn from ratios between adjacent runs of the same cell.
 Everything read below is a RATIO measured between adjacent runs of the same cell, which is the comparison this
 box can still support.
 
@@ -61,6 +64,9 @@ rule 4 needs the per-KS cost table (currently not stored: KS is optimised away i
 change is: measure and store us per (expert, rows, KS) for the fused and separate schedules at one E, then let the
 planner pick the (fusion, KS) pair that lands nearest the band without exceeding it. Doing that under a
 contaminated window would bake the contamination into the model, so it waits for an anchor-healthy batch.
+UPDATE, same day: that reason evaporated. The window was healthy and the anchor check was under-warmed, so the
+per-KS table can be built whenever the runs are available - the remaining obstacle is effort, not contamination.
+That is the useful kind of outcome from a false alarm: the follow-up is unblocked rather than merely deferred.
 
 Reproduce:
     python3 notes/b70/dump_gemv_case.py /tmp/lo_e2_gate 2 16 0 --with-reference
@@ -68,5 +74,5 @@ Reproduce:
     WARM_S=2 /tmp/revL9 /tmp/lo_e2_gate 2 1 4                       # single projection, E=2, rows=1, KS=4
     WARM_S=2 /tmp/revL9 /tmp/lo_e2_gate 2 1 4 native /tmp/lo_e2_up  # fused
     anchor / contamination check:
-      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2                # 19.4 us when quiet and ramped
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 6000 1 2               # >=2000 reps to ramp; ~19.1 us ramped, ~44 idle
       fuser -v /dev/dri/renderD128

@@ -1085,6 +1085,34 @@ nothing that is the sole instance of a measurement.
     the close-out's absolute decode figures carry a shared-device asterisk even though the protocol (warm
     continuous work, round-robin arms, anchor) limits the damage.
 
+    CORRECTION, same day, and it supersedes the attribution above: those depressed anchor readings were not the
+    browser - they were an UNDER-WARMED ANCHOR. The anchor binary does about 19 us of work per rep, so 120-200
+    reps is 2-4 ms, which never raises the clock. Measured directly, each trial starting from ~25 s of idle:
+
+        reps      work    anchor us   MHz before -> after   W
+         200     3.8 ms      44.0        1200 -> 1200       56
+        2000    38.0 ms      19.2        1200 -> 2000       62
+       20000   380.0 ms      19.1        1200 -> 2650       81
+      100000  1900.0 ms      19.2        1200 -> 2750       86
+         200     3.8 ms      43.9        1200 -> 1200       56     (repeat of trial 1: reproducible)
+
+    The arithmetic closes: 44.0 / 19.2 = 2.29 against a clock ratio of 2650/1200 = 2.21, so the "drift" was
+    frequency, not contention. Re-running the anchor with 6000 and 60000 reps in the very window I had called
+    contaminated gives 19.1 and 19.6 us at 2150 and 2750 MHz: the window was healthy all along. Consequences.
+    (1) An instrument must satisfy its own warm-up rule; I applied "warm continuous work before timing" to the
+    probes and then polled health with a 2 ms burst. Health checks are measurements too - state their rep count.
+    (2) A depressed anchor is evidence about the anchor until proven otherwise: check xpu-smi's frequency (and the
+    probe's rep count) before blaming the environment. (3) The old 2.3x cross-window swing that I had attributed
+    to clock state and then to co-tenancy is explained by idle-clock operation (2.29x measured), which fits far
+    better than any contention story. (4) The co-tenant is real - fuser shows firefox on the render node - but it
+    is NOT the demonstrated cause of anything in this chapter; the batches I flagged as 6-19% pessimistic are
+    retracted as flagged, and their absolutes stand (they were measured with WARM_S>=1 s of executed work).
+    Protocol now: anchor at >= 2000 reps, preferably 6000 (~115 ms of work), and read the frequency alongside it.
+    One nuance this explains: earlier in the same session the anchor sometimes read 19.4 us with only 120-150 reps
+    and sometimes 44 us with the same command - when a warm probe had just run, the *neighbour's* work kept the
+    clock up, and the short anchor rode along. So an anchor reading is only interpretable if the anchor carries
+    enough work of its own; otherwise it reports the history of the box, not its state.
+
 56. **State an operational rule together with the parameter range it was measured over, or it will be applied
     outside that range — usually by you.** "Fusion and split-K are substitutes, so fuse at KS=1" was a fair
     reading of the E=10 data (there, fused KS=2 cost +7%) and it sat in the decision table as if it were general.

@@ -214,6 +214,64 @@ def revl_checks(fails):
     return n
 
 
+# Every shipped Qwen3.8-Flash-Next recipe, with the expert trellis K read from the dumped tensor geometry
+# (out_quant_ladder.txt). The synthetic CASES above cover K = 2/3/5; this covers 4 and 6 and puts all six through
+# real checkpoint bytes. 4.18 and 5.05 share K = 5 for experts (they differ in non-expert tensors), which makes
+# the pair a useful control.
+QUANT_CASES = [
+    ("2.05", "Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4", 2),
+    ("2.68", "Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8", 3),
+    ("4.05", "Qwen3.8-Flash-Next-exl3-4.05bpw_h6_ng6", 4),
+    ("4.18", "Qwen3.8-Flash-Next-exl3-4.18bpw_h6_ng8", 5),
+    ("5.05", "Qwen3.8-Flash-Next-exl3-5.05bpw_h6_ng8", 5),
+    ("6.05", "Qwen3.8-Flash-Next-exl3-6.05bpw_h6_ng8", 6),
+]
+
+
+def quant_checks(fails, quick):
+    """Bit-exactness of rev L on each shipped quantization, K = 2..6, dumping cases from the real checkpoints when
+    the /tmp copies are absent. Worth running even when the device is busy or contaminated: exactness does not
+    depend on clock state, unlike every timing number in this directory."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bin_ = next((p for p in (os.path.join(here, "probe_dpas9"), "/tmp/revL") if os.path.exists(p)), None)
+    if bin_ is None:
+        skips.append("quant recipes: probe_dpas9 not built (build.sh builds it)")
+        return 0
+    n = 0
+    print("\nreal-checkpoint recipes (rev L, expert K = 2..6):")
+    for tag, ck, K in QUANT_CASES:
+        d = f"/tmp/qgate_{tag}"
+        if not os.path.exists(os.path.join(d, "y_ref.npy")):
+            rc, out, err = run(sys.executable, [os.path.join(here, "dump_gemv_case.py"), d, "10", "16", "0",
+                                                "--with-reference", f"--ckpt={ck}"])
+            if rc or not os.path.exists(os.path.join(d, "y_ref.npy")):
+                skips.append(f"quant {tag}bpw: case dump unavailable ({(err or out).strip()[-60:] or 'no y_ref'})")
+                continue
+        ref = np.load(os.path.join(d, "y_ref.npy")).astype(np.float32)
+        rows_chk = (1, 16) if quick else (1, 8, 16)
+        bad = []
+        for R in rows_chk:
+            if ref.shape[1] < R:
+                skips.append(f"quant {tag}bpw rows={R}: y_ref has {ref.shape[1]} rows")
+                continue
+            for f in glob.glob(os.path.join(d, "y_dev*")):
+                os.remove(f)
+            rc, out, err = run(bin_, [d, "1", str(R), "1"])
+            n += 1
+            p = os.path.join(d, f"y_dev_ks1_r{R}.bin")
+            if rc or not os.path.exists(p):
+                fails.append(f"quant {tag}bpw K={K} rows={R}: rc={rc} no output - {(err or out).strip()[-60:]}")
+                continue
+            got = np.fromfile(p, dtype=np.float32)
+            want = ref[:, :R, :]
+            if got.size != want.size or not np.array_equal(got.reshape(want.shape), want):
+                fails.append(f"quant {tag}bpw K={K} rows={R}: NOT bit-exact")
+                bad.append(R)
+        print(f"  {tag} bpw (K={K}): rows {'/'.join(str(r) for r in rows_chk)} "
+              f"{'exact' if not bad else 'WRONG at rows ' + str(bad)}")
+    return n
+
+
 def main():
     quick = "--quick" in sys.argv
     staged = "--staged" in sys.argv
@@ -300,6 +358,7 @@ def main():
     if staged:
         checks += staged_checks(fails)
     checks += revl_checks(fails)
+    checks += quant_checks(fails, quick)
     print(f"\n{checks} comparisons, {len(fails)} failures, {len(skips)} skips")
     for s in skips:
         print(f"  SKIP  {s}")

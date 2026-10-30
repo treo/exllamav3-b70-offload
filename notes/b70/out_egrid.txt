@@ -71,7 +71,11 @@ the thing that makes numbers comparable.
 Anchor during this sub-experiment: 24.7 us (unhealthy), which is the contamination described next - absolute us
 here are pessimistic; the 0s-vs-20s *differences* are what is being read.
 
-CAVEAT - these absolute numbers are contaminated, and the cause is now identified
+CAVEAT - SUPERSEDED (same day): the low anchor readings below were an under-warmed anchor, not contamination.
+Re-measuring the anchor with 6000 reps in this kind of window gives 19.1 us at 2150 MHz, while 120-200 reps gives
+43-44 us at 1200 MHz because 2-4 ms of work never raises the clock (LESSONS 54's correction has the table). So
+this batch's ABSOLUTE us stand - the probes themselves ran with WARM_S >= 1 s of executed work. The paragraph is
+kept because the co-tenant is real and the inference was reasonable, but its attribution is wrong.
 ----------------------------------------------------------------------------------
 The anchor (rev I, gate rows=1, an unchanged binary whose healthy value is 19.4 us) read 22.9 us after this sweep
 and 20.6-23.1 us across six interleaved samples, with one 43.7 us outlier. That is not thermal soak from the run:
@@ -88,8 +92,9 @@ Consequences, stated plainly:
     have a plausible mechanism: browser activity, not just clock state.
   * Before trusting an absolute number, check the anchor AND the render-node users:
       fuser -v /dev/dri/renderD128
-      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2       # 19.4 us when the device is quiet and ramped
-    A batch whose anchor cannot reach ~19.4 us after several tries is contaminated: report ratios, not us.
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 6000 1 2     # ~19.1-19.4 us; >=2000 reps needed to ramp the clock
+    A depressed anchor is evidence about the ANCHOR first: it needs >= 2000 reps (~40 ms of work) to ramp, and
+    read xpu-smi's frequency before concluding anything about the device or its neighbours.
   * Proper fix, not attempted here: run timing batches from a session without a compositor/browser on that card
     (VT switch, headless runner, or a second GPU). Until then the chapter's absolute figures carry a shared-device
     asterisk.
@@ -122,6 +127,8 @@ Reproduce:
     WARM_S=2 /tmp/revL9 /tmp/f96_gate 2 16 2                           # single projection
     case dirs: python3 notes/b70/dump_gemv_case.py /tmp/f96_gate 96 16 0 --with-reference
                python3 notes/b70/dump_gemv_case.py /tmp/f96_up 96 16 0 --with-reference --proj up_proj
-    anchor + contamination check:
-      fuser -v /dev/dri/renderD128
-      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 200 1 2
+    anchor check (see LESSONS 54's correction - 200 reps is 3.8 ms of work and reads ~44 us at the 1200 MHz idle
+    clock, which is NOT a sick device; 6000+ reps reads ~19.1 us at >=2150 MHz):
+      DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 6000 1 2
+      xpu-smi stats -d 0 -j | grep -A3 frequency        # what the clock actually is
+      fuser -v /dev/dri/renderD128                       # co-tenants, if you still suspect them

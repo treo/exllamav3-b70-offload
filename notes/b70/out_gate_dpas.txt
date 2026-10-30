@@ -32,4 +32,12 @@ rev L (probe_dpas9) - the clean-line kernel:
   gate_proj K=5          native + staged2 verbatim exact at rows 1/16
   gate+up fused (one launch)  both projections exact at rows 1/16
 
-188 comparisons, 0 failures, 0 skips
+real-checkpoint recipes (rev L, expert K = 2..6):
+  2.05 bpw (K=2): rows 1/8/16 exact
+  2.68 bpw (K=3): rows 1/8/16 exact
+  4.05 bpw (K=4): rows 1/8/16 exact
+  4.18 bpw (K=5): rows 1/8/16 exact
+  5.05 bpw (K=5): rows 1/8/16 exact
+  6.05 bpw (K=6): rows 1/8/16 exact
+
+206 comparisons, 0 failures, 0 skips
