@@ -1,0 +1,80 @@
+E25a: gate+up in ONE launch — WINS, but only at KS=1, because fusion and split-K buy the same resource
+=========================================================================================================
+Measured on gate+up for one expert set (E=10, K=3, Qwen3.8 geometry tn=40/tk=160/n=640). Gate and up take the
+same activations (their x8/q/sx8 files are byte-identical) and different weights. "separate" = two launches,
+each gemm+combine, the current engine schedule; "fused" = ONE launch whose grid spans both projections' column
+tiles, each thread still serving exactly one projection (so one accumulator set - the register bill E29 proved
+fatal is unchanged). All numbers: 3 s in-process warm-up, min of 4 interleaved rounds, us.
+
+  rows   ks   separate    fused     verdict
+     1    1     41.3     25.7     FUSED x1.61
+     1    2     26.4     29.0     loses
+     1    4     32.3     31.2     FUSED x1.04
+     8    1     47.4     28.9     FUSED x1.64
+     8    2     32.7     35.4     loses
+     8    4     40.3     38.5     FUSED x1.05
+    16    1     52.2     35.0     FUSED x1.49
+    16    2     40.8     43.6     loses
+    16    4     53.1     50.5     FUSED x1.05
+
+THE RULE, NOT JUST THE TABLE
+----------------------------
+Fusion wins when the separate launches **under-fill the machine**, and loses when they do not. The B70 reports
+~2048 hardware thread slots (the probe prints it: "1600 threads (2048 HW)"). A gate launch at KS=1 is
+tn*KS*2*E = 40*1*2*10 = 800 threads - 39 % of capacity - so two of them run half-idle; the fused launch is 1600
+threads and nearly fills the device. At KS=2 each separate launch is already 1600 threads, so fusing buys no
+occupancy and leaves only the cost: two independent weight streams interleaved (DRAM page/bank pressure), which
+measures at +7 %.
+
+**Fusion and split-K are substitutes for the same thing - parallelism.** That is why the fused kernel's optimum
+flips to KS=1: it no longer needs k-splitting to fill the machine, and paying both is what makes KS>=2 fused
+lose. So the engine rule is:
+
+    if tiles_this_launch * KS * 2 * E  <  ~0.6 x HW_THREADS:   fuse projections and set KS=1
+    else:                                                       keep separate launches and tune KS
+
+with HW_THREADS read at startup (rev J already queries it for DPAS_EPT).
+
+BEST-KNOWN CONFIGURATION NOW (gate+up fused KS=1, down separate KS=1, E=10):
+
+    rows=1    25.7 + 15.2 = 40.9 us/layer   (was 2 x 13.7 + 15.2 = 42.6, x1.04)
+    rows=8    28.9 + ~24   = ~52.9          (was ~2 x 17 + 24 = 58)
+    rows=16   35.0 + 29.8 = 64.8 us/layer   (was 2 x 21.4 + 29.8 = 72.6, x1.12)
+
+Also 3 launches per layer instead of 6 (one gemm+combine for gate+up, one for down), which is where the next
+bit of the win is: fusing the two combines (E25b) and possibly all three projections in one launch (E25c - the
+kernel already selects its weight/partial pointers per grid slice, so a 3-way partition with a different
+geometry per projection is a host-side change plus one more index).
+
+CORRECTNESS: fused outputs are bit-exact against each projection's own y_ref at KS=1 for rows=1 and rows=16,
+gate and up (8/8 checks at KS=2 rows=1/16 as well). The fused path is not a numerics change - same tiles, same
+int32 accumulation, just a wider grid.
+
+TWO BUGS FOUND BUILDING THIS, both worth remembering because each masqueraded as something else:
+
+1. **`load_meta()` returns the dump-time row count.** The second projection's meta had R=64 while the run used
+   rows=16, so combine() sized its output by m2.R and wrote E*64*n floats into an E*16*n buffer. The OOB write
+   landed on the *gate* output, so a trusted schedule (`sep`) started reporting wrong results and the natural
+   conclusion was "the fused kernel is broken". It was a missing `m2.R = rows_arg`.
+2. **The intra-tile transpose existed in two places.** The fused path uploaded the second projection's weights
+   RAW while only the primary copy went through rev J's tile permutation - producing garbage for up while gate
+   stayed exact. Fixed by extracting `permute_tiles()` and calling it for both loads: the transform that D3-alt
+   makes a first-class property of the staged layout must have exactly one definition.
+
+Both bugs were found by diffing fused-vs-separate outputs against each other (not just against y_ref): when
+*everything* disagrees, suspect shared state or the harness, not the new code path. Reproduce with
+`FUSE_DIR=<up case dir>`, diagnostics `FUSE_NOFUSED=1` (skip the fused schedule) and `y_dbg_<sep|fus>_<gate|up>_r<R>.bin`.
+
+A third, procedural trap worth logging: a `gate_dpas.py --staged` run reported "168 comparisons, 0 failures"
+while **all four staged binaries had failed to build** (a malformed shell loop mangled the flags, and stderr was
+swallowed by the same construct). The gate passed because it fell back to stale executables left in /tmp from an
+earlier revision - a green result describing code that no longer exists. The check now runs only after
+`ls -l --time-style=+%H:%M` confirms the binaries are newer than the source. Any gate whose inputs are
+outside the repository must verify their provenance, or it certifies the past.
+
+Reproduce:
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o /tmp/revJ_f5 probe_dpas7.cpp
+    FUSE_DIR=/tmp/gemv_up_R64 DPAS_WARM_S=3 /tmp/revJ_f5 /tmp/gemv_R64 3 16 1     # rows=16, KS=1
+    python3 dump_gemv_case.py /tmp/gemv_up_R64 10 64 0 --with-reference --with-sx8 \
+        --ckpt Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 --proj up_proj
+Regression: gate_dpas.py --staged after these probe_dpas7 changes = see out_gate_dpas.txt.

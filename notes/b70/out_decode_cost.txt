@@ -23,12 +23,8 @@ the DPAS families require K <= 5, so denser recipes fall back to dp4a.
 
 cost spread note: two warm windows differ by up to ~20 % (rev G+X, down_proj, rows=1: 41.5 vs 50.9 us at E=10)
 
- rows      dp4a   rev G+X   rev H+X     rev I     rev J      dispatch
-    1     11.76     12.57     12.12      6.13      4.35         rev J
-    2     16.23     11.69     12.47      6.47      4.54         rev J
-    4     30.99     11.71     12.53      6.71      4.77         rev J
-    8     69.27     13.40     13.65      7.53      5.68         rev J
-   16    134.97     18.53     15.29      9.43      7.09         rev J
+ rows      dp4a   rev G+X   rev H+X     rev I     rev J      E25a      dispatch
+   16    134.97     18.53     15.29      9.43      7.09      6.48         rev J   fused gate+up + down = x1.09 vs three separate launches
 
 One kernel wins at every measured batch now: rev J (transposed tiles) beats rev I by 1.27-1.46x and
 dp4a by ~8x at rows=16. Dispatch is a single family, with one caveat that is a design decision rather
@@ -39,6 +35,11 @@ property the 'native layout, no repack' constraint was protecting. If that const
 literally the fallback is dpas_gather (rev I) at +27-46%, still one kernel; dp4a is the only option
 where no permutation is possible at all. Revs G/H carry no advantage now and remain for provenance.
 Rows=2 is interpolated; nothing here extrapolates past the measured set 1/2/4/8/16.
+
+E25a (last column): gate+up in ONE launch at KS=1 plus down separate. Faster than three separate
+projections at every measured rows (x1.06 at rows=1, x1.17 at rows=16) and it halves the gemm launch
+count - but it is CONDITIONAL (D8): it wins because the separate launches under-fill ~2048 hardware
+thread slots. Use should_fuse(tn, KS, E); once one launch fills the machine, fusion costs ~7 %.
 
 Binding constraint now: rev J runs the gate projection at 437 GB/s effective (5.86 MiB in 14.0 us)
 against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - ~90% of the
@@ -55,6 +56,11 @@ projections - no L2 sharing between buckets of the same expert, so each re-pays 
   rows=64   ( 4 buckets)  bucketed schedule    28.36 us/expert-layer   shared-stream kernel ~  15.30 us   (worth x1.85)
   rows=128  ( 8 buckets)  bucketed schedule    56.72 us/expert-layer   shared-stream kernel ~  26.24 us   (worth x2.16)
   rows=256  (16 buckets)  bucketed schedule   113.44 us/expert-layer   shared-stream kernel ~  48.13 us   (worth x2.36)
-The bucketed column is what the engine does today. The shared-stream column is an UNIMPLEMENTED
-projection from two measured points (stream ~ rows=1, row work ~ rows=16 minus rows=1): it bounds
-an optimization opportunity and must not be quoted as a measurement.
+The bucketed column is what the engine does today. The shared-stream column was a PROJECTION that
+E29 then BUILT AND TESTED, and it loses in every shape - gate rows=32: 41.5 us for two separate
+16-row launches, 53.7 us sharing 2x16, 60.5 us sharing 4x8, and 64.8 us for a NATIVE single 32-row
+launch (NF=4, also implemented and bit-exact). Reason: this kernel's 128-GRF budget holds exactly 16
+rows spill-free, and every wider shape spills 1856-3584 B/thread to scratch, which costs more than
+re-reading weights at the ~450 GB/s the kernel already achieves. So do NOT widen the row dimension;
+fuse columns/projections instead (E25). And never pad a bucket: 24 rows as one padded NF=4 launch
+costs 61.8 us, while 16+8 as two buckets costs ~38 us (b70-decode-closeout.md, E29 RESULT).

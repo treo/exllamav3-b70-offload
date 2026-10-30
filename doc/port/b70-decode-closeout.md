@@ -13,6 +13,7 @@ measurements.
 | D2 | **Combine stays a separate launch.** Do not fuse it into the producer with atomics | **adopted (refuted the alternative)** | fused costs +6.4…+8.4 µs gate / +13.6…+15.8 µs down; the atomic protocol alone is ~8.7 µs against 1.9 µs of saved round trip (13w) |
 | D3 | **Accept the intra-tile permuted device layout** (`dword q·K+i → i·8+q`, produced when weights are staged into VRAM) | **ACCEPTED (owner decision), and now priced** | It is what buys D1's win: same bytes, same capacity, same DRAM traffic, bit-identical outputs, but the VRAM tensor is no longer byte-identical to the checkpoint. Measured (`probe_permute`, `out_permute.txt`): a device permute of the whole 512 MiB resident set costs **3.46 ms** at K=3 (4.24 ms at K=6) against 1.19 ms for a straight device copy — i.e. **+5.4 % on a load that already takes ~64 ms** over the measured 8.37 GB/s link. Doing it on the parent instead is worse: a host permute-copy runs at **6.8 GiB/s (K=3) to 9.1 GiB/s (K=6)** against memcpy's 20.4 GiB/s, and the link itself is ~7.8 GiB/s, so for K=3 staging becomes permute-bound (+~20 %) while also burning parent cores that §6 prices as scarce. **Recommendation adopted: ordinary DMA staging + a device-side permute at admit.** One caveat on "pay it once": that is true only for experts that never leave VRAM — a readmit after eviction pays it again, 226 µs per 14 MiB admission (+13 % of that admission's transfer). §4a's cache tier therefore permutes **on admit**, not once per process |
 | D3-alt | **One staged in-RAM layout, consumed verbatim by the B70**, with the CUDA path still unpacking to native from that different base | **demonstrated end-to-end on AVX2** (planar dwords + group-2 banding, 16/16 bit-exact with negative controls, banding rate-neutral); remaining work is the layout marker in the handoff and keeping D3 for non-planar tiers | The production AVX2 repack (`_copy_repacked`, planar) already emits exactly rev J's dword order — byte-identical over 1.536 M dwords — and rev J reads the full staged form bit-exactly at the same rate (−1.3…+2.0 % planar; −4.6…+1.0 % banded) (`out_cpu_layout.txt`, `gate_dpas.py --staged`). D3's device permute survives as the fallback for tiers where staging is not planar (AVX-512 group 8; non-integer rates group 0), which is what makes the marker mandatory rather than cosmetic |
+| D8 | **Fuse gate+up into one launch at KS=1 when the separate launches under-fill the device**; keep launches separate otherwise | **adopted (measured)** | Fused gate+up beats the best unfused schedule at every row count (x1.04 at rows=1, x1.13 at 8, x1.17 at 16), bit-exact, and halves the gemm launches in the layer. The condition is occupancy, not taste: fusion and split-K both buy parallelism, so the fused kernel wants KS=1 (`out_e25_fuse.txt`) |
 | D4 | **One expert per thread, always** (`DPAS_X=1`, equivalently `DPAS_EPT=1`) | **adopted** | Confirmed from two independent lineages: expert grid on revs G/H/I, and an `DPAS_EPT` sweep on rev J (1 → 14.0 µs, 2 → 21.1, 5 → 39.7). It is a latency requirement, not only a partial-traffic one |
 | D5 | **dp4a (rev C + compile-time K) keeps exactly one niche:** layouts that cannot be permuted *and* K > 5 | **adopted** | Rev C is ~43 µs of non-byte cost against rev J's 6.2 µs above floor; ~5 instructions/weight vs 0.29 (13x). Rev I already owns the no-permute, K ≤ 5 case |
 | D6 | **Epilogues must be written contraction-safe**, or device code compiled `-ffp-contract=off` | **adopted as a rule** | icpx contracts FMA by default and nothing in the repo sets it. Rev K's form (`CQ * ((float)s − DR)`, scalar differences rounded on the host) is the pattern. Existing certifications re-checked: revs I/J byte-identical with the flag off |
@@ -326,6 +327,42 @@ after 3 s of continuous work read 21.3 µs — i.e. a faulted-then-reset card lo
 and the anchor is what distinguishes them from a real regression. `journalctl -k` distinguishes them definitively.
 
 ## E29 spec: the shared-stream row-bucket kernel (design is done; implementation is not)
+
+## E25 RESULT: gate+up in one launch **WINS** — x1.04 at rows=1, x1.12 at rows=16 — but only at KS=1
+
+The grid-level fusion (one launch spanning both projections' column tiles; a thread still serves exactly one
+projection, so the accumulator bill is unchanged from the single-projection kernel) beats the best unfused
+configuration at every row count measured, and is bit-exact against each projection's own `y_ref`:
+
+| rows | best separate (two launches) | **fused, one launch** | gain |
+|---|---|---|---|
+| 1 | 26.4 µs (KS=2) | **25.7 µs (KS=1)** | x1.04 |
+| 8 | 32.7 µs (KS=2) | **28.9 µs (KS=1)** | x1.13 |
+| 16 | 40.8 µs (KS=2) | **35.0 µs (KS=1)** | x1.17 |
+
+Layer time (fused gate+up + separate down, all KS=1): **40.9 µs at rows=1** (from 42.6) and **64.8 µs at
+rows=16** (from 72.6), in 2 gemm launches per layer instead of 3.
+
+**The mechanism is the interesting part, because it unifies E25 and E29:** *fusion and split-K are substitutes
+for the same resource — parallelism.* The device reports ~2048 hardware thread slots; a gate launch at KS=1 is
+`tn·KS·2·E = 800` threads, 39 % of capacity, so two separate launches run half-idle. Fusing them yields 1600
+threads and near-full occupancy — worth 49 %. Once each launch already fills the machine (KS=2 ⇒ 1600 threads),
+fusing buys nothing and leaves only its cost: two independent weight streams interleaved, measuring +7 %.
+Hence the fused kernel's optimum *flips to KS=1*, and the engine rule is conditional rather than absolute:
+
+```
+if tiles_this_launch * KS * 2 * E < ~0.6 x HW_THREADS:  fuse projections, set KS = 1
+else:                                                   keep launches separate, tune KS
+```
+
+with `HW_THREADS` read at startup (rev J already queries it for `DPAS_EPT`). This also revises the E29 lesson:
+the register file bounds row state, but **grid-level** fusion sidesteps it entirely — which is precisely why it
+wins where row bucketing lost.
+
+Full sweep (nine configurations, ks 1/2/4 × rows 1/8/16), the two bugs this surfaced (a meta row-count override
+that caused an OOB write into the *other* projection's output, and a duplicated tile-permutation that left the
+second projection's weights untransposed), and the E25b/E25c follow-ups (fuse the two combines; try all three
+projections in one launch) are in `out_e25_fuse.txt`.
 
 ## E29 spec: the shared-stream row-bucket kernel — **superseded by the RESULT above; kept because the reasoning was sound and the failure is instructive**
 

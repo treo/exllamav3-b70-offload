@@ -205,6 +205,11 @@ struct Launch
     const uint32_t *W = nullptr;    // trellis, [e][kt][nt] tiles of 8K dwords, each TRANSPOSED to [K][8]
     const uint32_t *XA = nullptr;   // activation tiles [kt][kb][rpad][32 bytes], x replicated 4x along K
     int32_t *PART = nullptr;        // [ks][sub][e][rpad][n]
+    // E25a: gate+up in ONE launch. A thread still touches exactly one projection, so nothing about the
+    // register bill changes (the lesson from E29, where paying it twice killed the idea). Null/0 = no fusion.
+    const uint32_t *W2 = nullptr;
+    int32_t *PART2 = nullptr;
+    int tn2 = 0;
     Meta m;
     int KS = 8, EPT = 1;            // k-slices; experts per thread
     int mode = MODE_ALL;
@@ -239,11 +244,14 @@ static void submit(const Launch &L)
     const int tps = tk / KS;                  // trellis tiles per k-slice
     const int per_sg = tps / 2;               // tiles per thread and expert (main() enforces even halves)
     const int NEG = (E + EPT - 1) / EPT;      // expert groups
-    const size_t threads = (size_t)tn * KS * 2 * NEG;
+    const int TN = tn + L.tn2;                // fused grid spans both projections' column tiles
+    const size_t threads = (size_t)TN * KS * 2 * NEG;
     const int mode = L.mode;
     const uint32_t *W = L.W;
+    const uint32_t *W2 = L.W2;          // E25a second projection (null when not fused)
     const uint32_t *XA = L.XA;
     int32_t *PART = L.PART;
+    int32_t *PART2 = L.PART2;
     const int zero = L.zero;
 
     L.q->submit([&](sycl::handler &cgh)
@@ -254,7 +262,10 @@ static void submit(const Launch &L)
             const int gid = (int)it.get_global_id(0);
             const int sub = gid & 1;
             int rest = gid >> 1;
-            const int nt = rest % tn; rest /= tn;
+            const int ntx = rest % TN; rest /= TN;
+            const uint32_t *Ws = ntx < tn ? W : W2;      // which projection this thread serves
+            int32_t *Ps = ntx < tn ? PART : PART2;
+            const int nt = ntx < tn ? ntx : ntx - tn;
             const int ks = rest % KS;
             const int eg = rest / KS;
             const int e0 = eg * EPT;
@@ -293,7 +304,7 @@ static void submit(const Launch &L)
             const size_t estride = (size_t)tk * tn * NW - (size_t)(ntile - 1) * kstride; // last kt -> next expert
             const size_t tbase = band ? (nt / band) * (tk * band) + (size_t)kt0 * band + (nt % band)
                                       : (size_t)kt0 * tn + nt;
-            const uint32_t *fp = W + ((size_t)e0 * tk * tn + tbase) * NW;
+            const uint32_t *fp = Ws + ((size_t)e0 * tk * tn + tbase) * NW;
             int fe = 0, fti = 0;                      // next tile to fetch
             auto fetch = [&](simd<uint32_t, XW> &d) SYCL_ESIMD_FUNCTION
             {
@@ -365,7 +376,7 @@ static void submit(const Launch &L)
 #pragma unroll
                 for (int b = 0; b < BKT; ++b)
                 {
-                    int32_t *Pb = PART + (size_t)b * PBUCK;
+                    int32_t *Pb = Ps + (size_t)b * PBUCK;
                     int32_t *P = Pb + ((((size_t)ks * 2 + sub) * E + e) * RPAD) * (size_t)n + (size_t)nt * NCOL;
 #pragma unroll
                     for (int f = 0; f < NF; ++f)
@@ -456,6 +467,22 @@ static void dispatch_k(int K, int mr, int nf, const Launch &L, std::integer_sequ
 {
     const bool hit = ((K == K_MIN + I ? (submit_k<K_MIN + I>(mr, nf, L), true) : false) || ...);
     if (!hit) { fprintf(stderr, "no kernel for K %d\n", K); exit(2); }
+}
+
+// E25a: rev J needs intra-tile transposed tiles, and the transform must live in ONE place - the fused path
+// initially uploaded the second projection's weights raw and produced garbage for it (while gate stayed
+// bit-exact), which is how a missing permutation masqueraded as a broken fused kernel.
+static void permute_tiles(const std::vector<char> &raw, uint32_t *dst, size_t ntiles, int K)
+{
+    const int NW = 8 * K;
+    const uint32_t *src = (const uint32_t *)raw.data();
+#ifdef DPAS_STAGED_LAYOUT
+    memcpy(dst, src, ntiles * NW * 4);              // already staged in the B70 order
+#else
+    for (size_t t = 0; t < ntiles; ++t)
+        for (int q = 0; q < 8; ++q)
+            for (int i = 0; i < K; ++i) dst[t * NW + i * 8 + q] = src[t * NW + q * K + i];
+#endif
 }
 
 static void combine(sycl::queue &q, const int32_t *PART, const float *Q, const int32_t *SX8,
@@ -580,16 +607,7 @@ int main(int argc, char **argv)
     // 8*(w%bits) + w/bits - byte-identical to the map below (verified on /tmp/gemv_dpE10: 1.536M dwords).
     // So the B70 can consume the CPU's staged bytes verbatim; this build is how that claim is tested.
     std::vector<uint32_t> hW(ntiles * NW);
-#ifdef DPAS_STAGED_LAYOUT
-    memcpy(hW.data(), wbuf.data(), ntiles * NW * 4);
-#else
-    {
-        const uint32_t *src = (const uint32_t *)wbuf.data();
-        for (size_t t = 0; t < ntiles; ++t)
-            for (int q = 0; q < 8; ++q)
-                for (int i = 0; i < K; ++i) hW[t * NW + i * 8 + q] = src[t * NW + q * K + i];
-    }
-#endif
+    permute_tiles(wbuf, hW.data(), ntiles, K);
 
     // Activation tiles: XA[kt][kb][row][4*w + b] = x8[row][kt*16 + kb*8 + w], row < RPAD (rows >= R repeat
     // R-1), w = 0..7, b = 0..3 - so each (tile, byte-block, DPAS) A operand is one contiguous run.
@@ -865,6 +883,97 @@ int main(int argc, char **argv)
         }
         printf("SHARED %d buckets x rows %d = rows %d (E %d, ks %d, M %dx%d): %8.1f us\n",
                SH, RB, SH * RB, m.E, KS, MR, NF, shb * 1e6);
+    }
+
+    // --- FUSE_DIR=<dir>: E25a, gate+up in ONE launch ----------------------------------------------
+    // The saving on offer is fixed cost, not traffic: gate and up read different weights, so nothing of the
+    // weight stream is shared. What IS shared is the launch (E16-style per-launch cost, and DPAS_FLOOR measured
+    // ~7.8 us per projection of launch+setup+combine at rows=1) and the activation tiles in L2 (verified: the
+    // x8/q/sx8 files for the two projections are byte-identical - same input). A thread still serves exactly one
+    // projection, so the accumulator bill is unchanged - that is what E29 says it costs to double it.
+    if (const char *fd = getenv("FUSE_DIR"))
+    {
+        Meta m2 = load_meta(fd);
+        // The case file's meta carries the row count it was dumped with (e.g. 64); the run's row count comes
+        // from the CLI, exactly as for the primary meta. Without this override, combine() sized its output by
+        // m2.R and wrote E*64*n floats into an E*16*n buffer - an OOB write that also corrupted the GATE
+        // output, which is how a wrong second tensor masqueraded as "the fused kernel is broken".
+        if (rows_arg > 0) m2.R = rows_arg;
+        if (m2.E != m.E || m2.tk != m.tk || m2.tn != m.tn || (int)m2.K != K || m2.n != m.n || m2.R != m.R)
+        { fprintf(stderr, "FUSE_DIR shape differs from the primary case; fusion needs identical tiling\n"); return 2; }
+        std::vector<char> w2 = slurp(std::string(fd) + "/weights.bin");
+        const size_t wb = (size_t)m.E * m.tk * m.tn * NW * 4;
+        if (w2.size() != wb) { fprintf(stderr, "fuse weights: %zu bytes, expected %zu\n", w2.size(), wb); return 2; }
+        const size_t pb = (size_t)KS * 2 * m.E * RPAD * m.n * 4 * DPAS_BKT;
+        uint32_t *W2 = (uint32_t *)sycl::malloc_device(wb, q);
+        std::vector<uint32_t> hW2(wb / 4);
+        permute_tiles(w2, hW2.data(), (size_t)m.E * m.tk * m.tn, K);   // same intra-tile transpose as the primary
+        int32_t *PART2 = (int32_t *)sycl::malloc_device(pb, q);
+        float *Y2 = (float *)sycl::malloc_device((size_t)m.E * m.R * m.n * 4, q);
+        q.memcpy(W2, hW2.data(), wb); q.memset(PART2, 0, pb); q.memset(Y2, 0, (size_t)m.E * m.R * m.n * 4);
+        q.wait();
+
+        Launch Lg = L;                                   // gate only
+        Launch Lu = L; Lu.W = W2; Lu.PART = PART2;       // up only
+        Launch Lf = L; Lf.W2 = W2; Lf.PART2 = PART2; Lf.tn2 = m.tn;   // both, one launch
+        auto disp = [&](const Launch &X)
+        { dispatch_k(K, MR, NF, X, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{}); };
+        auto sep = [&]
+        {
+            disp(Lg);                    combine(q, PART,  Q, SX8, Y,  m,  KS, RPAD);
+            disp(Lu);                    combine(q, PART2, Q, SX8, Y2, m2, KS, RPAD);
+        };
+        auto fus = [&]
+        {
+            disp(Lf);
+            combine(q, PART,  Q, SX8, Y,  m,  KS, RPAD);
+            combine(q, PART2, Q, SX8, Y2, m2, KS, RPAD);
+        };
+        auto burst = [&](auto &f)
+        {
+            double bt = 1e30;
+            for (int w = 0; w < 2; ++w) { f(); f(); f(); } q.wait();
+            for (int r = 0; r < 5; ++r)
+            {
+                auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < BURST; ++i) f();
+                q.wait();
+                bt = std::min(bt, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / BURST);
+            }
+            return bt;
+        };
+        const double WS = WARM_S > 0.0 ? WARM_S : 3.0;   // ramp on the fused schedule itself before timing
+        const bool NOFUSED = getenv("FUSE_NOFUSED") != nullptr;   // bisect aid: never launch the fused kernel
+        auto tw0 = std::chrono::steady_clock::now();
+        do { sep(); if (!NOFUSED) fus(); } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tw0).count() < WS);
+        q.wait();
+        // Debug aid: capture each schedule's outputs separately, so a mismatch localises the bug (fused-vs-
+        // separate diff) instead of only telling us one of them disagrees with y_ref.
+        auto snap = [&](const char *tag2)
+        {
+            std::vector<float> a((size_t)m.E * m.R * m.n), b((size_t)m.E * m.R * m.n);
+            q.memcpy(a.data(), Y, a.size() * 4); q.memcpy(b.data(), Y2, b.size() * 4); q.wait();
+            char path[512];
+            snprintf(path, sizeof path, "%s/y_dbg_%s_gate_r%d.bin", dir.c_str(), tag2, m.R);
+            FILE *fa = fopen(path, "wb"); if (fa) { fwrite(a.data(), 4, a.size(), fa); fclose(fa); }
+            snprintf(path, sizeof path, "%s/y_dbg_%s_up_r%d.bin", dir.c_str(), tag2, m.R);
+            FILE *fb = fopen(path, "wb"); if (fb) { fwrite(b.data(), 4, b.size(), fb); fclose(fb); }
+        };
+        sep(); snap("sep");          // run the trusted schedule last so its buffers hold its own results
+        if (!NOFUSED) { fus(); snap("fus"); }
+        double ts = 1e30, tf = 1e30;                     // interleave the two schedules round by round
+        for (int r = 0; r < 4; ++r) { ts = std::min(ts, burst(sep)); if (!NOFUSED) tf = std::min(tf, burst(fus)); }
+        std::vector<float> yg((size_t)m.E * m.R * m.n), yu((size_t)m.E * m.R * m.n);
+        q.memcpy(yg.data(), Y, yg.size() * 4); q.memcpy(yu.data(), Y2, yu.size() * 4); q.wait();
+        {
+            char path[512];
+            snprintf(path, sizeof path, "%s/y_dev_revi_f1_r%d.bin", dir.c_str(), m.R);
+            FILE *f1 = fopen(path, "wb"); if (f1) { fwrite(yg.data(), 4, yg.size(), f1); fclose(f1); }
+            snprintf(path, sizeof path, "%s/y_dev_revi_f2_r%d.bin", dir.c_str(), m.R);
+            FILE *f2 = fopen(path, "wb"); if (f2) { fwrite(yu.data(), 4, yu.size(), f2); fclose(f2); }
+        }
+        printf("FUSE gate+up (E %d, rows %d, ks %d): two launches %7.1f us   one launch %7.1f us   -> %+.1f us  (x%.3f)\n",
+               m.E, m.R, KS, ts * 1e6, tf * 1e6, (tf - ts) * 1e6, ts / tf);
     }
 
     std::vector<float> y((size_t)m.E * m.R * m.n);

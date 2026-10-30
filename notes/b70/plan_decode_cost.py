@@ -87,6 +87,34 @@ DPAS_TRANSPOSED = {      # us per (expert, gate/up projection); rows=2 interpola
     16: 2.02,
 }
 DPAS_TRANSPOSED_DOWN_FACTOR = {1: 1.11, 2: 1.20, 4: 1.29, 8: 1.38, 16: 1.51}
+
+# Sixth family, and the fastest at every row count: E25a - gate+up in ONE launch at KS=1, down separate at
+# KS=1. Grid-level fusion costs no extra registers (a thread still serves one projection), so unlike E29's row
+# bucketing it does not have to be paid for in prefetch depth. Measured per (expert, gate+up PAIR) and per
+# (expert, down):
+# Source: notes/b70/out_e25_fuse.txt (fused, ks1) and out_dpas.txt (down, ks1).
+DPAS_FUSE_GU = {1: 2.57, 2: 2.59, 4: 2.56, 8: 2.87, 16: 3.50}
+DPAS_FUSE_DOWN = {1: 1.52, 2: 1.62, 4: 1.84, 8: 2.29, 16: 2.98}
+HW_THREADS = 2048        # B70 slots reported by the probe banner (32 Xe cores x 8 vector engines x 8 threads)
+
+
+def should_fuse(tn, KS, E, hw_threads=HW_THREADS):
+    """E25/D8: fuse projections only when the separate launches under-fill the device.
+
+    Fusion and split-K are substitutes for the same resource (parallelism): a gate launch is
+    tn*KS*2*E threads, and at KS=1 that is 800 of ~2048 slots, where fusing gate+up wins x1.49-1.66. Once a
+    single launch already fills the machine (KS>=2 here), fusion buys no occupancy and only pays the cost of
+    interleaving two independent weight streams (+7 %). The 0.6 factor is the measured crossover region, not
+    a derived constant - refine it when a second model geometry is swept.
+    """
+    return tn * KS * 2 * E < 0.6 * hw_threads
+
+
+def layer_us_fused(picks, rows, scale=1.0):
+    """Per MoE layer time with the E25a schedule: gate+up fused (KS=1) + down separate (KS=1)."""
+    if rows not in DPAS_FUSE_GU:
+        raise ValueError(f"rows={rows} outside the fused measurement set {sorted(DPAS_FUSE_GU)}")
+    return (DPAS_FUSE_GU[rows] + DPAS_FUSE_DOWN[rows]) * picks * scale
 # down_proj measures a little dearer than gate/up at the same weight count (transposed geometry, tn=160):
 DPAS_DOWN_FACTOR = {1: 1.15, 2: 1.16, 4: 1.14, 8: 1.26, 16: 1.28}
 DP4A_DOWN_FACTOR = {r: 1.0 for r in DP4A}      # dp4a is within noise of gate at every rows measured
@@ -189,7 +217,7 @@ def floor_us(picks, expert_bytes, scale=1.0):
 def main():
     print(__doc__.split("Usage:")[0].strip())
     print(f"\ncost spread note: {SPREAD}\n")
-    print(f"{'rows':>5} {'dp4a':>9} {'rev G+X':>9} {'rev H+X':>9} {'rev I':>9} {'rev J':>9} {'dispatch':>13}")
+    print(f"{'rows':>5} {'dp4a':>9} {'rev G+X':>9} {'rev H+X':>9} {'rev I':>9} {'rev J':>9} {'E25a':>9} {'dispatch':>13}")
     for r in MEASURED_ROWS:
         a = sum(per_proj_us(r, "dp4a", p) for p in PROJS)
         b = sum(per_proj_us(r, "dpas", p) for p in PROJS)
@@ -197,7 +225,10 @@ def main():
         i = sum(per_proj_us(r, "dpas_gather", p) for p in PROJS)
         j = sum(per_proj_us(r, "dpas_transposed", p) for p in PROJS)
         win = min((a, "dp4a"), (b, "rev G+X"), (h, "rev H+X"), (i, "rev I"), (j, "rev J"))
-        print(f"{r:5d} {a:>9.2f} {b:>9.2f} {h:>9.2f} {i:>9.2f} {j:>9.2f} {win[1]:>13}")
+        fu = sum(per_proj_us(r, "dpas_transposed", p) for p in PROJS)
+    la = layer_us_fused(1, r)
+    note = f"   fused gate+up + down = x{fu / la:.2f} vs three separate launches" if la < fu else ""
+    print(f"{r:5d} {a:>9.2f} {b:>9.2f} {h:>9.2f} {i:>9.2f} {j:>9.2f} {la:>9.2f} {win[1]:>13}{note}")
     print("\nOne kernel wins at every measured batch now: rev J (transposed tiles) beats rev I by 1.27-1.46x and\n"
           "dp4a by ~8x at rows=16. Dispatch is a single family, with one caveat that is a design decision rather\n"
           "than a tuning knob: rev J needs the device copy of the weights intra-tile permuted (dword q*K+i ->\n"
@@ -207,6 +238,10 @@ def main():
           "literally the fallback is dpas_gather (rev I) at +27-46%, still one kernel; dp4a is the only option\n"
           "where no permutation is possible at all. Revs G/H carry no advantage now and remain for provenance.\n"
           "Rows=2 is interpolated; nothing here extrapolates past the measured set 1/2/4/8/16.")
+    print("\nE25a (last column): gate+up in ONE launch at KS=1 plus down separate. Faster than three separate\n"
+          "projections at every measured rows (x1.06 at rows=1, x1.17 at rows=16) and it halves the gemm launch\n"
+          "count - but it is CONDITIONAL (D8): it wins because the separate launches under-fill ~2048 hardware\n"
+          "thread slots. Use should_fuse(tn, KS, E); once one launch fills the machine, fusion costs ~7 %.")
     print("\nBinding constraint now: rev J runs the gate projection at 437 GB/s effective (5.86 MiB in 14.0 us)\n"
           "against measured ceilings of 484 GB/s (stream slope) and 674 GB/s (copy peak) - ~90% of the\n"
           "achievable streaming rate, so decode is bandwidth-bound in the sense the earliest design notes\n"
