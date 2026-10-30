@@ -88,6 +88,53 @@ feed the existing kernel intra-tile-transposed bytes with adjusted extraction ta
 the current kernel's output, and measure ns/weight plus cold-expert throughput. If it is under ~5 %, native
 stays primary and the permuted form remains a device-resident representation.
 
+## D3-alt (open, and better than D3 if the CPU bears it): ONE staged layout, copied verbatim to the B70
+
+The proposal worth investigating is narrower and stronger than "make the permuted form the file format": keep
+the checkpoint as it is, and make the **in-RAM staged copy** the B70's permuted-plus-swizzled form. Then
+
+- the B70 receives a **verbatim copy** — the device-side permute disappears, along with its 3.46 ms per 512 MiB
+  and its per-admit 226 µs;
+- there is **one** staged layout instead of a device-resident special case, so the staging path, the footprint
+  arithmetic and the layout tests all speak about one thing;
+- the 3090 path still unpacks from native order, it just starts from a different base — and it already runs
+  exactly such a pass (`moe_unswizzle_trellis`: a read + write at VRAM bandwidth), so this is a change of index
+  arithmetic inside an existing kernel, not a new pass;
+- the parent's repack pass already exists (it produces the tile-order swizzle), so the intra-tile transpose is
+  extra work in a pass that is already writing the bytes — not an additional pass.
+
+Nothing about the on-disk format, `expert_bytes`, capacity thresholds, or oracle provenance changes: Gate A
+still runs from native checkpoint bytes, with any permutation applied inside the harness rather than in the
+references.
+
+Evidence on the CPU's sign, from reading the extraction path rather than guessing: the CPU assembles its
+`vpdpbusd` operands the same *shape* the GPU does — columns across lanes, per-half funnel shifts ("cols 0-7 use
+`s0`, cols 8-15 use `s1`"; "a row's 8-column half can draw…"), with the cross-column collection done by
+compile-time `vpermt2var` index tables. The transposed layout is exactly what makes that collection contiguous,
+so **neutral-to-positive is the expectation**; the counter-argument is that the CPU already gets the
+q-independence the transpose gives the GPU (its shift counts are per column-half, not per column), and it is
+cold-DRAM-bound by construction, so the shuffle it deletes may not be on its critical path. Magnitude is
+therefore an open measurement, not a foregone conclusion in either direction.
+
+What has to be true before D3-alt can replace D3, in order of cost to check:
+
+1. **CPU throughput is not hurt** (the experiment above; run it first, because it gates everything else).
+2. **The B70 kernel accepts tile-grouped (swizzled) tile order**, not just checkpoint order. Intra-tile it is
+   already right; the tile index map changes from `e*tk*tn + …` to a group-major one, which is addressing only —
+   but revs J/K currently permute tiles *inside* `main()` starting from native order, so a staged-order case
+   directory and a matching gate entry are needed before "verbatim copy works" can be claimed rather than
+   assumed.
+3. **CUDA's unswizzle is retargeted and re-validated** against the 3090's existing numerics (that path has its
+   own acceptance history; it is not ours to break casually).
+4. A **version marker** on the staged form, so a parent that does not swizzle (or swizzles with group 2 on the
+   AVX2 tier — `exl3_moe_cpu_swizzle_group` already returns different groups per rate/ISA) cannot hand the B70
+   bytes in a layout it will silently misread. This is the one item with a correctness-teeth risk: today the
+   group depends on ISA and rate, so "the staged layout" is not a single constant, and the B70 side must be
+told which one it got.
+
+Until 1-2 are measured, D3 (device-side permute at admit) remains the implemented answer — it is cheap, it is
+already priced, and it does not depend on any of the above.
+
 ## Verification consequence of D3 (new gate needed)
 
 Device bytes no longer match checkpoint bytes, so "the staging path is correct" is no longer something Gate A
