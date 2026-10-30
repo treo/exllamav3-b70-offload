@@ -64,11 +64,12 @@ REVISED DECISION (supersedes the wording in D10)
   incidental cost of my first mapping; the *granularity* is the inherent cost.
 
   What would change the answer: a geometry where experts-per-launch is large (E >= ~32 so E*64 items >= 2048) AND
-  the device is not fill-limited - i.e. high rows, where the kernel is throughput-bound rather than
-  latency-bound. At rows=16 the fill penalty is visibly milder (33.6 -> 34.9 for wg=64) and each item carries
-  more work, so a group-scoped three-projection kernel is worth revisiting FIRST at large rows, not at rows=1.
-  That is a concrete, cheaper place to test the idea than a full prototype, and it is the only follow-up this
-  file recommends.
+  the device is not fill-limited. Checked against data already in hand rather than left as an invitation: at
+  rows=16 the fill penalty is smaller but still dominant - the same gate+up work costs 3.37 us/pair at 1600 items
+  and 4.58 us/pair at 800 (out_ks_grid.txt), i.e. +36% instead of the +62% at rows=1, which on a ~50 us layer is
+  ~18 us lost to save ~6 us of launches. So route 1 is negative at rows=1 AND rows=16, and the regime where it
+  could break even (fill no longer binding) is beyond the 16-row bucket the engine splits on anyway - i.e. not a
+  regime this design will operate in. E25c is closed, not deferred.
 
 Reproduce:
     icpx -fsycl -O2 -o /tmp/pg probe_groupfused.cpp && /tmp/pg 2048 1 && /tmp/pg 2048 16

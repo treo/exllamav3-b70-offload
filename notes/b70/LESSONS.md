@@ -1185,8 +1185,10 @@ nothing that is the sole instance of a measurement.
     first imagined requires a grid-wide barrier" are different claims and only the second was earned. (2) Look for
     the *second* limiter before publishing the first - the honest answer was never the barrier, it was concurrency,
     which this chapter had already found binding twice (D4, E29) and still did not get consulted first. (3) A
-    corrected rejection is worth more than an untested one: the real reason points at where the idea could still
-    work (large rows, where fill matters less), which the wrong reason had quietly closed off.
+    corrected rejection is worth more than an untested one - but check the new optimism against data already in
+    hand before publishing it: I wrote "revisit at large rows, where fill matters less", and two lines of
+    out_ks_grid.txt showed that at rows=16 fill still costs +36% (~18 us) against ~6 us saved, i.e. the idea is
+    closed, not deferred. A corrected reason is only better than a wrong one if it gets the same scrutiny.
 
 
 
