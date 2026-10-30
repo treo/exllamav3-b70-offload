@@ -232,6 +232,64 @@ KS_FUSED_GLM = {
 }
 TABLES = {"qwen38": (KS_SEP, KS_FUSED), "glm": (KS_SEP_GLM, KS_FUSED_GLM)}
 
+# rows=2 and rows=4, measured across the whole E ladder in BOTH geometries (134 cells, every one bit-exact;
+# anchors 19.0-19.4 except one cell at 19.7 - E=80 rows=2 KS=2 - whose within-cell ratios remain usable).
+# These two row counts were the reason the joint dispatch was inert: every row of plan_operating_point's grid
+# resolves to rows=2, so the joint table raised and the planner silently fell back to the per-projection
+# tables. The values behave as the cost-per-weight model predicts (E=10 rows=2 KS=2 = 1.170, identical to
+# rows=1's 1.170 to a quarter of a percent; rows=4 +5%) and sit monotonically between the rows=1 and rows=8
+# rungs. Source: out_rows_2_4.txt.
+KS_SEP_ROWS24 = {2: {2: {1: 8.275, 2: 5.125, 4: 3.675, 8: 3.425}, 4: {1: 8.775, 2: 5.425, 4: 3.975, 8: 3.9}},
+ 4: {2: {1: 4.237, 2: 2.612, 4: 2.013, 8: 2.575}, 4: {1: 4.425, 2: 2.725, 4: 2.062, 8: 2.713}},
+ 8: {2: {1: 2.131, 2: 1.4, 4: 1.738, 8: 1.7}, 4: {1: 2.263, 2: 1.462, 4: 1.831, 8: 1.744}},
+ 10: {2: {1: 1.725, 2: 1.17, 4: 1.37, 8: 1.465}, 4: {1: 1.83, 2: 1.225, 4: 1.485, 8: 1.61}},
+ 12: {2: {1: 1.471, 2: 1.075, 4: 1.175, 8: 1.371}, 4: {1: 1.558, 2: 1.137, 4: 1.25, 8: 1.446}},
+ 16: {2: {1: 1.178, 2: 1.403, 4: 1.203, 8: 1.241}, 4: {1: 1.244, 2: 1.513, 4: 1.334, 8: 1.462}},
+ 20: {2: {1: 1.0, 2: 1.125, 4: 1.193, 8: 1.24}, 4: {1: 1.068, 2: 1.232, 4: 1.33, 8: 1.445}},
+ 24: {2: {1: 0.925, 2: 0.967, 4: 1.037, 8: 1.183}, 4: {1: 1.0, 2: 1.065, 4: 1.165, 8: 1.358}},
+ 32: {2: {1: 1.277, 2: 1.044, 4: 1.02, 8: 1.308}, 4: {1: 1.384, 2: 1.156, 4: 1.245, 8: 1.483}},
+ 48: {2: {1: 1.051, 2: 1.062, 4: 1.233, 8: 1.363}, 4: {1: 1.101, 2: 1.223, 4: 1.35, 8: 1.683}},
+ 64: {2: {1: 1.259, 2: 1.252, 4: 1.352, 8: 1.475}, 4: {1: 1.325, 2: 1.33, 4: 1.543, 8: 1.83}},
+ 80: {2: {1: 1.354, 2: 1.336, 4: 1.401, 8: 1.556}, 4: {1: 1.436, 2: 1.456, 4: 1.609, 8: 1.886}},
+ 96: {2: {1: 1.233, 2: 1.32, 4: 1.387, 8: 1.539}, 4: {1: 1.317, 2: 1.43, 4: 1.595, 8: 1.897}}}
+
+KS_FUSED_ROWS24 = {2: {2: {1: 8.95, 2: 5.9, 4: 4.9, 8: 5.6}, 4: {1: 9.6, 2: 6.3, 4: 5.15, 8: 6.6}},
+ 4: {2: {1: 4.65, 2: 3.175, 4: 4.0, 8: 3.95}, 4: {1: 4.9, 2: 3.325, 4: 4.1, 8: 4.025}},
+ 8: {2: {1: 2.487, 2: 3.062, 4: 2.612, 8: 2.737}, 4: {1: 2.612, 2: 3.15, 4: 2.737, 8: 2.9}},
+ 10: {2: {1: 2.07, 2: 2.4, 4: 2.48, 8: 2.52}, 4: {1: 2.23, 2: 2.51, 4: 2.67, 8: 2.96}},
+ 12: {2: {1: 1.958, 2: 2.075, 4: 2.2, 8: 2.533}, 4: {1: 2.067, 2: 2.2, 4: 2.367, 8: 2.825}},
+ 16: {2: {1: 2.65, 2: 2.225, 4: 2.138, 8: 2.45}, 4: {1: 2.788, 2: 2.425, 4: 2.419, 8: 3.069}},
+ 20: {2: {1: 2.265, 2: 2.31, 4: 2.285, 8: 2.64}, 4: {1: 2.375, 2: 2.475, 4: 2.6, 8: 3.105}},
+ 24: {2: {1: 2.137, 2: 2.208, 4: 2.462, 8: 2.604}, 4: {1: 2.271, 2: 2.454, 4: 2.654, 8: 3.183}},
+ 32: {2: {1: 2.547, 2: 2.591, 4: 2.778, 8: 3.006}, 4: {1: 2.7, 2: 2.747, 4: 3.163, 8: 3.669}},
+ 48: {2: {1: 2.456, 2: 2.644, 4: 2.779, 8: 3.05}, 4: {1: 2.633, 2: 2.833, 4: 3.171, 8: 3.681}},
+ 64: {2: {1: 2.456, 2: 2.594, 4: 2.773, 8: 3.062}, 4: {1: 2.638, 2: 2.83, 4: 3.108, 8: 3.789}},
+ 80: {2: {1: 2.546, 2: 2.583, 4: 2.721, 8: 3.058}, 4: {1: 2.739, 2: 2.798, 4: 3.126, 8: 3.814}},
+ 96: {2: {1: 2.506, 2: 2.533, 4: 2.698, 8: 3.022}, 4: {1: 2.69, 2: 2.807, 4: 3.098, 8: 3.938}}}
+
+KS_SEP_GLM_ROWS24 = {4: {2: {1: 6.55, 2: 4.763, 4: 5.075}, 4: {1: 6.787, 2: 5.112, 4: 5.412}},
+ 6: {2: {1: 4.883, 2: 5.525, 4: 4.825}, 4: {1: 5.292, 2: 6.033, 4: 5.367}},
+ 10: {2: {1: 6.555, 2: 5.785, 4: 6.165}, 4: {1: 7.035, 2: 6.46, 4: 6.54}},
+ 16: {2: {1: 6.094, 2: 6.278, 4: 6.709}, 4: {1: 6.944, 2: 6.75, 4: 7.331}},
+ 32: {2: {1: 6.333, 2: 6.316, 4: 6.659}, 4: {1: 7.262, 2: 6.763, 4: 7.228}}}
+
+KS_FUSED_GLM_ROWS24 = {4: {2: {1: 10.6, 2: 10.875, 4: 11.4}, 4: {1: 10.85, 2: 11.15, 4: 11.775}},
+ 6: {2: {1: 13.05, 2: 12.383, 4: 13.333}, 4: {1: 13.667, 2: 13.183, 4: 14.05}},
+ 10: {2: {1: 13.33, 2: 12.66, 4: 13.46}, 4: {1: 14.34, 2: 13.53, 4: 14.77}},
+ 16: {2: {1: 12.375, 2: 12.394, 4: 13.025}, 4: {1: 13.856, 2: 13.35, 4: 14.269}},
+ 32: {2: {1: 12.597, 2: 12.456, 4: 12.809}, 4: {1: 14.312, 2: 13.409, 4: 13.938}}}
+
+for _e, _v in KS_SEP_ROWS24.items():
+    KS_SEP[_e].update(_v)
+for _e, _v in KS_FUSED_ROWS24.items():
+    KS_FUSED[_e].update(_v)
+for _e, _v in KS_SEP_GLM_ROWS24.items():
+    KS_SEP_GLM[_e].update(_v)
+for _e, _v in KS_FUSED_GLM_ROWS24.items():
+    KS_FUSED_GLM[_e].update(_v)
+del _e, _v
+
+
 # GLM's down_proj is the TRANSPOSED orientation (k=2048, n=4096, tiles_n=256) against the gate's (k=4096,
 # n=2048, tiles_n=128) at identical bytes, so its cost is not the gate's. Measured ratio down/gate per
 # (rows, KS) at E=10 - probe_dpas9 on /tmp/glm_e10_down, rc checked, 3 reps, WARM_S=2:
@@ -239,8 +297,10 @@ TABLES = {"qwen38": (KS_SEP, KS_FUSED), "glm": (KS_SEP_GLM, KS_FUSED_GLM)}
 # For comparison Qwen's DPAS_DOWN_FACTOR is 1.11 / 1.38 / 1.51 (rows 1/8/16, KS collapsed): GLM's down is
 # CHEAPER than its gate at KS=1 and only rises above it when split-K stretches the taller, narrower tile.
 DOWN_RATIO_GLM = {1: {1: 0.853, 2: 0.972, 4: 1.101},
-                  8: {1: 0.940, 2: 1.038, 4: 1.296},
-                  16: {1: 0.846, 2: 1.168, 4: 1.557}}
+                  2: {1: 0.871, 2: 1.065, 4: 1.105},     # measured with rows=2/4 (out_rows_2_4.txt) rather
+                  4: {1: 0.927, 2: 1.015, 4: 1.193},     # than interpolated: a KeyError here once killed a
+                  8: {1: 0.940, 2: 1.038, 4: 1.296},     # planner run outright, which is the argument for
+                  16: {1: 0.846, 2: 1.168, 4: 1.557}}    # completing the grid instead of guessing in it
 
 
 DEVICE_L2_MIB = 24.0      # `devinfo` -> global cache (L2): 24.0 MiB
@@ -339,6 +399,11 @@ def selftest_launch():
     assert not best_launch(32, 1)[1] and best_launch(32, 1)[2] == 2, best_launch(32, 1)  # separate, KS=2
     assert best_launch(16, 1)[1], best_launch(16, 1)                                  # fused still wins at E=16
     assert not best_launch(24, 1)[1], best_launch(24, 1)                              # penalty band by E=24
+    # rows=2 is measurable now: at E=10 the fused KS=1 cell (2.070 us/pair, grid 1,600 = 78% of HW)
+    # beats the best separate pair (2 x 1.170 = 2.340) by 13% - the same fill logic as rows=1, with the
+    # extra row count pushing the separate family's optimum to KS=2.
+    _u2, _f2, _k2, _n2 = best_launch(10, 2)
+    assert _f2 and _k2 == 1 and abs(_u2 - 2.070) < 1e-9, (_u2, _f2, _k2, _n2)
     # The byte test must be INFORMATIONAL by default: passing bytes may add a note but must never change which
     # candidate wins (out_fusion_penalty_k.txt shows the sign near the band edges is not derivable from bytes).
     plain = best_launch(28, 1)[:3]
@@ -356,7 +421,10 @@ def selftest_launch():
             raise AssertionError(f"E={bad} should be refused (below the measured range)")
         except ValueError:
             pass
-    for bad in ((64, 2), (10, 2), (2, 4)):      # rows=2/4 were never measured at ANY E
+    # rows=2 and rows=4 are measured now (out_rows_2_4.txt), so these controls moved to row counts that
+    # still have no measurement at all - 3/5/6/7 sit inside the M=8 fragment boundary the tables refuse
+    # to interpolate across, which is the whole reason the set is discrete.
+    for bad in ((64, 3), (10, 3), (2, 5), (10, 6)):      # never measured at any E
         try:
             best_launch(*bad)
             raise AssertionError(f"E={bad[0]} rows={bad[1]} should be refused; that row count was never measured")

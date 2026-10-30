@@ -1225,6 +1225,24 @@ nothing that is the sole instance of a measurement.
     printed interface - and when an assertion fails on brand-new data, check the assertion before suspecting the
     data, because the data is the one thing in the commit that was just measured twice.
 
+67. **A rule that silently falls back is a rule that is not applied - and "the numbers did not change" is the
+    symptom, not the reassurance.** I wired the joint (fusion, split-K) dispatch into two planners, regenerated
+    the artifacts, and reported that **no planner number moved** - which I wrote up as evidence that the old
+    per-projection tables were already KS-optimal. Partly true, mostly false: `plan_operating_point.py` asks for
+    rows-per-expert, which at decode is 1.x and rounds to **rows=2**, a row count the joint tables had never
+    measured. So `best_launch()` raised, the caller's `except ValueError` set `j_us = None`, and every cell
+    quietly used the legacy path. The rule was inert in the grid while its footer cheerfully reported "joint
+    table consulted where a gate geometry is measured". What gave it away was an inconsistency I nearly
+    skimmed past: after adding GLM geometry, the b=1 *summary line* moved (124→83 µs/layer) but the b=1 *row* in
+    the table above it did not (129 both times) - two code paths, same inputs, disagreeing. Fixing the fallback
+    to print its reason, then measuring rows 2/4 (`out_rows_2_4.txt`), moved GLM b=1 129→85 and Qwen3.8 41→34
+    us/layer: the numbers HAD changed, they just hadn't been allowed to. Rules: (1) a caught exception that
+    selects a lesser model must say so on the record, every time it fires - silence is how a wiring bug survives
+    a commit and a review; (2) when a change produces no delta, first ask whether the changed path executed at
+    all (print the branch, or make the change produce a deliberate sentinel value) before writing up "no
+    decision flipped" as a finding; (3) two paths computing the same quantity must agree to the digit or be
+    reconciled in the artifact - a mismatch is a cheap, high-signal bug detector that only works if you look.
+
 63. **Recompute the statistic per unit; never collapse the distribution first.** The planners took `counts_for()`
     = *layer 0's* expert-selection array and treated it as "the routing distribution" for every batch-scaling
     number. A live trace showed how bad that proxy was (layer 0 of Qwen3.8@2.68 touched 289 of 512 experts in

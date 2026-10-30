@@ -1207,7 +1207,11 @@ answer goes the wrong way:
    is worth ~2–5 µs/layer and nothing more.
 5. **DPAS route R1 (fp16 B) vs R2 (u8 product bytes)** — depends on whether the card is ALU- or
    XMX-bound at the model's actual rows/expert, and on the undocumented byte order inside a DPAS
-   operand (confirm with the vectors first).
+   operand (confirm with the vectors first). Analysis as of the decode close-out, and the experiment
+   that settles it, are in [`b70-prefill.md`](b70-prefill.md): at the measured rows/expert (≈105 at
+   R=2048 on Qwen3.8) prefill is bandwidth-bound, so the routes share identical DRAM traffic and the
+   discriminator is dequant ALU at fixed traffic - a cheaper question than the 512-row sweep this row
+   used to demand.
 6. **Where the input transform belongs** (3090 in the issue kernel vs B70): the payload argument is
    only real if E5 shows the link as the prefill bottleneck; B′5 has to pass either way.
 7. **What serves `S_c` best on a machine with a B70 at all** — the CPU GEMV at 47.4 GB/s, streaming

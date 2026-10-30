@@ -1,107 +1,130 @@
-Expected decode throughput by quant and model - rebuilt on measured inputs, with two published claims retracted
-================================================================================================================
-Version 2 of this report. Version 1 was built on three inputs that this session measured and found wrong: the
-parent's per-layer cost (inherited as a ~250 us window, then bottom-up as 122 us, now **measured inside the engine
-at 141.9/195.6 us/layer** - out_engine_step.txt), the routing distribution (a stored cumulative profile that
-over-predicted batch spreading by ~2x - out_live_trace.txt), and two planner aggregation bugs that made a
-distribution out of one layer and then collapsed 48 layers back into one (LESSONS 63). Read the retractions in
-section 5 before quoting anything from version 1.
+Expected decode throughput by quant and model - rebuilt on measured inputs, with the retracted claims listed
+=============================================================================================================
+Version 3. Everything below is printed by the commands in the last section, on measured inputs:
+  * parent cost: **engine-measured** (out_engine_step.txt) - not the 122 us microbench floor, not the 259 us
+    window-calibrated figure, both of which are now known to be wrong in explained ways;
+  * routing: **live per-token traces** (out_live_trace.txt), aggregated per layer - the stored profile
+    over-predicted batch spreading by ~2x by b=32;
+  * dispatch: the joint (fusion, split-K) table at the row decode actually uses, which required rows 2/4 to be
+    measured (out_rows_2_4.txt). Before that, the rule was silently inert in this planner's grid and every
+    number here was ~15-35% too expensive (LESSONS 67).
 
-Instruments and inputs (every number below printed by one of these):
-    B70_PROFILE_DIR=$PWD/notes/b70/profiles/live python3 notes/b70/plan_concurrency.py    # engine parent + live routing
-    B70_PROFILE_DIR=$PWD/notes/b70/profiles/live python3 notes/b70/plan_parent_budget.py  # placement walls
-    python3 notes/bench_engine_step.py -m <ckpt> -mcs 256 -mct 15 -cs 8192 --ctx 4096 --tokens 48
-    python3 notes/bench_live_trace.py  -m <ckpt> -mcs 256 -mct 15 --decode 192
-Profiles: notes/b70/profiles/live/ holds the five traced Qwen3.8 quants (91,680 picks each) plus stored fallbacks
-for GLM/Qwen3.5/4.18; the planner prints which directory it used and marks every row whose parent level is not
-engine-measured with `=`, and every cell beyond b=1/ctx 4096 with `^` (shape from the calibrated curve).
+Reproduce:
+    cd notes/b70
+    B70_PROFILE_DIR=$PWD/profiles/live python3 plan_concurrency.py       # this report's tables
+    B70_PROFILE_DIR=$PWD/profiles/live python3 plan_operating_point.py   # per-layer curves, per-model dispatch
+    B70_PROFILE_DIR=$PWD/profiles/live python3 plan_parent_budget.py     # placement walls
+    python3 notes/bench_live_trace.py -m <ckpt> -mcs 384 -mct 15 --jobs N --decode 64   # the baselines
+Marks: `=` that profile's parent level falls back to the calibrated model (no engine measurement); `^` the cell
+is beyond the measured b=1/ctx 4096 point, so the level is anchored and the shape borrowed from the calibrated
+curve; `:J`/`:D` = which measured schedule the dispatch chose (joint / per-projection).
 
-1. WITH ONE B70 TAKING THE ROUTED EXPERTS (Qwen3.8, 48 layers, ctx 4096, b=1 measured; us/layer and tokens/s)
-  quant    b | parent   B70  CPU |    binds |      t/s
-  2.05     1 |    142    43    0 |   parent |      147        4 |    155   139    0 |  parent^ |      538
-           8 |    172   230    0 |   B70:D  |      726       16 |    207   366    0 |   B70:D  |      910
-          32 |    277   514    0 |   B70:D  |     1296       64 |    417   745    0 |   B70:J  |     1791
-  2.68     1 |    196    42    0 |   parent |      107        4 |    214   137    0 |  parent^ |      390
-           8 |    237   225    0 |  parent^ |      702       16 |    285   359    0 |   B70:D  |      929
-          32 |    381   503    0 |   B70:D  |     1325       64 |    572   728    0 |   B70:J  |     1831
-  4.05     1 |    259=   43    0 |  parent= |       80       16 |    378=  367    0 |  parent= |      882
-  5.05     1 |    260=   43    0 |  parent= |       80       32 |    506=  510    0 |   B70:D  |     1306
-  6.05     1 |    261=   43    1 |  parent= |       80       32 |    506=  511    1 |   B70:D  |     1305
-  (`=` profile has no engine measurement, so its parent level falls back to the calibrated model; `^` shape
-  extrapolated beyond b=1/ctx 4096.)
+1. WITH ONE B70 TAKING THE ROUTED EXPERTS (Qwen3.8, 48 layers, ctx 4096; us per layer per home, and tokens/s)
+    quant    b | parent    B70   CPU |     binds |      t/s
+    2.05     1 |    142      38    0 |    parent |      147
+    2.05     4 |    155     112    0 |   parent^ |      538
+    2.05     8 |    172     206    0 |     B70:J |      809
+    2.05    16 |    207     344    0 |     B70:J |      969
+    2.05    32 |    277     482    0 |     B70:J |     1382
+    2.05    64 |    417     745    0 |     B70:J |     1791
 
-2. AGAINST TODAY'S SHIPPING PATH, AT MATCHED BATCH (all numbers measured on this box)
-  Real generator, real text, converged placement profile, `-mct 15`, Qwen3.8@2.68 with `-mcs 384` (the smallest
-  split that loads in 24 GiB). Aggregate tokens/s over N concurrent sessions:
+    2.68     1 |    196      38    0 |    parent |      107
+    2.68     4 |    214     110    0 |   parent^ |      390
+    2.68     8 |    237     202    0 |   parent^ |      702
+    2.68    16 |    285     337    0 |     B70:J |      990
+    2.68    32 |    381     472    0 |     B70:J |     1413
+    2.68    64 |    572     728    0 |     B70:J |     1831
+
+    4.05     1 |   259=      39    0 |   parent= |       80
+    4.05     8 |   315=     207    0 |   parent= |      530
+    4.05    16 |   378=     344    0 |   parent= |      882
+    4.05    32 |   505=     482    0 |   parent= |     1320
+    4.05    64 |   758=     743    0 |   parent= |     1758
+
+    5.05     1 |   260=      39    0 |   parent= |       80
+    5.05    16 |   379=     342    0 |   parent= |      880
+    5.05    32 |   506=     479    0 |   parent= |     1319
+    5.05    64 |   759=     738    0 |   parent= |     1756
+
+    6.05     1 |   261=      39    1 |   parent= |       80
+    6.05     8 |   316=     206    1 |   parent= |      527
+    6.05    16 |   380=     342    1 |   parent= |      878
+    6.05    32 |   506=     479    1 |   parent= |     1317
+    6.05    64 |   760=     739    2 |   parent= |     1754
+  (b=2/b=4 rows for 4.05/5.05/6.05 are in out_concurrency.txt; the middle of each ladder is omitted only to keep
+  this readable. The CPU column is ~0 for every quant because live routing puts 99.8% of picks on the resident
+  set - which is precisely what the old profile got wrong.)
+
+2. AGAINST TODAY'S SHIPPING PATH, AT MATCHED BATCH (all measured on this box)
+  Qwen3.8@2.68, real generator, real text, converged placement, `-mct 15`, `-mcs 384` (smallest split that loads
+  in 24 GiB). Aggregate tokens/s over N concurrent sessions:
        b=1        b=2        b=4        b=8       b=16
-     58.3       33.2       33.3       32.5       33.1   tok/s  <- today: throughput FALLS 43% at b=2, then flat
-  Same shapes with the routed experts on one B70 (live routing, engine-anchored parent):
+     58.3       33.2       33.3       32.5       33.1   tok/s  <- today: falls 43% at b=2, then flat
+  Same shapes with the routed experts on one B70:
       b   parent    B70    binds        t/s     today    gain
-      1      196     42   parent        107      58.3   1.84x
-      2      202     78   parent^       207      33.2   6.23x
-      4      214    137   parent^       390      33.3  11.71x
-      8      237    225   parent^       702      32.5  21.60x
-     16      285    359   B70:D         929      33.1  28.07x
-  Why the gain grows so fast with batch: the concurrency measurement (out_engine_step.txt section 8) shows the
-  CPU home is already the constraint at one session, and out_live_trace.txt shows a second session makes each
-  step touch 84% more experts (union 9.9 -> 18.2 per layer) - work grows where capacity does not. The card's leg,
-  by contrast, stays under the parent's until b=16.
-  Three things this is NOT: (a) not a tuned-CPU-path comparison - `-mcs 384` is VRAM-forced, and the acceptance-era
-  ~100 tok/s figure was a shallower split on a model whose experts fit; (b) not valid for 4.05/5.05/6.05, whose
-  single-pass `-mcs 448` baselines (25.4/21.7/18.8 tok/s) are "this does not fit", not a home doing its job; (c)
-  not a b=1 claim in disguise - the b=1 gain is 1.84x, and everything above that is the concurrency story.
-  Capacity, from the census (out_placement.txt): expert sets are 28.1 / 36.3 / 56.3 / 70.3 / 84.4 GiB for
-  2.05 / 2.68 / 4.05 / 5.05 / 6.05 against **31.9 GiB of B70**, so exactly one quant fits on a single card
-  outright, 2.68 is 4.4 GiB short, and the heavier three need two cards or a real CPU home beside them.
+      1      196     38   parent        107      58.3   1.84x
+      2      202     62   parent^       207      33.2   6.23x
+      4      214    110   parent^       390      33.3  11.71x
+      8      237    202   parent^       702      32.5  21.60x
+     16      285    337   B70:J         990      33.1  29.91x
+  Why the gain grows with batch: today's CPU home is already saturated at one session, and a second session makes
+  each step touch ~84% more experts (union 9.9 -> 18.2 per layer, measured), so work grows where capacity does
+  not. The card's leg stays under the parent's until b=16.
 
-3. WHAT SETS THE SINGLE-STREAM CEILING (and it is not the card)
-  At b=1 the parent binds in every quant: 142-261 us/layer of parent work against 42-43 us/layer of B70 work. A
-  faster card, a second card, and every dispatch decision in the chapter are invisible at b=1; the step is
-  parent-bound with ~3.4x headroom on the card. Decomposing the parent's own measured 195.6 us/layer (2.68):
-    hyper-connections (hc_mix.cu: gr_dots, gr_finalize, hc_apply)   ~83 us/layer   <- nobody modelled this
-    dense/non-expert projections (exl3_mgemm etc.)                    93 us/layer  (40.6 on 2.05 - quant-sensitive)
-    attention (engine kernel, 12 of 48 layers do full attention)       3.4
-    linear-attention state, norms, copies                              16.4
-  So after the experts move, the next 1.5x of single-stream throughput lives in `hc_mix.cu` and the dense
-  projections - both on the parent, neither addressable by this port. That is the most useful sentence in this
-  report for anyone planning what to do after the B70 lands.
+  What this is NOT, stated plainly:
+  (a) not a tuned-CPU-path comparison. `-mcs 384` is VRAM-forced; the acceptance-era ~100 tok/s figure was a
+      shallower split on a model whose experts fit. The claim is "today's deployable configuration for a 36 GiB
+      expert set does not scale with concurrency", not "a CPU home cannot".
+  (b) not valid for 4.05/5.05/6.05, whose single-pass `-mcs 448` baselines (25.4/21.7/18.8 tok/s) are "this does
+      not fit", not a home doing its job. For those the honest statement is capacity: expert sets are 28.1 /
+      36.3 / 56.3 / 70.3 / 84.4 GiB (2.05/2.68/4.05/5.05/6.05) against 31.9 GiB of B70 - one quant fits outright,
+      2.68 is 4.4 GiB short, the rest need a second card or a real CPU home beside them.
+  (c) not a b=1 claim in disguise: the b=1 gain is 1.84x, and everything above that is the concurrency story.
 
-4. SENSITIVITY: WHAT IF THE PARENT IS NOT WHAT WE MEASURED
-  b=1 t/s for 2.68 under the three parent levels that have appeared in this plan:
-     floor (bottom-up microbenches)   122 us/layer  -> 171 t/s   (0.62x of measured; misses hyper-connections)
-     **engine-measured**              195.6         -> 107 t/s   <- what this report uses
-     window-calibrated                259           ->  80 t/s   (includes stalls + per-token overheads)
-  The spread is a factor of 2.1 and it is entirely a parent-side question. It is now bounded on both sides by
-  measurements rather than opinions: the floor's composition is known to be incomplete, and the calibrated
-  figure's content is known to include the CPU home's exposed latency (183 us/layer of pipelining value measured
-  on 2.68). The remaining unknown is how much per-token overhead (sampler, lm_head, bookkeeping) a real server
-  adds at b=1: the Qwen3.5 control says ~14 us/layer equivalent, and that is the only clean number available.
+3. WHAT SETS THE SINGLE-STREAM CEILING (it is not the card)
+  At b=1 the parent binds for every quant: 142-261 us/layer of parent work against 38-39 us/layer of B70 work -
+  a ratio of 3.7x (2.05) to 6.7x (6.05), i.e. the card has that much headroom, so at b=1 a second card, a faster
+  kernel and every dispatch decision in this chapter are invisible. Decomposing the parent's measured 195.6
+  us/layer (2.68):
+    hyper-connections (hc_mix.cu: gr_dots, gr_finalize, hc_apply)   ~83 us/layer   <- in no model in this plan
+    dense/non-expert projections (exl3_mgemm etc.)                    93.0 us/layer (40.6 on 2.05)
+    attention (engine kernel; 12 of 48 layers do full attention)       3.4
+    linear-attention state, norms, copies                             16.4
+  After the experts move, the next 1.5x of single-stream throughput lives in `hc_mix.cu` and the dense
+  projections - both on the parent, neither reachable by offloading. That is the most useful sentence here for
+  planning what comes after the B70 lands.
 
-5. RETRACTED FROM VERSION 1 (same tree, same week - kept visible so nobody re-derives them)
-  * "6.05 bpw is CPU-bound from b=2 and capped at ~300-430 t/s by the CPU home." Wrong: that verdict came from
-    computing residence hit rate on a layer-mean distribution (74.5%) instead of per-layer (99.3%). With the
-    measured routing the CPU leg is 0-2 us/layer and 6.05 tracks every other quant (878 t/s at b=16).
-  * "At b>=16 routing concentration outranks bits: 5.05 beats 2.05 because its union is narrower (94.8 vs
-    107.1)." Wrong: live traces give union(16) = 75.1 vs 75.9 - routing is quant-independent, and the spread that
-    produced the claim was profile noise from using layer 0 as the model's distribution.
-  * "Batch is the real variable: the Qwen3.8 margin decays 4.9x -> 1.3x -> 0.5x over b=1->4->8." Over-predicted by
-    roughly 2x beyond b=8 because union(rows) was over-predicted by that much (out_live_trace.txt).
-  * Surviving from version 1: at b=1 the quant is invisible; the card starts to matter around b=4-8 (now measured
-    as b=8 for 2.05, b=16-32 for 2.68, depending on quant).
+4. SENSITIVITY: IF THE PARENT LEVEL IS NOT WHAT WE MEASURED
+  b=1 t/s for 2.68 under the three parent levels this plan has used:
+     floor (bottom-up microbenches)   122 us/layer  -> 171 t/s   (0.62x of measured: no hyper-connection term)
+     **engine-measured**              195.6         -> 107 t/s   <- used above
+     window-calibrated                259           ->  80 t/s   (bundles the CPU home's exposed stall)
+  The spread is 2.1x and it is entirely parent-side. Both bounds are now measurements of something: the floor's
+  composition is known incomplete, and the calibrated figure's content is known to include 183 us/layer of
+  unhidden delegation. The one genuinely unmeasured term is per-token overhead for Qwen3.8 (sampler + lm_head):
+  the Qwen3.5 control, which has no CPU leg to hide, gives ~14 us/layer equivalent.
 
-6. GLM AND THE REST
-  * GLM-5.3@3.05: unchanged and still the weakest part of this report - no live trace (its profile is stored, so
-    the 2x batch correction that applies to Qwen3.8 is unverified there), no engine-measured parent leg, and no
-    gate geometry, which means the joint (fusion, KS) dispatch prints "not evaluated" for the one model where the
-    plan prescribes two cards. Its published tiers (1 card 51 t/s CPU-bound, 2 cards 79, 3 cards 79 unless
-    T_parent < 135 us) inherit all of that. Given the Qwen3.8 parent measurements (122-196 us/layer non-expert at
-    b=1), the "3rd card buys nothing" clause should be treated as false until GLM is measured.
-  * Qwen3.5-35B-A3B@3bpw: control only. Whole expert set fits on the GPU (11.25 GiB), so it exercises no offload
-    path; measured 112.6 tok/s forward-only / 196.9 us/layer end to end with the generator, device 179.7
-    us/layer of which 104.2 is non-expert. Useful precisely because it has no CPU leg: it is where the
-    head+sampler cost came from.
-  * Not measured anywhere: ctx dependence beyond 4096 (the plan still uses the microbench floor's shape for it),
-    the engine's kernel-bucket split at b>1, GLM in every respect above, and the concurrent-session union at
-    b>6 - the cross-session numbers in out_live_trace.txt section 8 come from pooling six traced sessions offline,
-    because the engine steps sequences one at a time and `--jobs N` therefore measures aggregate throughput
-    (which is what the baseline above needed) rather than a per-step batch (out_live_trace.txt section 9).
+5. RETRACTIONS (each was published in this tree and is wrong)
+  * "6.05 bpw is CPU-bound from b=2 and capped near 300-430 t/s." Artifact of computing residence hit rate on a
+    layer-mean distribution (74.5%) instead of per layer (99.3%). CPU leg measured live: 0-2 us/layer.
+  * "Routing concentration outranks bits at b>=16: 5.05 beats 2.05." Routing is quant-independent - union(16) =
+    75.1 vs 75.9 - and all five quants land within 878-969 t/s at b=16, ordered by parent level, not by bits.
+  * "Batch margin decays 4.9x -> 1.3x -> 0.5x over b=1->4->8." Union over-predicted ~2x by b=32; the decay is
+    much gentler than the plan carried.
+  * "With rows=8/16 added, no planner number moved." The joint path was not executing at all in that planner
+    (rows=2 refused, silently caught). With rows 2/4 measured, GLM b=1 moved 129 -> 85 us/layer and Qwen3.8
+    41 -> 34. LESSONS 67.
+
+6. GLM AND THE OTHER PROFILES
+  * GLM-5.3@3.05 now has a measured gate geometry (out_glm_geometry.txt: tiles_n=128, 3.0 MiB/expert/projection)
+    and its own joint table, which says DO NOT FUSE at E>=6 (the separate launches already over-fill) and fuse
+    only at E=4. That changed its per-layer costs by -34% at b=1 (129 -> 85 us/layer), so the tier arithmetic in
+    architecture.md section 6 (1 card 51 t/s CPU-bound, 2 cards 79, 3 cards 79) is stale in the optimistic
+    direction: cheaper B70 layers move the crossover where cards stop paying.
+  * Still missing for GLM: an engine-measured parent leg, a live routing trace (its 19.14x multiplier at b=32 is
+    inherited from a stored profile that we now know runs ~2x hot on Qwen), and any measurement at its own
+    footprint scale on more than one card. Given the Qwen3.8 parent measurements, "the third card buys nothing"
+    should be treated as false until GLM is measured.
+  * Qwen3.5-35B-A3B@3bpw: control only (whole expert set fits on the GPU, 11.25 GiB). Measured 104.2 us/layer of
+    non-expert device work, 179.7 total, 196.9 us/layer end to end. It is where the head/sampler figure comes
+    from; it exercises no offload path, so quoting a B70 gain for it would be inventing one.

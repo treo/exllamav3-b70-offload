@@ -1,0 +1,221 @@
+rows 2 and 4, measured at every E rung in both geometries - the two cells whose absence made the joint dispatch inert
+======================================================================================================================
+`out_fusion_rows.txt` closed the rows-dependence of the fusion penalty at rows 1/8/16 and listed rows 2/4 as
+"the two row counts the older per-projection tables interpolate freely and the joint tables still refuse". The
+consequence was worse than a gap in a table: **every row of `plan_operating_point.py`'s grid resolves to
+rows=2** (rows-per-expert = batch x topk / distinct experts, and decode lands between 1 and 2), so the joint
+(fusion, split-K) dispatch raised `ValueError`, the planner caught it, fell back to the per-projection tables,
+and printed a decision it had not actually made. That fallback is now verbose for exactly this reason, and it
+reported zero refusals after this measurement.
+
+Run: 134 cells = 11 E rungs (Qwen geometry: 2,4,8,10,12,16,20,24,32,48,64,80,96 minus template limits) x rows
+{2,4} x KS {1,2,4,8} for the Qwen shape, plus GLM geometry E {4,6,10,16,32} x rows {2,4} x KS {1,2,4}.
+Every cell bit-exact against its own reference (both projections), and the anchor read 19.0-19.4 us in 133 of
+134 cells - the exception is E=80 rows=2 KS=2 at 19.7 us (2.6% off nominal, inside the run-to-run scatter this
+chapter measured at 3.17%, so the cell's ratios stand and its absolute is quoted with that caveat).
+
+Command (three sweeps, split because E=2/4 use the built-in case dirs and the rest a template - passing
+--dirs-template for E=2 clobbers the map and the run dies on a missing meta.json):
+    source /opt/intel/oneapi/setvars.sh && source notes/env.sh
+    python3 notes/b70/sweep_ks_grid.py --bin $PWD/notes/b70/probe_dpas9 --es 2,4  --rows 2,4 --ks 1,2,4,8 --warm 2
+    python3 notes/b70/sweep_ks_grid.py --bin $PWD/notes/b70/probe_dpas9 --es 8,10,12,16,20,24,32,48,64,80,96 \
+        --rows 2,4 --ks 1,2,4,8 --dirs-template '/tmp/ks_e{E}_gate:/tmp/ks_e{E}_up' --warm 2
+    python3 notes/b70/sweep_ks_grid.py --bin $PWD/notes/b70/probe_dpas9 --es 4,6,10,16,32 --rows 2,4 --ks 1,2,4 \
+        --dirs-template '/tmp/glm_e{E}_gate:/tmp/glm_e{E}_up' --warm 2
+
+WHAT THE NEW CELLS SAY
+  * They land where the cost-per-weight model says they must. E=10 rows=2 KS=2 = 1.170 us per (expert,
+    projection) against rows=1's 1.170 (identical to 0.0%) and rows=4's 1.225 (+4.7%), between the rows=1 and
+    rows=8 (1.490) rungs at every E measured. Doubling the rows costs ~5%, tripling costs ~20%: the shape stays
+    memory-dominated in this range, which is the chapter's central claim, confirmed at two more row counts.
+  * The dispatch decision at rows=2 is NOT the same as at rows=1: at E=10 the fused KS=1 cell wins (2.070 us per
+    pair vs 2.340 separate, 13%) with a grid of 1,600 threads (78% of HW), whereas at rows=1 the fused winner
+    had 1,600 threads too but a 1.62x margin - i.e. fusion still pays, just less, matching the rows-dependence
+    result (penalty and gain both shallow as rows grow).
+  * GLM geometry at rows 2/4 keeps its character: separate launches remain the choice from E=6 upward, while
+    E=4 (grid 1,024 threads, under-filled) still prefers fusing. The fill rule, not the model.
+  * `DOWN_RATIO_GLM` gained rows 2/4 by measurement (0.871/1.065/1.105 and 0.927/1.015/1.193 by KS) rather than
+    interpolation - a `KeyError` there had just crashed a planner run, which is the argument for completing the
+    grid instead of guessing inside it.
+
+EFFECT ON THE PLANNERS (regenerated artifacts in this commit)
+  * `plan_operating_point.py`: joint dispatch now resolves across its grid instead of falling back, and every
+    cell got cheaper because the choice is now made on the geometry's own measurements:
+      Qwen3.8 us/layer  b=1 41→34, b=2 82→66, b=4 162→133, b=8 310→278, b=16 571→514
+      GLM       us/layer  b=1 129→85, b=2 256→195, b=4 489→410, b=8 893→748, b=16 1558→1306  (-34% at b=1)
+    Dispatch labels changed from the fallback's `dpas_transposed` to measured shapes (`joint-fused-KS1`,
+    `joint-separate-KS4`). GLM's b=1 summary line had already been 83 before this (that path asks rows=1, which
+    was always measurable) - it is the ROW grid that was inert, which is exactly how the bug hid.
+  * `plan_concurrency.py`, `plan_parent_budget.py`: unchanged routing/parent inputs; re-run for consistency.
+  * The negative controls in `selftest_launch()` moved: rows 2/4 used to be asserted-REFUSED (that guard is how
+    LESSONS 62 was written); they now assert the measured winner, and the refusal controls moved to rows
+    3/5/6, which still have no measurement at any E and must stay refused.
+
+RAW OUTPUT (verbatim; columns: sep us/expert, fused us/pair, gain, thread counts, bit-exactness, anchor)
+
+--- E=2,4 (built-in case dirs) ---
+--- E=8..96 (template dirs) ---
+# sweep_ks_grid: bin=/home/treo/projects/pdc/exllamav3/notes/b70/probe_dpas9 warm=2.0s anchor_reps=6000
+   E  rows  KS |  sep/exp  fused/exp fuse gain | threads sep   fused | exact
+   8     2   1 |    2.131      2.487    1.714x |         640    1280 | yes   anchor=19.1
+   8     2   2 |    1.400      3.062    0.914x |        1280    2560 | yes   anchor=19.4
+   8     2   4 |    1.738      2.612    1.330x |        2560    5120 | yes   anchor=19.0
+   8     2   8 |    1.700      2.737    1.242x |        5120   10240 | yes   anchor=19.2
+   8     4   1 |    2.263      2.612    1.732x |         640    1280 | yes   anchor=19.1
+   8     4   2 |    1.462      3.150    0.929x |        1280    2560 | yes   anchor=19.1
+   8     4   4 |    1.831      2.737    1.338x |        2560    5120 | yes   anchor=19.3
+   8     4   8 |    1.744      2.900    1.203x |        5120   10240 | yes   anchor=19.1
+  10     2   1 |    1.725      2.070    1.667x |         800    1600 | yes   anchor=19.1
+  10     2   2 |    1.170      2.400    0.975x |        1600    3200 | yes   anchor=19.1
+  10     2   4 |    1.370      2.480    1.105x |        3200    6400 | yes   anchor=19.1
+  10     2   8 |    1.465      2.520    1.163x |        6400   12800 | yes   anchor=19.2
+  10     4   1 |    1.830      2.230    1.641x |         800    1600 | yes   anchor=19.1
+  10     4   2 |    1.225      2.510    0.976x |        1600    3200 | yes   anchor=19.0
+  10     4   4 |    1.485      2.670    1.112x |        3200    6400 | yes   anchor=19.1
+  10     4   8 |    1.610      2.960    1.088x |        6400   12800 | yes   anchor=19.1
+  12     2   1 |    1.471      1.958    1.502x |         960    1920 | yes   anchor=19.2
+  12     2   2 |    1.075      2.075    1.036x |        1920    3840 | yes   anchor=19.1
+  12     2   4 |    1.175      2.200    1.068x |        3840    7680 | yes   anchor=19.1
+  12     2   8 |    1.371      2.533    1.082x |        7680   15360 | yes   anchor=19.1
+  12     4   1 |    1.558      2.067    1.508x |         960    1920 | yes   anchor=19.1
+  12     4   2 |    1.137      2.200    1.034x |        1920    3840 | yes   anchor=19.1
+  12     4   4 |    1.250      2.367    1.056x |        3840    7680 | yes   anchor=19.2
+  12     4   8 |    1.446      2.825    1.024x |        7680   15360 | yes   anchor=19.1
+  16     2   1 |    1.178      2.650    0.889x |        1280    2560 | yes   anchor=19.2
+  16     2   2 |    1.403      2.225    1.261x |        2560    5120 | yes   anchor=19.1
+  16     2   4 |    1.203      2.138    1.126x |        5120   10240 | yes   anchor=19.4
+  16     2   8 |    1.241      2.450    1.013x |       10240   20480 | yes   anchor=19.2
+  16     4   1 |    1.244      2.788    0.892x |        1280    2560 | yes   anchor=19.3
+  16     4   2 |    1.513      2.425    1.247x |        2560    5120 | yes   anchor=19.0
+  16     4   4 |    1.334      2.419    1.103x |        5120   10240 | yes   anchor=19.1
+  16     4   8 |    1.462      3.069    0.953x |       10240   20480 | yes   anchor=19.1
+  20     2   1 |    1.000      2.265    0.883x |        1600    3200 | yes   anchor=19.3
+  20     2   2 |    1.125      2.310    0.974x |        3200    6400 | yes   anchor=19.3
+  20     2   4 |    1.193      2.285    1.044x |        6400   12800 | yes   anchor=19.3
+  20     2   8 |    1.240      2.640    0.939x |       12800   25600 | yes   anchor=19.2
+  20     4   1 |    1.068      2.375    0.899x |        1600    3200 | yes   anchor=19.1
+  20     4   2 |    1.232      2.475    0.996x |        3200    6400 | yes   anchor=19.0
+  20     4   4 |    1.330      2.600    1.023x |        6400   12800 | yes   anchor=19.2
+  20     4   8 |    1.445      3.105    0.931x |       12800   25600 | yes   anchor=19.4
+  24     2   1 |    0.925      2.137    0.865x |        1920    3840 | yes   anchor=19.1
+  24     2   2 |    0.967      2.208    0.875x |        3840    7680 | yes   anchor=19.1
+  24     2   4 |    1.037      2.462    0.843x |        7680   15360 | yes   anchor=19.1
+  24     2   8 |    1.183      2.604    0.909x |       15360   30720 | yes   anchor=19.2
+  24     4   1 |    1.000      2.271    0.881x |        1920    3840 | yes   anchor=19.1
+  24     4   2 |    1.065      2.454    0.868x |        3840    7680 | yes   anchor=19.1
+  24     4   4 |    1.165      2.654    0.878x |        7680   15360 | yes   anchor=19.3
+  24     4   8 |    1.358      3.183    0.853x |       15360   30720 | yes   anchor=19.1
+  32     2   1 |    1.277      2.547    1.002x |        2560    5120 | yes   anchor=19.1
+  32     2   2 |    1.044      2.591    0.806x |        5120   10240 | yes   anchor=19.1
+  32     2   4 |    1.020      2.778    0.735x |       10240   20480 | yes   anchor=19.1
+  32     2   8 |    1.308      3.006    0.870x |       20480   40960 | yes   anchor=19.2
+  32     4   1 |    1.384      2.700    1.025x |        2560    5120 | yes   anchor=19.2
+  32     4   2 |    1.156      2.747    0.842x |        5120   10240 | yes   anchor=19.0
+  32     4   4 |    1.245      3.163    0.788x |       10240   20480 | yes   anchor=19.1
+  32     4   8 |    1.483      3.669    0.808x |       20480   40960 | yes   anchor=19.2
+  48     2   1 |    1.051      2.456    0.856x |        3840    7680 | yes   anchor=19.1
+  48     2   2 |    1.062      2.644    0.804x |        7680   15360 | yes   anchor=19.1
+  48     2   4 |    1.233      2.779    0.888x |       15360   30720 | yes   anchor=19.1
+  48     2   8 |    1.363      3.050    0.893x |       30720   61440 | yes   anchor=19.1
+  48     4   1 |    1.101      2.633    0.836x |        3840    7680 | yes   anchor=19.0
+  48     4   2 |    1.223      2.833    0.863x |        7680   15360 | yes   anchor=19.0
+  48     4   4 |    1.350      3.171    0.852x |       15360   30720 | yes   anchor=19.3
+  48     4   8 |    1.683      3.681    0.915x |       30720   61440 | yes   anchor=19.1
+  64     2   1 |    1.259      2.456    1.025x |        5120   10240 | yes   anchor=19.1
+  64     2   2 |    1.252      2.594    0.966x |       10240   20480 | yes   anchor=19.2
+  64     2   4 |    1.352      2.773    0.975x |       20480   40960 | yes   anchor=19.1
+  64     2   8 |    1.475      3.062    0.963x |       40960   81920 | yes   anchor=19.1
+  64     4   1 |    1.325      2.638    1.005x |        5120   10240 | yes   anchor=19.1
+  64     4   2 |    1.330      2.830    0.940x |       10240   20480 | yes   anchor=19.1
+  64     4   4 |    1.543      3.108    0.993x |       20480   40960 | yes   anchor=19.4
+  64     4   8 |    1.830      3.789    0.966x |       40960   81920 | yes   anchor=19.1
+  80     2   1 |    1.354      2.546    1.063x |        6400   12800 | yes   anchor=19.2
+  80     2   2 |    1.336      2.583    1.034x |       12800   25600 | yes   anchor=19.7
+  80     2   4 |    1.401      2.721    1.030x |       25600   51200 | yes   anchor=19.1
+  80     2   8 |    1.556      3.058    1.018x |       51200  102400 | yes   anchor=19.1
+  80     4   1 |    1.436      2.739    1.049x |        6400   12800 | yes   anchor=19.2
+  80     4   2 |    1.456      2.798    1.041x |       12800   25600 | yes   anchor=19.2
+  80     4   4 |    1.609      3.126    1.030x |       25600   51200 | yes   anchor=19.4
+  80     4   8 |    1.886      3.814    0.989x |       51200  102400 | yes   anchor=19.1
+  96     2   1 |    1.233      2.506    0.984x |        7680   15360 | yes   anchor=19.2
+  96     2   2 |    1.320      2.533    1.042x |       15360   30720 | yes   anchor=19.2
+  96     2   4 |    1.387      2.698    1.029x |       30720   61440 | yes   anchor=19.1
+  96     2   8 |    1.539      3.022    1.019x |       61440  122880 | yes   anchor=19.3
+  96     4   1 |    1.317      2.690    0.979x |        7680   15360 | yes   anchor=19.3
+  96     4   2 |    1.430      2.807    1.019x |       15360   30720 | yes   anchor=19.1
+  96     4   4 |    1.595      3.098    1.030x |       30720   61440 | yes   anchor=19.2
+  96     4   8 |    1.897      3.938    0.963x |       61440  122880 | yes   anchor=19.1
+
+# best schedule per (E, rows). UNITS MATTER: the separate column is us per (expert, SINGLE
+# projection), the fused column is us per (expert, gate+up PAIR), so the comparison is
+# 2*sep/expert vs fused/expert - which is what the gain column already does correctly.
+   E=  8 rows= 2: best fused KS=1 2.487 us per (expert, pair), grid   1280 ( 62.5% of HW)
+   E=  8 rows= 4: best fused KS=1 2.612 us per (expert, pair), grid   1280 ( 62.5% of HW)
+   E= 10 rows= 2: best fused KS=1 2.070 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 10 rows= 4: best fused KS=1 2.230 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 12 rows= 2: best fused KS=1 1.958 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 12 rows= 4: best fused KS=1 2.067 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 16 rows= 2: best fused KS=4 2.138 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 16 rows= 4: best fused KS=4 2.419 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 20 rows= 2: best sep   KS=1 2.000 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 20 rows= 4: best sep   KS=1 2.135 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 24 rows= 2: best sep   KS=1 1.850 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 24 rows= 4: best sep   KS=1 2.000 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 32 rows= 2: best sep   KS=4 2.041 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 32 rows= 4: best sep   KS=2 2.312 us per (expert, pair), grid   5120 (250.0% of HW)
+   E= 48 rows= 2: best sep   KS=1 2.102 us per (expert, pair), grid   3840 (187.5% of HW)
+   E= 48 rows= 4: best sep   KS=1 2.202 us per (expert, pair), grid   3840 (187.5% of HW)
+   E= 64 rows= 2: best fused KS=1 2.456 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 64 rows= 4: best fused KS=1 2.638 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 80 rows= 2: best fused KS=1 2.546 us per (expert, pair), grid  12800 (625.0% of HW)
+   E= 80 rows= 4: best fused KS=1 2.739 us per (expert, pair), grid  12800 (625.0% of HW)
+   E= 96 rows= 2: best sep   KS=1 2.467 us per (expert, pair), grid   7680 (375.0% of HW)
+   E= 96 rows= 4: best sep   KS=1 2.634 us per (expert, pair), grid   7680 (375.0% of HW)
+
+--- GLM geometry, E=4..32 ---
+# sweep_ks_grid: bin=/home/treo/projects/pdc/exllamav3/notes/b70/probe_dpas9 warm=2.0s anchor_reps=6000
+   E  rows  KS |  sep/exp  fused/exp fuse gain | threads sep   fused | exact
+   4     2   1 |    6.550     10.600    1.236x |        1024    2048 | yes   anchor=19.3
+   4     2   2 |    4.763     10.875    0.876x |        2048    4096 | yes   anchor=19.2
+   4     2   4 |    5.075     11.400    0.890x |        4096    8192 | yes   anchor=19.1
+   4     4   1 |    6.787     10.850    1.251x |        1024    2048 | yes   anchor=19.1
+   4     4   2 |    5.112     11.150    0.917x |        2048    4096 | yes   anchor=19.2
+   4     4   4 |    5.412     11.775    0.919x |        4096    8192 | yes   anchor=19.3
+   6     2   1 |    4.883     13.050    0.748x |        1536    3072 | yes   anchor=19.1
+   6     2   2 |    5.525     12.383    0.892x |        3072    6144 | yes   anchor=19.1
+   6     2   4 |    4.825     13.333    0.724x |        6144   12288 | yes   anchor=19.2
+   6     4   1 |    5.292     13.667    0.774x |        1536    3072 | yes   anchor=19.1
+   6     4   2 |    6.033     13.183    0.915x |        3072    6144 | yes   anchor=19.2
+   6     4   4 |    5.367     14.050    0.764x |        6144   12288 | yes   anchor=19.1
+  10     2   1 |    6.555     13.330    0.983x |        2560    5120 | yes   anchor=19.1
+  10     2   2 |    5.785     12.660    0.914x |        5120   10240 | yes   anchor=19.3
+  10     2   4 |    6.165     13.460    0.916x |       10240   20480 | yes   anchor=19.2
+  10     4   1 |    7.035     14.340    0.981x |        2560    5120 | yes   anchor=19.2
+  10     4   2 |    6.460     13.530    0.955x |        5120   10240 | yes   anchor=19.1
+  10     4   4 |    6.540     14.770    0.886x |       10240   20480 | yes   anchor=19.3
+  16     2   1 |    6.094     12.375    0.985x |        4096    8192 | yes   anchor=19.1
+  16     2   2 |    6.278     12.394    1.013x |        8192   16384 | yes   anchor=19.1
+  16     2   4 |    6.709     13.025    1.030x |       16384   32768 | yes   anchor=19.4
+  16     4   1 |    6.944     13.856    1.002x |        4096    8192 | yes   anchor=19.2
+  16     4   2 |    6.750     13.350    1.011x |        8192   16384 | yes   anchor=19.1
+  16     4   4 |    7.331     14.269    1.028x |       16384   32768 | yes   anchor=19.1
+  32     2   1 |    6.333     12.597    1.005x |        8192   16384 | yes   anchor=19.1
+  32     2   2 |    6.316     12.456    1.014x |       16384   32768 | yes   anchor=19.1
+  32     2   4 |    6.659     12.809    1.040x |       32768   65536 | yes   anchor=19.3
+  32     4   1 |    7.262     14.312    1.015x |        8192   16384 | yes   anchor=19.1
+  32     4   2 |    6.763     13.409    1.009x |       16384   32768 | yes   anchor=19.1
+  32     4   4 |    7.228     13.938    1.037x |       32768   65536 | yes   anchor=19.2
+
+# best schedule per (E, rows). UNITS MATTER: the separate column is us per (expert, SINGLE
+# projection), the fused column is us per (expert, gate+up PAIR), so the comparison is
+# 2*sep/expert vs fused/expert - which is what the gain column already does correctly.
+   E=  4 rows= 2: best sep   KS=2 9.525 us per (expert, pair), grid   2048 (100.0% of HW)
+   E=  4 rows= 4: best sep   KS=2 10.225 us per (expert, pair), grid   2048 (100.0% of HW)
+   E=  6 rows= 2: best sep   KS=4 9.650 us per (expert, pair), grid   6144 (300.0% of HW)
+   E=  6 rows= 4: best sep   KS=1 10.583 us per (expert, pair), grid   1536 ( 75.0% of HW)
+   E= 10 rows= 2: best sep   KS=2 11.570 us per (expert, pair), grid   5120 (250.0% of HW)
+   E= 10 rows= 4: best sep   KS=2 12.920 us per (expert, pair), grid   5120 (250.0% of HW)
+   E= 16 rows= 2: best sep   KS=1 12.188 us per (expert, pair), grid   4096 (200.0% of HW)
+   E= 16 rows= 4: best fused KS=2 13.350 us per (expert, pair), grid  16384 (800.0% of HW)
+   E= 32 rows= 2: best fused KS=2 12.456 us per (expert, pair), grid  32768 (1600.0% of HW)
+   E= 32 rows= 4: best fused KS=2 13.409 us per (expert, pair), grid  32768 (1600.0% of HW)

@@ -58,11 +58,20 @@ RULES THAT COME OUT OF THIS (applied)
      `best_launch` margin under ~3% as unresolved between runs (the `~tie` marking already does this).
 
 STILL UNMEASURED
-  * rows=2 and rows=4 - the two row counts the older per-projection tables interpolate freely and the joint tables
-    still refuse. Filling them would let `plan_operating_point.py` stop falling back to the legacy model in half
-    its grid. Measured consequence: with rows=8/16 added, **no planner number moved at all** - the legacy
-    per-projection tables were already KS-optimal, so the joint tables' value is that they state the shape and the
-    tie explicitly, not that they price it differently.
+  * ~~rows=2 and rows=4~~ **CLOSED after this file was written**, by `out_rows_2_4.txt`: measured at every E rung
+    in both geometries, 134 cells, every one bit-exact. Two things came of it. (1) Their absence had been
+    disabling the joint dispatch across `plan_operating_point.py`'s entire grid - every row of that grid resolves
+    to rows=2, so the rule raised, the planner caught it, and printed a fallback decision (now it prints why).
+    (2) The new cells land exactly where the cost-per-weight model puts them (E=10 rows=2 KS=2 = 1.170 vs
+    rows=1's 1.170, rows=4's 1.225, rows=8's 1.490), which is the chapter's central claim reconfirmed at two
+    more row counts.
+
+    RETRACTION, same cause: this file previously reported "with rows=8/16 added, **no planner number moved at
+    all** - the legacy per-projection tables were already KS-optimal". That was not a finding, it was the silent
+    fallback described above - the joint path was never being taken in that planner, so of course its numbers
+    did not move. With rows=2/4 measured the same planners move a lot: GLM b=1 129→85 µs/layer (-34%), Qwen3.8
+    b=1 41→34 (-17%), GLM b=16 1558→1306. The joint tables' value is not merely that they state the shape and
+    the tie: at the row counts decode actually uses they price the layer a third cheaper. LESSONS 67.
   * The rows-dependence at K != 3 (this sweep is K=3 throughout), so the depth-vs-rows and depth-vs-bits
     interactions are each measured but never jointly.
   * E values between the ladder points (16/20/24 are 2-4 apart; fractional ownership is still an open item).

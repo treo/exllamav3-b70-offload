@@ -33,11 +33,11 @@ parent window per layer ~250 us at b=1 [M, doc/prep] (scales weakly with b until
   is what IT actually reads per layer, which is the only footprint the rate curve should be
   sampled at. The all-picks row (h=1) is printed as the upper bound a 3090-sized S_g would see.
  rows   union  dev picks  footprint  in L2?   GB/s  us/layer  x b=1  clust  ms/token  cards
-    1    10.0        9.8      14.3M     yes    292        41   1.0x    558      1.98    0.2
-    2    19.9       19.5      28.5M      no    292        82   2.0x    558      3.96    0.3
-    4    39.3       38.3      56.1M      no    292       162   3.9x    558      7.80    0.6
-    8    74.9       73.1     107.1M      no    230       310   7.5x    370     14.87    1.2
-   16   138.1      134.8     197.5M      no    216       571  13.8x    316     27.43    2.3
+    1    10.0        9.8      14.3M     yes    292        34   1.0x    558      1.61    0.1
+    2    19.9       19.5      28.5M      no    292        66   2.0x    558      3.15    0.3
+    4    39.3       38.3      56.1M      no    292       133   4.0x    558      6.39    0.5
+    8    74.9       73.1     107.1M      no    230       278   8.3x    370     13.34    1.1
+   16   138.1      134.8     197.5M      no    216       514  15.3x    316     24.66    2.1
   fusion/split-K (D8 joint rule): joint table consulted where a gate geometry is measured (gate tiles_n=40); the choice is (fused?, KS) together, not fuse-at-KS=1
   b=1: 48 layers x 33 us = 1.57 ms/token of B70 time (14.3 MiB/layer read while doing 9.8 expert-projection-layers of work; dispatch picks joint-fused-KS1)
   upper bound if this card owned every pick: 53 us/layer
@@ -47,11 +47,11 @@ GLM@3.05:  topk=8 (config.json), expert block 9.000 MiB, 288 experts/layer, 42 M
   is what IT actually reads per layer, which is the only footprint the rate curve should be
   sampled at. The all-picks row (h=1) is printed as the upper bound a 3090-sized S_g would see.
  rows   union  dev picks  footprint  in L2?   GB/s  us/layer  x b=1  clust  ms/token  cards
-    1     8.0        5.6      50.8M      no    132       129   1.0x    216      5.43      ?
-    2    15.8       11.2     100.5M      no    175       256   2.0x    221     10.74      ?
-    4    30.2       21.4     192.2M      no    220       489   3.8x    259     20.52      ?
-    8    55.1       39.0     351.1M      no    239       893   6.9x    296     37.50      ?
-   16    96.1       68.1     612.6M      no    253      1558  12.0x    304     65.42      ?
+    1     8.0        5.6      50.8M      no    132        85   1.0x    216      3.56      ?
+    2    15.8       11.2     100.5M      no    175       195   2.3x    221      8.21      ?
+    4    30.2       21.4     192.2M      no    220       410   4.8x    259     17.20      ?
+    8    55.1       39.0     351.1M      no    239       748   8.8x    296     31.43      ?
+   16    96.1       68.1     612.6M      no    253      1306  15.4x    304     54.84      ?
   fusion/split-K (D8 joint rule): joint table consulted where a gate geometry is measured (gate tiles_n=128); the choice is (fused?, KS) together, not fuse-at-KS=1
   b=1: 42 layers x 83 us = 3.48 ms/token of B70 time (50.9 MiB/layer read while doing 5.7 expert-projection-layers of work; dispatch picks joint-separate-KS4)
   upper bound if this card owned every pick: 534 us/layer
