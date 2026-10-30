@@ -28,7 +28,37 @@ real in isolation and its in-situ cancellation is an open question. ISA census (
 lines, mov 93-193, mul 27-53, no spill/scratch indications) does not identify which dump is which schedule, so
 it adjudicates nothing.
 
-Original reading, kept for the record: A combine's cost is the memory work it performs, not the per-launch protocol, even though the protocol
+FOLLOW-UP EXPERIMENT, same session — the dirty-L2 hypothesis is REFUTED too. probe_combine.cpp gained a
+producer pass that rewrites the whole partial region immediately before the combines, so they are read from L2
+dirty exactly as after a gemm epilogue (standalone, 200-rep bursts, min of 4 interleaved rounds):
+
+  rows=1    clean: split 6.35  pair 3.14 (-3.21)   |  L2-dirty: split 6.71  pair 3.17 (-3.54)
+  rows=8    clean: split 6.33  pair 3.15 (-3.18)   |  L2-dirty: split 6.67  pair 3.20 (-3.47)
+  rows=16   clean: split 6.36  pair 3.74 (-2.62)   |  L2-dirty: split 7.01  pair 3.52 (-3.50)
+
+Dirtiness costs the split form a little (~0.4-0.7 us) and the merged form nothing, so it widens the merged
+form's advantage instead of cancelling it. Caveat on absolute values: the anchor read 26.2 us in this command
+because it ran AFTER the sweep rather than interleaved with it — depressed, not healthy — so only the
+within-row comparisons above are usable.
+
+READING THE ISA, WHICH THE OPCODE CENSUS COULD NOT SAY. The mangled .kernel names identify the four dumps as
+two split and two pair variants (the backend emitted a second specialization per schedule). All four do the same
+work per item: decompose the flat index with `mul ... 0xa00` (= 640 dwords x 4 B, the row stride) plus `mulh`
+for the division-by-constant, then 4 `lsc_load.ugm` (2 k-slice partials + Q + SX8) and 1 `lsc_store`, with the
+second k-slice reached as an IMMEDIATE offset `flat[V0308+0x64000]` (0x64000 = 409,600 B = one KS-slice region)
+in both split dumps AND in one pair dump. So the pointer select `PART = a ? PA : PB` does not defeat immediate
+folding — my earlier guess, wrong — and the two schedules are ISA near-clones. Whatever inverts the sign in
+situ is not in the combine's instructions.
+
+WHERE THAT LEAVES E25b. The merged combine wins in every condition this probe can produce standalone (clean,
+dirty, rows 1/8/16). It loses in situ (+0.10 / +1.90 / +3.50 us). The remaining difference between the two
+setups is not the machine state left by the gemm, so the candidate is the measurement protocol: the in-situ
+probe times bursts of 3 whole layer-iterations (6-7 launches deep per burst, with the ESIMD gemm's occupancy
+ramp in the stream), while the standalone probe bursts 200 iterations of nothing but combines. The tie-breaker
+is therefore a protocol test, not a hardware one: re-measure the in-situ arms at burst length 1 (sync per
+iteration) as well as 3, which needs the merged arm reinstated in probe_dpas9 temporarily. Until that runs, the
+kept schedule stays split because that is the only form measured in situ, but the honest expectation from the
+standalone data is that split is the WRONG choice and the in-situ result is a scheduling artifact., even though the protocol
 is genuinely ~7.8 us at rows=1: the merged launch reads the same partials and writes the same floats, and above
 rows=1 it gives up whatever overlap the two smaller grids enjoyed. Neutral at rows=1, monotonically worse with
 rows - the shape you expect when the saving is real (one dispatch, fixed) and the loss scales with the work
