@@ -1,0 +1,107 @@
+Expected decode throughput by quant and model, with both parent estimates side by side
+=======================================================================================
+What the planners say now that (a) the parent leg is measured (`out_parent_leg.txt`), (b) the CPU home is measured
+per assignment (`out_cpu_worker_calib.txt`), and (c) the layer is priced from the joint (fusion, split-K) tables
+(`out_ks_grid.txt`, `out_fusion_rows.txt`). Every number below was printed by a command named at the end; nothing
+here is hand-composed except the two-column presentation.
+
+WHY TWO t/s COLUMNS: the parent's non-expert cost per layer has two defensible values that differ ~2.1x - 257 us
+from the planner model calibrated to the inherited ~250 us/layer window (contains sampler, lm_head, graphs, the
+rest of the network) and 122 us measured bottom-up on the 3090 (attention + streamed non-expert weights + state
+traffic only, explicitly a floor). LESSONS 61 records why averaging them would be wrong. Where a row shows the
+same t/s in both columns, the B70 or the CPU - not the parent - is the binding leg, so the disagreement cannot
+reach that row.
+
+Qwen3.8-Flash-Next (48 MoE layers, topk=10, 512 experts/layer, one B70 + 3090 + 16-thread CPU home, ctx 4096)
+
+ quant    b |  parent-cal B70   CPU  binds      t/s-cal | parent-floor  t/s-floor  binds-floor
+ 2.05 bpw   1 |       257     36     0  parent~        81 |       122        171  parent
+ 2.05 bpw   2 |       265     89     0  parent~       157 |       129        323  parent
+ 2.05 bpw   4 |       281    167     0  parent~       296 |       144        498  B70:D
+ 2.05 bpw   8 |       313    299     0  parent~       533 |       176        557  B70:D
+ 2.05 bpw  16 |       376    492     0  B70:D         677 |       238        677  B70:D
+ 2.05 bpw  32 |       503    765     0  B70:D         872 |       503        872  B70:D
+ 2.68 bpw   1 |       259     36     0  parent~        80 |       122        171  parent
+ 2.68 bpw   4 |       283    174     0  parent~       294 |       144        479  B70:D
+ 2.68 bpw   8 |       315    330     0  B70:D         505 |       176        505  B70:D
+ 2.68 bpw  16 |       378    596     0  B70:D         559 |       238        559  B70:D
+ 2.68 bpw  32 |       505   1000     0  B70:D         667 |       505        667  B70:D
+ 4.05 bpw   1 |       259     42    28  parent~        80 |       122        171  parent
+ 4.05 bpw   4 |       283    168   107  parent~       295 |       144        496  B70:D
+ 4.05 bpw   8 |       315    319   203  B70:D         523 |       176        523  B70:D
+ 4.05 bpw  16 |       378    578   367  B70:D         577 |       238        577  B70:D
+ 4.05 bpw  32 |       505    969   616  B70:D         688 |       505        688  B70:D
+ 5.05 bpw   1 |       260     37     0  parent~        80 |       122        171  parent
+ 5.05 bpw   4 |       284    163     0  parent~       294 |       144        511  B70:D
+ 5.05 bpw   8 |       315    281     0  parent~       528 |       176        592  B70:D
+ 5.05 bpw  16 |       379    438     0  B70:D         761 |       238        761  B70:D
+ 5.05 bpw  32 |       506    630     0  B70:D        1058 |       506       1058  B70:D
+ 6.05 bpw   1 |       261     40    77  parent~        80 |       122        171  parent
+ 6.05 bpw   2 |       269     82   151  parent~       155 |       129        276  CPU
+ 6.05 bpw   4 |       284    159   292  CPU           286 |       144        286  CPU
+ 6.05 bpw   8 |       316    298   546  CPU           305 |       176        305  CPU
+ 6.05 bpw  16 |       380    527   968  CPU           344 |       238        344  CPU
+ 6.05 bpw  32 |       506    852  1565  CPU           426 |       506        426  CPU
+(`~` = rows above the measured parent range, so that row uses the calibrated model in floor mode too. b=2 is
+shown for 2.05 and 6.05 only, and b=64/128/256 are omitted throughout; full per-b tables are in
+`out_concurrency.txt`.)
+
+FIVE THINGS THIS TABLE SAYS
+1. **At b=1 the quant does not matter, in either parent model.** All five quants land on 80-81 t/s (calibrated) or
+   171 t/s (floor) because the B70's whole contribution is 36-42 us of a 122-259 us/layer step. Making the experts
+   infinitely fast changes nothing at b=1 - it is not on the critical path. Anyone quoting "t/s per quant" at
+   single-stream decode is quoting the parent, not the card.
+2. **The card starts to matter at b=4-8**, exactly where its leg crosses the parent's: B70 167-174 us vs parent
+   144 (floor) at b=4, 299-330 vs 176 at b=8. Below that crossover, extra B70 speed is invisible; above it, t/s is
+   set by the card and the two parent columns collapse to identical values (b>=16 rows agree to the digit).
+3. **6.05 bpw is CPU-bound from b=2 upward** - the home, not the card, is the limit (CPU leg 151-1565 us vs B70
+   82-852). It is also the only quant where the placement decision shows up in throughput: as measured it caps
+   6.05 at ~300-430 t/s while 2.05/5.05 reach 680-1060. Under the current residence policy this is a *policy*
+   artifact (too many experts homed on the CPU for a 3.6 MiB/expert profile), not a hardware law - the fix is
+   placement, and `plan_parent_budget.py`'s lpt columns are where that gets argued.
+4. **Bits-per-weight is not what ranks the quants at b>=16; routing concentration is.** 5.05 beats 2.05 at b=16
+   (761 vs 677) and b=32 (1058 vs 872) despite having 2.5x the bytes per expert, because its census shows a much
+   narrower union (94.8 vs 107.1 distinct experts at b=16, 129.9 vs 158.5 at b=32) and 100% residence. The
+   per-expert byte saving of the small quant is being spent on touching more experts. Confirming that on the
+   engine (same router, different quant => same routing?) is a cheap check with a real consequence for quant
+   selection at batch.
+5. **The parent-model disagreement is a b<=2 phenomenon only.** At b=1 the two columns differ 2.1x (81 vs 171);
+   by b=8 it is 5%; by b=16 it is zero. So planning batch sizes does not need the disagreement resolved - planning
+   single-stream latency absolutely does, and it cannot be resolved on this box without instrumenting the engine's
+   own step (sampler, lm_head, graphs).
+
+GLM-5.3-Flash @3.05 (42 MoE layers, topk=8, 288 experts, 9.0 MiB/expert, one B70 owning h=0.708)
+  * B70 leg from `plan_operating_point.py`: **129 us/layer at b=1** (50.8 MiB/layer footprint, outside L2's reach,
+    132 GB/s effective), 5.43 ms/token of B70 time at b=1, 65.4 ms/token at b=16.
+  * End-to-end tiers in `doc/port/b70-architecture.md` section 6: 1 card **51 t/s** (CPU-bound, 467 us/layer),
+    2 cards **79 t/s** (+55%), 3 cards **79 t/s** (+0%), assuming `T_parent` = 300 us/layer.
+  * Two of those caveats are now testable rather than assumed, and one flips: the Qwen parent measurements put the
+    non-expert parent cost at 122-257 us/layer at b=1, not 300, and the 3-card break-even was stated as "the third
+    card buys nothing unless T_parent < 135 us". **Under the measured floor (122 us) that inequality is satisfied**,
+    so the third card's zero is an artifact of the assumed 300 us, not of the hardware. GLM's own parent leg is
+    still unmeasured (different shapes, bigger hidden size), so the honest statement is: 1 card 51 t/s CPU-bound is
+    solid, 2 cards ~79 is solid, and "3 cards add nothing" should be treated as false until GLM's parent leg is
+    measured - the analogous measured parent would make the third card pay.
+  * Its B70 column also still divides bytes by N at the same rate and drives per-card footprint to 32 MiB/layer,
+    below the smallest GLM geometry measured - both unchanged from when that table was written.
+
+Qwen3.5-35B-A3B @3bpw (40 layers, 256 experts, 1.12 MiB/expert, 11.25 GiB of experts total)
+  * Not modelled end-to-end anywhere in this tree. What is known: the entire expert set fits on one B70 (11.25 GiB
+    of 31.9), so there is no capacity pressure and no CPU home to fight over, and it is the one profile in
+    `plan_placement.py` with h=100% and zero CPU spill. Expected behaviour by analogy with Qwen3.8's b=1 row:
+    parent-bound single-stream, card invisible. Quoting a t/s for it would be inventing a number.
+
+WHAT WOULD MAKE THESE NUMBERS REAL
+  * The engine's own measured step time at b=1 on this host (closes the 122-vs-257 question and turns every
+    "t/s-cal" row into a measurement rather than a calibration).
+  * A real-checkpoint expert-bytes run of the parent leg (shapes/kernel real, bytes synthetic at K=3).
+  * GLM's parent leg, for the reason in its section above.
+  * Placement re-optimisation for 6.05, which is currently capped by a policy choice.
+
+Reproduce:
+    source notes/env.sh
+    python3 notes/b70/plan_concurrency.py                                   # calibrated column
+    B70_PARENT_MODEL=floor python3 notes/b70/plan_concurrency.py            # floor column
+    python3 notes/b70/plan_operating_point.py                               # GLM / Qwen per-layer curves
+    python3 notes/b70/plan_parent_budget.py                                 # per-home placement walls
+    python3 notes/bench_parent_leg.py --iters 20                            # the parent legs themselves

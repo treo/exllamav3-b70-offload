@@ -1,0 +1,166 @@
+Does the fusion penalty band depend on rows? Edges no, depth yes - the penalty fills in as rows grow
+=========================================================================================================
+D8's second condition (a fused launch holds BOTH projections' weight streams live, so it stops paying once they
+overflow L2) was established at rows=1 only. The rows-dependence was an explicitly untested prediction sitting in
+`out_ks_grid.txt`, and `best_launch()` refused rows=8/16 for every E except 10/32/96 because of it. This file
+closes it: 6 E x 3 rows x 2 schedules x 4 KS = 72 cells, one instrument, one window.
+
+Instrument: `python3 notes/b70/sweep_ks_grid.py --bin ./probe_dpas9 --es 10,16,20,24,32,64 --rows 1,8,16
+            --ks 1,2,4,8 --dirs-template '/tmp/ks_e{E}_gate:/tmp/ks_e{E}_up' --warm 2`
+Window certification: the anchor printed 19.0-19.4 us in **all 72 cells** (min/median/max 19.0/19.2/19.4), and
+every fused cell reported exact=yes (bit-exact against its own reference). Costs are per (expert, projection) for
+the separate schedule and per (expert, gate+up pair) for the fused one, so they compare directly as 2x sep vs 1x
+fused. Raw output is appended below this section.
+
+GAIN TABLE - best-fused / best-separate, each at its own best KS, so the comparison is between the two schedules
+a dispatcher would actually pick, not between two fixed KS values:
+
+     E  | rows=1            | rows=8            | rows=16
+   ----+---------------------+-------------------+--------------------
+    10 | 1.13x  (fKS=1/sKS=2)| 1.12x (f1/s2)     | 1.13x (f1/s2)
+    16 | 1.08x  (fKS=4/sKS=1)| 0.99x (f2/s1)     | 0.98x (f2/s1)
+    20 | 0.88x  (fKS=4/sKS=1)| 0.88x (f1/s1)     | 0.93x (f1/s1)
+    24 | 0.81x  (fKS=2/sKS=1)| 0.89x (f1/s1)     | 0.90x (f1/s1)
+    32 | 0.76x  (fKS=2/sKS=4)| 0.96x (f1/s2)     | 0.95x (f1/s2)
+    64 | 1.02x  (fKS=1/sKS=2)| 1.04x (f1/s1)     | 1.05x (f1/s1)
+   (>1.00 = fuse, <1.00 = keep separate)
+
+WHAT THE ROWS-DIMENSION DOES AND DOES NOT DO
+  * The band's EDGES do not move. E=20/24/32 preferred SEPARATE at rows=1 and still prefer separate at rows=16;
+    E=10 preferred fused at every row count; E=64 was within 2-5% either way at every row count (4.0% toward
+    fusing at rows=8 - just outside the 3% tie band, so `best_launch` reports a win rather than INDIFFERENT).
+    Across 18 (E, rows) pairs the preference never flipped decisively - E=16 crossed the 1.00 line (1.08 -> 0.98)
+    but both sides of it are inside the ~3% tie band, so it is "advantage disappears", not "sign reverses".
+  * The band's DEPTH fills in as rows grow. Worst penalty per row count: **0.76x at rows=1, 0.88x at rows=8,
+    0.90x at rows=16**. E=32 is the clean case: fusing cost 24% at rows=1 and 5% at rows=16.
+  * Mechanism (directional, not proven): the penalty is a memory-side cost - two weight streams competing for a
+    24 MiB L2 - while rows add arithmetic per weight byte. Same absolute thrash, bigger denominator, so the
+    relative penalty shrinks. That is the same axis the bit-rate sweep found from the other side
+    (`out_fusion_penalty_k.txt`: penalty deepens with bits, 1.16/1.27/1.88x at K=2/3/6, i.e. with bytes to thrash).
+    Penalty ~ memory cost / (work per byte), shallow in neither variable alone.
+  * Split-K still tracks fill, and rows supply it: the fused best KS falls 4 -> 2 -> 1 as rows grow at E=16/20,
+    because the rows themselves now provide the parallelism split-K was buying. D8's joint-choice framing holds in
+    the third dimension without amendment.
+
+RULES THAT COME OUT OF THIS (applied)
+  1. **One fusion decision per (model, quant), taken at rows=1.** Since the edges do not move and rows=1 is where
+     the penalty is deepest, evaluating the cache warning at rows=1 is conservative for every larger batch. No
+     per-rows dispatch of the fusion flag is needed, and none was added.
+  2. The cache warning is only load-bearing at small rows. At rows>=8 everything measured is within 10% of the
+     best schedule regardless of the choice, so mis-classifying a band-edge model costs little.
+  3. Table coverage: `KS_SEP`/`KS_FUSED` gained rows=8/16 for E=16/20/24/64 and KS=4/8 for E=10/16/20/24/32/64 at
+     those rows, so `best_launch()` no longer refuses rows=8/16 outside E=10/32/96. Existing cells were NOT
+     overwritten — **46 cells overlap the earlier run (the rows=1 ladder was re-measured too): median deviation
+     0.34%, p90 1.33%, max 3.17%, and 11 cells identical to the digit.** The 3.17% outlier is worth noticing
+     because it is not in the noise of an unimportant cell — it is fused E=16 rows=1 KS=2, which is that
+     schedule's *minimum* (2.175 in-tree, 2.244 here). So run-to-run scatter at the chosen optimum reaches ~3%,
+     which is exactly the size of the 1.08x "fusion wins" at E=16 rows=1. Read that cell as a tie, and treat any
+     `best_launch` margin under ~3% as unresolved between runs (the `~tie` marking already does this).
+
+STILL UNMEASURED
+  * rows=2 and rows=4 - the two row counts the older per-projection tables interpolate freely and the joint tables
+    still refuse. Filling them would let `plan_operating_point.py` stop falling back to the legacy model in half
+    its grid. Measured consequence: with rows=8/16 added, **no planner number moved at all** - the legacy
+    per-projection tables were already KS-optimal, so the joint tables' value is that they state the shape and the
+    tie explicitly, not that they price it differently.
+  * The rows-dependence at K != 3 (this sweep is K=3 throughout), so the depth-vs-rows and depth-vs-bits
+    interactions are each measured but never jointly.
+  * E values between the ladder points (16/20/24 are 2-4 apart; fractional ownership is still an open item).
+
+RAW SWEEP OUTPUT (verbatim, `sweep_ks_grid.py` stdout; columns: sep us/expert, fused us/pair, gain, thread counts,
+bit-exactness, anchor reading):# sweep_ks_grid: bin=./probe_dpas9 warm=2.0s anchor_reps=6000
+   E  rows  KS |  sep/exp  fused/exp fuse gain | threads sep   fused | exact
+  10     1   1 |    1.690      2.090    1.617x |         800    1600 | yes   anchor=19.2
+  10     1   2 |    1.180      2.380    0.992x |        1600    3200 | yes   anchor=19.1
+  10     1   4 |    1.355      2.440    1.111x |        3200    6400 | yes   anchor=19.2
+  10     1   8 |    1.460      2.480    1.177x |        6400   12800 | yes   anchor=19.2
+  10     8   1 |    2.000      2.640    1.515x |         800    1600 | yes   anchor=19.1
+  10     8   2 |    1.480      3.020    0.980x |        1600    3200 | yes   anchor=19.3
+  10     8   4 |    1.725      3.350    1.030x |        3200    6400 | yes   anchor=19.1
+  10     8   8 |    2.055      3.820    1.076x |        6400   12800 | yes   anchor=19.1
+  10    16   1 |    2.290      3.370    1.359x |         800    1600 | yes   anchor=19.0
+  10    16   2 |    1.900      3.860    0.984x |        1600    3200 | yes   anchor=19.3
+  10    16   4 |    2.385      4.400    1.084x |        3200    6400 | yes   anchor=19.1
+  10    16   8 |    3.005      5.530    1.087x |        6400   12800 | yes   anchor=19.3
+  16     1   1 |    1.159      2.862    0.810x |        1280    2560 | yes   anchor=19.0
+  16     1   2 |    1.406      2.244    1.253x |        2560    5120 | yes   anchor=19.2
+  16     1   4 |    1.200      2.138    1.123x |        5120   10240 | yes   anchor=19.1
+  16     1   8 |    1.228      2.350    1.045x |       10240   20480 | yes   anchor=19.1
+  16     8   1 |    1.450      3.263    0.889x |        1280    2560 | yes   anchor=19.3
+  16     8   2 |    1.784      2.925    1.220x |        2560    5120 | yes   anchor=19.2
+  16     8   4 |    1.659      3.256    1.019x |        5120   10240 | yes   anchor=19.3
+  16     8   8 |    1.859      4.050    0.918x |       10240   20480 | yes   anchor=19.1
+  16    16   1 |    1.762      3.862    0.913x |        1280    2560 | yes   anchor=19.1
+  16    16   2 |    2.181      3.606    1.210x |        2560    5120 | yes   anchor=19.4
+  16    16   4 |    2.112      4.219    1.001x |        5120   10240 | yes   anchor=19.1
+  16    16   8 |    2.575      6.812    0.756x |       10240   20480 | yes   anchor=19.2
+  20     1   1 |    0.980      2.335    0.839x |        1600    3200 | yes   anchor=19.2
+  20     1   2 |    1.123      2.350    0.955x |        3200    6400 | yes   anchor=19.1
+  20     1   4 |    1.157      2.230    1.038x |        6400   12800 | yes   anchor=19.1
+  20     1   8 |    1.170      2.395    0.977x |       12800   25600 | yes   anchor=19.3
+  20     8   1 |    1.292      2.920    0.885x |        1600    3200 | yes   anchor=19.3
+  20     8   2 |    1.493      3.035    0.984x |        3200    6400 | yes   anchor=19.1
+  20     8   4 |    1.665      3.395    0.981x |        6400   12800 | yes   anchor=19.1
+  20     8   8 |    1.885      4.365    0.864x |       12800   25600 | yes   anchor=19.4
+  20    16   1 |    1.617      3.480    0.930x |        1600    3200 | yes   anchor=19.1
+  20    16   2 |    1.902      3.855    0.987x |        3200    6400 | yes   anchor=19.0
+  20    16   4 |    2.215      4.660    0.951x |        6400   12800 | yes   anchor=19.1
+  20    16   8 |    2.812      7.700    0.731x |       12800   25600 | yes   anchor=19.3
+  24     1   1 |    0.925      2.283    0.810x |        1920    3840 | yes   anchor=19.0
+  24     1   2 |    0.946      2.275    0.832x |        3840    7680 | yes   anchor=19.1
+  24     1   4 |    1.021      2.363    0.864x |        7680   15360 | yes   anchor=19.2
+  24     1   8 |    1.146      2.608    0.879x |       15360   30720 | yes   anchor=19.3
+  24     8   1 |    1.192      2.692    0.885x |        1920    3840 | yes   anchor=19.2
+  24     8   2 |    1.306      2.858    0.914x |        3840    7680 | yes   anchor=19.1
+  24     8   4 |    1.454      3.579    0.813x |        7680   15360 | yes   anchor=19.1
+  24     8   8 |    1.917      4.675    0.820x |       15360   30720 | yes   anchor=19.1
+  24    16   1 |    1.496      3.325    0.900x |        1920    3840 | yes   anchor=19.2
+  24    16   2 |    1.696      3.742    0.906x |        3840    7680 | yes   anchor=19.1
+  24    16   4 |    2.052      5.029    0.816x |        7680   15360 | yes   anchor=19.2
+  24    16   8 |    2.977      8.463    0.704x |       15360   30720 | yes   anchor=19.2
+  32     1   1 |    1.256      2.612    0.962x |        2560    5120 | yes   anchor=19.2
+  32     1   2 |    1.003      2.556    0.785x |        5120   10240 | yes   anchor=19.2
+  32     1   4 |    0.966      2.766    0.698x |       10240   20480 | yes   anchor=19.0
+  32     1   8 |    1.083      2.878    0.752x |       20480   40960 | yes   anchor=19.0
+  32     8   1 |    1.595      3.044    1.048x |        2560    5120 | yes   anchor=19.1
+  32     8   2 |    1.458      3.241    0.900x |        5120   10240 | yes   anchor=19.1
+  32     8   4 |    1.502      3.919    0.766x |       10240   20480 | yes   anchor=19.2
+  32     8   8 |    2.086      5.056    0.825x |       20480   40960 | yes   anchor=19.4
+  32    16   1 |    1.903      3.775    1.008x |        2560    5120 | yes   anchor=19.0
+  32    16   2 |    1.798      3.938    0.913x |        5120   10240 | yes   anchor=19.3
+  32    16   4 |    2.220      5.166    0.860x |       10240   20480 | yes   anchor=19.1
+  32    16   8 |    3.311      8.894    0.745x |       20480   40960 | yes   anchor=19.1
+  64     1   1 |    1.297      2.461    1.054x |        5120   10240 | yes   anchor=19.2
+  64     1   2 |    1.252      2.544    0.984x |       10240   20480 | yes   anchor=19.2
+  64     1   4 |    1.336      2.656    1.006x |       20480   40960 | yes   anchor=19.3
+  64     1   8 |    1.374      2.730    1.007x |       40960   81920 | yes   anchor=19.1
+  64     8   1 |    1.530      2.939    1.041x |        5120   10240 | yes   anchor=19.2
+  64     8   2 |    1.622      3.263    0.994x |       10240   20480 | yes   anchor=19.3
+  64     8   4 |    1.948      4.050    0.962x |       20480   40960 | yes   anchor=19.3
+  64     8   8 |    2.565      5.583    0.919x |       40960   81920 | yes   anchor=19.1
+  64    16   1 |    1.873      3.578    1.047x |        5120   10240 | yes   anchor=19.4
+  64    16   2 |    2.090      4.211    0.993x |       10240   20480 | yes   anchor=19.0
+  64    16   4 |    2.667      5.875    0.908x |       20480   40960 | yes   anchor=19.2
+  64    16   8 |    4.009      8.969    0.894x |       40960   81920 | yes   anchor=19.2
+
+# best schedule per (E, rows). UNITS MATTER: the separate column is us per (expert, SINGLE
+# projection), the fused column is us per (expert, gate+up PAIR), so the comparison is
+# 2*sep/expert vs fused/expert - which is what the gain column already does correctly.
+   E= 10 rows= 1: best fused KS=1 2.090 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 10 rows= 8: best fused KS=1 2.640 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 10 rows=16: best fused KS=1 3.370 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 16 rows= 1: best fused KS=4 2.138 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 16 rows= 8: best sep   KS=1 2.900 us per (expert, pair), grid   1280 ( 62.5% of HW)
+   E= 16 rows=16: best sep   KS=1 3.525 us per (expert, pair), grid   1280 ( 62.5% of HW)
+   E= 20 rows= 1: best sep   KS=1 1.960 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 20 rows= 8: best sep   KS=1 2.585 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 20 rows=16: best sep   KS=1 3.235 us per (expert, pair), grid   1600 ( 78.1% of HW)
+   E= 24 rows= 1: best sep   KS=1 1.850 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 24 rows= 8: best sep   KS=1 2.383 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 24 rows=16: best sep   KS=1 2.992 us per (expert, pair), grid   1920 ( 93.8% of HW)
+   E= 32 rows= 1: best sep   KS=4 1.931 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 32 rows= 8: best sep   KS=2 2.916 us per (expert, pair), grid   5120 (250.0% of HW)
+   E= 32 rows=16: best sep   KS=2 3.597 us per (expert, pair), grid   5120 (250.0% of HW)
+   E= 64 rows= 1: best fused KS=1 2.461 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 64 rows= 8: best fused KS=1 2.939 us per (expert, pair), grid  10240 (500.0% of HW)
+   E= 64 rows=16: best fused KS=1 3.578 us per (expert, pair), grid  10240 (500.0% of HW)

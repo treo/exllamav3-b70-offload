@@ -142,25 +142,37 @@ GATE_TILES_N = {"Qwen3.8": 40}
 KS_SEP = {
     2:  {1: {1: 8.225, 2: 4.975, 4: 3.525}, 8: {1: 8.975, 2: 5.675, 4: 4.200}, 16: {1: 9.575, 2: 5.875, 4: 4.450}},
     4:  {1: {1: 4.088, 2: 2.537, 4: 1.900}, 8: {1: 4.613, 2: 2.900, 4: 2.225}, 16: {1: 5.013, 2: 3.250, 4: 2.787}},
-    10: {1: {1: 1.685, 2: 1.170, 4: 1.375}, 8: {1: 2.000, 2: 1.490, 4: 1.755}, 16: {1: 2.290, 2: 1.890, 4: 2.360}},
-    # E=16..64 measured at rows=1 only, to locate the fusion penalty band (out_ks_grid.txt); asking them for
-    # rows=8/16 raises rather than borrowing a neighbouring row count.
-    16: {1: {1: 1.159, 2: 1.403}},
-    20: {1: {1: 0.980, 2: 1.123}},
-    24: {1: {1: 0.910, 2: 0.952}},
-    32: {1: {1: 1.258, 2: 1.005}, 8: {1: 1.594, 2: 1.448}, 16: {1: 1.878, 2: 1.794}},
-    64: {1: {1: 1.284, 2: 1.252}},
+    10: {1: {1: 1.685, 2: 1.170, 4: 1.375}, 8: {1: 2.000, 2: 1.490, 4: 1.755, 8: 2.055}, 16: {1: 2.290, 2: 1.890, 4: 2.360, 8: 3.005}},
+    # E=16..64 rows=1 located the fusion penalty band (out_ks_grid.txt); rows=8/16 for the same E values were
+    # measured to test whether that band depends on rows at all (out_fusion_rows.txt). Cells from both runs are
+    # kept per-run as printed - the two runs of the SAME cell agree within 1.7%, which is why merging them is
+    # unnecessary and overwriting would destroy provenance.
+    16: {1: {1: 1.159, 2: 1.403}, 8: {1: 1.450, 2: 1.784, 4: 1.659, 8: 1.859},
+         16: {1: 1.762, 2: 2.181, 4: 2.112, 8: 2.575}},
+    20: {1: {1: 0.980, 2: 1.123}, 8: {1: 1.292, 2: 1.493, 4: 1.665, 8: 1.885},
+         16: {1: 1.617, 2: 1.902, 4: 2.215, 8: 2.812}},
+    24: {1: {1: 0.910, 2: 0.952}, 8: {1: 1.192, 2: 1.306, 4: 1.454, 8: 1.917},
+         16: {1: 1.496, 2: 1.696, 4: 2.052, 8: 2.977}},
+    32: {1: {1: 1.258, 2: 1.005}, 8: {1: 1.594, 2: 1.448, 4: 1.502, 8: 2.086},
+         16: {1: 1.878, 2: 1.794, 4: 2.220, 8: 3.311}},
+    64: {1: {1: 1.284, 2: 1.252}, 8: {1: 1.530, 2: 1.622, 4: 1.948, 8: 2.565},
+         16: {1: 1.873, 2: 2.090, 4: 2.667, 8: 4.009}},
     96: {1: {1: 1.249, 2: 1.311}, 8: {1: 1.509, 2: 1.680}, 16: {1: 1.857, 2: 2.122}},
 }
 KS_FUSED = {
     2:  {1: {1: 8.800, 2: 5.850, 4: 4.750}, 8: {1: 9.800, 2: 6.650, 4: 5.350}, 16: {1: 10.500, 2: 6.900, 4: 5.700}},
     4:  {1: {1: 4.500, 2: 3.025, 4: 3.750}, 8: {1: 5.125, 2: 3.625, 4: 4.300}, 16: {1: 5.725, 2: 4.375, 4: 5.725}},
-    10: {1: {1: 2.080, 2: 2.370, 4: 2.450}, 8: {1: 2.630, 2: 2.990, 4: 3.370}, 16: {1: 3.370, 2: 3.870, 4: 4.400}},
-    16: {1: {1: 2.856, 2: 2.175}},
-    20: {1: {1: 2.330, 2: 2.325}},
-    24: {1: {1: 2.262, 2: 2.279}},
-    32: {1: {1: 2.609, 2: 2.544}, 8: {1: 3.044, 2: 3.241}, 16: {1: 3.775, 2: 3.956}},
-    64: {1: {1: 2.447, 2: 2.538}},
+    10: {1: {1: 2.080, 2: 2.370, 4: 2.450}, 8: {1: 2.630, 2: 2.990, 4: 3.370, 8: 3.820}, 16: {1: 3.370, 2: 3.870, 4: 4.400, 8: 5.530}},
+    16: {1: {1: 2.856, 2: 2.175}, 8: {1: 3.263, 2: 2.925, 4: 3.256, 8: 4.050},
+         16: {1: 3.862, 2: 3.606, 4: 4.219, 8: 6.812}},
+    20: {1: {1: 2.330, 2: 2.325}, 8: {1: 2.920, 2: 3.035, 4: 3.395, 8: 4.365},
+         16: {1: 3.480, 2: 3.855, 4: 4.660, 8: 7.700}},
+    24: {1: {1: 2.262, 2: 2.279}, 8: {1: 2.692, 2: 2.858, 4: 3.579, 8: 4.675},
+         16: {1: 3.325, 2: 3.742, 4: 5.029, 8: 8.463}},
+    32: {1: {1: 2.609, 2: 2.544}, 8: {1: 3.044, 2: 3.241, 4: 3.919, 8: 5.056},
+         16: {1: 3.775, 2: 3.956, 4: 5.166, 8: 8.894}},
+    64: {1: {1: 2.447, 2: 2.538}, 8: {1: 2.939, 2: 3.263, 4: 4.050, 8: 5.583},
+         16: {1: 3.578, 2: 4.211, 4: 5.875, 8: 8.969}},
     96: {1: {1: 2.507, 2: 2.481}, 8: {1: 3.050, 2: 3.264}, 16: {1: 3.765, 2: 4.305}},
 }
 DEVICE_L2_MIB = 24.0      # `devinfo` -> global cache (L2): 24.0 MiB
@@ -247,11 +259,21 @@ def selftest_launch():
             raise AssertionError(f"E={bad} should be refused (below the measured range)")
         except ValueError:
             pass
-    try:
-        best_launch(64, 8)          # E=64 measured at rows=1 only
-        raise AssertionError("E=64 rows=8 should be refused; it was never measured")
-    except ValueError:
-        pass
+    for bad in ((64, 2), (10, 2), (2, 4)):      # rows=2/4 were never measured at ANY E
+        try:
+            best_launch(*bad)
+            raise AssertionError(f"E={bad[0]} rows={bad[1]} should be refused; that row count was never measured")
+        except ValueError:
+            pass
+    # Cells added by out_fusion_rows.txt must now RESOLVE, and resolve to the measured winner: E=64 rows=8 has
+    # fused 2.939 vs separate 2*1.530 = 3.060 us per pair, a 4.0% margin - just OUTSIDE the 3% tie band, so it is
+    # reported as a win, not a tie. The tie control is E=16 rows=8: fused 2.925 (KS=2) vs separate 2*1.450 =
+    # 2.900, 0.9% the other way, which must be marked INDIFFERENT.
+    us64, fused64, ks64, note64 = best_launch(64, 8)
+    assert abs(us64 - 2.939) < 1e-9 and fused64 and ks64 == 1, (us64, fused64, ks64, note64)
+    assert "INDIFFERENT" not in note64, note64
+    us16, fused16, ks16, note16 = best_launch(16, 8)
+    assert not fused16 and ks16 == 1 and "INDIFFERENT" in note16, (us16, fused16, ks16, note16)
     us, fused, KS, note = best_launch(12, 8)      # unmeasured E -> nearest below, flagged
     assert fused and KS == 1 and "nearest measured point below" in note, (us, fused, KS, note)
     return True

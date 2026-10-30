@@ -4,23 +4,23 @@ XMX crossover: 367e12/2 MAC/s over 674e9 B/s = 272 MAC per byte -> a GEMM become
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 257 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.11x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 2.05 bpw: eb 1.215 MiB, h 100.0 %, parent bill 69 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 165 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      257       36        0  parent    12.36      81    1.0x       1.0
-      2    19.4      265       89        0  parent    12.74     157    1.9x       1.0
-      4    36.4      281      167        0  parent    13.50     296    3.7x       1.1
-      8    65.1      313      299        0  parent    15.02     533    6.6x       1.2
+      1    10.0      257       36        0 parent~    12.36      81    1.0x       1.0
+      2    19.4      265       89        0 parent~    12.74     157    1.9x       1.0
+      4    36.4      281      167        0 parent~    13.50     296    3.7x       1.1
+      8    65.1      313      299        0 parent~    15.02     533    6.6x       1.2
      16   107.1      376      492        0   B70:D    23.62     677    8.4x       1.5
      32   158.5      503      765        0   B70:D    36.70     872   10.8x       2.0
      64   207.6      757     1002        0   B70:D    48.09    1331   16.4x       3.1
     128   243.0     1264     1305        0   B70:J    62.64    2044   25.3x       5.3
-    256   262.4     2278     1777        0  parent   109.37    2341   28.9x       9.8
+    256   262.4     2278     1777        0 parent~   109.37    2341   28.9x       9.8
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 259 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.12x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      259       36        0  parent    12.44      80    1.0x       1.0
-      2    19.8      267       89        0  parent    12.82     156    1.9x       1.0
-      4    38.4      283      174        0  parent    13.58     294    3.7x       1.0
+      1    10.0      259       36        0 parent~    12.44      80    1.0x       1.0
+      2    19.8      267       89        0 parent~    12.82     156    1.9x       1.0
+      4    38.4      283      174        0 parent~    13.58     294    3.7x       1.0
       8    72.9      315      330        0   B70:D    15.83     505    6.3x       1.1
      16   131.8      378      596        0   B70:D    28.60     559    7.0x       1.2
      32   221.1      505     1000        0   B70:D    47.99     667    8.3x       1.4
@@ -32,9 +32,9 @@ Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill 86 MiB/layer weights + 4.
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 259 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.12x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      259       42       28  parent    12.44      80    1.0x       1.0
-      2    19.8      267       86       55  parent    12.82     156    1.9x       1.0
-      4    38.4      283      168      107  parent    13.58     295    3.7x       1.0
+      1    10.0      259       42       28 parent~    12.44      80    1.0x       1.0
+      2    19.8      267       86       55 parent~    12.82     156    1.9x       1.0
+      4    38.4      283      168      107 parent~    13.58     295    3.7x       1.0
       8    72.9      315      319      203   B70:D    15.31     523    6.5x       1.1
      16   132.0      378      578      367   B70:D    27.72     577    7.2x       1.2
      32   221.5      505      969      616   B70:D    46.53     688    8.6x       1.4
@@ -46,22 +46,22 @@ Qwen3.8 4.05 bpw: eb 2.411 MiB, h 94.8 %, parent bill 86 MiB/layer weights + 4.5
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 260 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.13x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill 94 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 138 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      260       37        0  parent    12.48      80    1.0x       1.0
-      2    19.2      268       89        0  parent    12.86     156    1.9x       1.0
-      4    35.3      284      163        0  parent    13.62     294    3.7x       1.1
-      8    60.9      315      281        0  parent    15.14     528    6.6x       1.3
+      1    10.0      260       37        0 parent~    12.48      80    1.0x       1.0
+      2    19.2      268       89        0 parent~    12.86     156    1.9x       1.0
+      4    35.3      284      163        0 parent~    13.62     294    3.7x       1.1
+      8    60.9      315      281        0 parent~    15.14     528    6.6x       1.3
      16    94.8      379      438        0   B70:D    21.03     761    9.5x       1.7
      32   129.9      506      630        0   B70:D    30.25    1058   13.2x       2.5
      64   158.7      759      857        0   B70:J    41.13    1556   19.4x       4.0
-    128   177.6     1266      959        0  parent    60.79    2106   26.3x       7.2
-    256   190.3     2281     1296        0  parent   109.48    2338   29.2x      13.5
+    128   177.6     1266      959        0 parent~    60.79    2106   26.3x       7.2
+    256   190.3     2281     1296        0 parent~   109.48    2338   29.2x      13.5
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 64, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 261 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.14x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 6.05 bpw: eb 3.608 MiB, h 90.4 %, parent bill 101 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 129 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1    10.0      261       40       77  parent    12.51      80    1.0x       1.0
-      2    19.7      269       82      151  parent    12.89     155    1.9x       1.0
+      1    10.0      261       40       77 parent~    12.51      80    1.0x       1.0
+      2    19.7      269       82      151 parent~    12.89     155    1.9x       1.0
       4    38.0      284      159      292     CPU    13.99     286    3.6x       1.1
       8    71.2      316      298      546     CPU    26.23     305    3.8x       1.1
      16   126.2      380      527      968     CPU    46.49     344    4.3x       1.3

@@ -1209,6 +1209,22 @@ nothing that is the sole instance of a measurement.
     rather than the 860 the card actually delivers (samples ranged 639-864, so only best-of-N is quotable). A
     spec bandwidth is an upper bound on a *traffic* term; it is not a rate you may charge a kernel with.
 
+62. **A guard that encodes "not measured yet" becomes a live bug the day you measure it - and its replacement
+    must be written from the printed contract, not the intention.** `plan_decode_cost.py`'s selftest asserted that
+    `best_launch(64, 8)` raises, because rows=8 had never been measured at E=64 and borrowing a neighbouring row
+    count was the exact failure mode the guard existed to prevent. After the rows sweep filled that cell
+    (`out_fusion_rows.txt`) `plan_decode_cost.py` exited 1 while every planner importing it stayed green, so the
+    symptom read as "the new data broke the model". The data was fine; the *control* was stale. Two rules came out
+    of it. (1) When a cell gets measured, grep for the refusal that named it and convert that negative control into
+    a positive one (assert the value now on file) while *keeping* a negative control on a cell that really is still
+    unmeasured - rows=2/4 here, which is exactly what makes the planners fall back rather than guess. A suite of
+    only-positive tests would have gone stale silently in the other direction. (2) My replacement assertion then
+    failed too: I demanded the tie marker for E=64 rows=8 because its gain was "1.04x", but the module reports
+    `INDIFFERENT` only inside 3% and that margin was 4.0%. The note in the failing message (`grid 10240 threads
+    (500% of HW)`) was the correct contract; my memory of the band was not. Assertions belong downstream of the
+    printed interface - and when an assertion fails on brand-new data, check the assertion before suspecting the
+    data, because the data is the one thing in the commit that was just measured twice.
+
 
 
 

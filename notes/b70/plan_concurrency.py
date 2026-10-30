@@ -55,6 +55,16 @@ _spec3.loader.exec_module(pdc)
 
 CTX = 4096
 CALIB = {"Qwen3.8": 250.0}          # measured T_layer at b=1, us (doc/prep); GLM unmeasured
+# Two defensible parent models exist now, and they differ ~2x (see out_parent_leg.txt, LESSONS 61):
+#   calibrated - the inherited route: subtract the streamed bytes from the observed ~250 us/layer window and
+#                call the remainder "fixed overhead". Contains the sampler, lm_head, graphs, everything the
+#                window contains; reproduces the window by construction, so it cannot corroborate it.
+#   floor      - the measured route: use the composed floor from the 3090 benches (attention + streamed
+#                weights + state traffic). Excludes those overheads, so it is a LOWER bound on parent time and
+#                the t/s it prints is an upper bound on what the box can do.
+# Switch with B70_PARENT_MODEL=floor. Only measured to b=16, so larger rows fall back to `calibrated` and are
+# marked with '~' in the binds column.
+PARENT_MODEL = os.environ.get("B70_PARENT_MODEL", "calibrated")
 
 
 def union_at(cnt, E, topk, rows, rng_seed=5, trials=400):
@@ -121,7 +131,10 @@ def main():
               f"Streamed reads charged at {ppb.PARENT_STREAM_GBPS:.0f} GB/s (measured), not the 936 spec figure.")
         print(f"Qwen3.8 {lab} bpw: eb {eb:.3f} MiB, h {h*100:.1f} %, parent bill "
               f"{rd_l:.0f} MiB/layer weights + {state_l:.1f} state + {kv_l:.1f} KV per sequence-layer; "
-              f"fixed overhead {fixed:.0f} us")
+              f"fixed overhead {fixed:.0f} us"
+              + ("   PARENT MODEL = measured floor: ms/step and tok/s are UPPER BOUNDS; rows above the "
+                 "measured b<=16 range fall back to the calibrated model and are marked ~"
+                 if PARENT_MODEL == "floor" else ""))
         print(f"  {'rows':>5s} {'union':>7s} {'parent':>8s} {'B70':>8s} {'CPU':>8s} {'binds':>7s} "
               f"{'ms/step':>8s} {'tok/s':>7s} {'vs b=1':>7s} {'rows/exp':>9s}")
         # E25a/D8: price gate+up as one launch where that is cheaper, using the SAME shared rule and geometry
@@ -134,7 +147,10 @@ def main():
             u = union_at(cnt, E, topk, rows)
             dev_mib = u * h * eb
             rate = pq.interp(band, dev_mib, 1)      # diagnostic only now: footprint, not a rate driver
-            tp = fixed + us(rd_l + rows * (state_l + kv_l), ppb.PARENT_STREAM_GBPS)
+            if PARENT_MODEL == "floor" and rows <= 16:
+                tp, pmark = ppb.parent_floor_us(rows, CTX)[0], ""
+            else:
+                tp, pmark = fixed + us(rd_l + rows * (state_l + kv_l), ppb.PARENT_STREAM_GBPS), "~"
             # Measured decode cost, priced PER EXPERT at the row count that expert actually sees. One step's
             # `rows` tokens make rows*topk selections spread over union(rows) touched experts, so the average
             # per-expert row count is rows*topk/union - the "rows/exp" column below - NOT the global row count.
@@ -157,7 +173,7 @@ def main():
                     fused_rows.append(rows)
             tc_ = us(u * (1 - h) * eb, ppb.CPU_RATE)
             wall = max(tp, tb, tc_)
-            binds = "parent" if wall == tp else (f"B70:{kern[0].upper()}" if wall == tb else "CPU")
+            binds = "parent" + pmark if wall == tp else (f"B70:{kern[0].upper()}" if wall == tb else "CPU")
             step = wall * nl / 1000.0
             tput = rows / (step / 1000.0)
             if rows == 1:
