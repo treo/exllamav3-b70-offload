@@ -1,0 +1,18 @@
+  gate_proj K=3 tn=40    rows=1   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=3 tn=40    rows=4   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=3 tn=40    rows=8   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=3 tn=40    rows=16  dp4a=ok revI=ok revJ=ok revK=ok
+  down_proj K=3 tn=160   rows=1   dp4a=ok revI=ok revJ=ok revK=ok
+  down_proj K=3 tn=160   rows=4   dp4a=ok revI=ok revJ=ok revK=ok
+  down_proj K=3 tn=160   rows=8   dp4a=ok revI=ok revJ=ok revK=ok
+  down_proj K=3 tn=160   rows=16  dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=2          rows=1   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=2          rows=4   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=2          rows=8   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=2          rows=16  dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=5          rows=1   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=5          rows=4   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=5          rows=8   dp4a=ok revI=ok revJ=ok revK=ok
+  gate_proj K=5          rows=16  dp4a=ok revI=ok revJ=ok revK=ok
+
+112 comparisons, 0 failures, 0 skips

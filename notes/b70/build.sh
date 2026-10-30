@@ -33,7 +33,22 @@ icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas6 probe_dpas6.c
 echo "built probe_dpas6"
 # rev J (probe_dpas7): transposed tiles - current fastest, but needs the permuted device layout. Instantiates
 # K_MIN..K_MAX x 5 M configurations, so the binary is ~8.5 MB and the build is slow; keep per_kernel splitting.
+# rev J (probe_dpas7): transposed tiles - the current fastest decode kernel. Instantiates K_MIN..K_MAX x 5 M
+# configurations, so the binary is ~8.5 MB and the build is slow; keep per_kernel splitting.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas7 probe_dpas7.cpp
 echo "built probe_dpas7"
+# rev K (probe_dpas8): rev J + fused combine + DPAS_FLOOR. The fused combine is REFUTED (doc/port/
+# b70-decode-closeout.md D2); keep this build because DPAS_FLOOR is the only instrument that separates fixed
+# cost from per-tile work, and DPAS_COMBINE=split reproduces rev J's structure for A/B runs.
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas8 probe_dpas8.cpp
+echo "built probe_dpas8"
+
+# dp4a path: one binary per trellis K, since compile-time K is worth x1.2-1.5 at rows=1 (out_gemv.txt).
+# gate_dpas.py expects /tmp/pgK<K>; it reports a clear SKIP when one is missing rather than passing silently.
+for k in 2 3 4 5 6; do
+    icpx -fsycl -O2 -DGEMV_KCONST=$k -o /tmp/pgK$k probe_gemv.cpp
+done
+echo "built /tmp/pgK2..6 (dp4a, rev C + compile-time K)"
+echo "exactness gate: python3 gate_dpas.py   # dp4a / rev I / rev J / rev K, bit-exact vs y_ref and byte-identical to each other"
 icpx -fsycl -O2 -shared -fPIC -o libb70shim.so b70_shim.cpp
 echo "built libb70shim.so"

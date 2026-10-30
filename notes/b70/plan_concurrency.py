@@ -12,9 +12,12 @@ set by three worker terms per layer that scale differently:
       read + written on Qwen3.8) and KV grows with rows x ctx, so the parent does have a rows slope - it
       is just much smaller than the expert term.
   T_b70(rows)    = h * |union(rows)| * per_expert_layer_us(rows)   [measured, plan_decode_cost.py]
-      REPLACES the old bytes/rate formula. The decode GEMV is instruction-bound and recipe-independent
-      (b70-kernels 2b/2c), so bytes over a bandwidth curve is the wrong model; the measured per-expert cost
-      is per weight and per row count, and the engine dispatches dp4a (rows=1) vs DPAS (rows>=2).
+      REPLACES the old bytes/rate formula. Every kernel through rev H was instruction/routing-bound
+      (b70-kernels 2b/2c), so bytes over a bandwidth curve was the wrong model for THOSE kernels; the
+      measured per-expert cost is per weight and per row count. Dispatch has since collapsed to one family
+      (rev J, transposed tiles) for K = 2..16, with dp4a kept only for layouts that cannot be permuted at
+      K > 5 - see doc/port/b70-decode-closeout.md. Rev J itself runs at ~90 % of the measured stream slope,
+      so for the selected kernel bytes do bind again.
       distinct experts is the union over rows, i.e. this ALREADY assumes perfect intra-step weight
       reuse: an expert read once per layer per step, however many rows picked it (the bucketed GEMM the
       CPU path uses). That is the right model, and it is why B70 work saturates instead of growing
