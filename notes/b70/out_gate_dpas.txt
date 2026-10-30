@@ -15,4 +15,14 @@
   gate_proj K=5          rows=8   dp4a=ok revI=ok revJ=ok revK=ok
   gate_proj K=5          rows=16  dp4a=ok revI=ok revJ=ok revK=ok
 
-112 comparisons, 0 failures, 0 skips
+staged-layout input (production AVX2 planar dword order, consumed verbatim):
+  gate_proj K=3 tn=40    rows=1   verbatim-staged ok
+  gate_proj K=3 tn=40    rows=16  verbatim-staged ok
+  down_proj K=3 tn=160   rows=1   verbatim-staged ok
+  down_proj K=3 tn=160   rows=16  verbatim-staged ok
+  gate_proj K=2          rows=1   verbatim-staged ok
+  gate_proj K=2          rows=16  verbatim-staged ok
+  gate_proj K=5          rows=1   verbatim-staged ok
+  gate_proj K=5          rows=16  verbatim-staged ok
+
+120 comparisons, 0 failures, 0 skips

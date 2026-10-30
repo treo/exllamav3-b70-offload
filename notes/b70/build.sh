@@ -37,6 +37,11 @@ echo "built probe_dpas6"
 # configurations, so the binary is ~8.5 MB and the build is slow; keep per_kernel splitting.
 icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -o probe_dpas7 probe_dpas7.cpp
 echo "built probe_dpas7"
+# D3-alt: the same kernel reading the parent's PRODUCTION staged bytes (AVX2 planar dword order) with no
+# internal permute. gate_dpas.py --staged asserts this stays bit-exact - it is the regression gate behind
+# "the B70 copy can be verbatim".
+icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -o /tmp/revJ_staged probe_dpas7.cpp
+echo "built /tmp/revJ_staged (staged-layout input)"
 # rev K (probe_dpas8): rev J + fused combine + DPAS_FLOOR. The fused combine is REFUTED (doc/port/
 # b70-decode-closeout.md D2); keep this build because DPAS_FLOOR is the only instrument that separates fixed
 # cost from per-tile work, and DPAS_COMBINE=split reproduces rev J's structure for A/B runs.

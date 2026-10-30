@@ -1,0 +1,83 @@
+D3-alt: is the B70's permuted intra-tile order also the CPU's staged order?  YES on AVX2.
+=============================================================================================
+Question (owner's): rather than permuting on the device, make the single in-RAM staged layout the B70's
+order, so the B70 copy is verbatim and the CUDA path still unpacks to native - just from a different base.
+Investigated on the AVX2-only host (Ryzen 9 5950X, no AVX-512 in /proc/cpuinfo: avx2 yes, avx512 none,
+vnni none, 32 threads).
+
+WHAT THE PRODUCTION CODE ALREADY DOES
+-------------------------------------
+exllamav3/model/moe_cpu_host.py::_copy_repacked(dst, tensor, group, planar):
+    "tile (kt, nt) moves to (nt/group, kt, nt%group), and with planar each tile's dwords are transposed --
+     dword w to 8*(w%bits) + w/bits, i.e. the trailing (8, bits) dword dims swap (integer rates only,
+     where group is nonzero)"
+The rule for which layout applies is exl3_moe_cpu_swizzle_group / exl3_moe_cpu_planar_layout
+(moe_mul1.cpp:3633, 3643): AVX-512 BW tiers get group 8 (integer rates), AVX2 gets group 2, scalar gets 0;
+**planar is returned only for AVX2** (`g_isa == Isa::Avx2 && swizzle_group == 2`).
+
+CHECK 1 - is the production planar dword map the same permutation rev J requires?   YES, byte-identical
+----------------------------------------------------------------------------------------------------------------
+On the real case /tmp/gemv_dpE10 (K=3, 64 000 tiles, 1 536 000 dwords, tile = NW = 8K = 24 dwords = 96 B,
+which is the same 16x16-weight tile the CPU uses - tile_u16(3) = 48 u16 = 96 B):
+
+    rev J (probe_dpas7 main()):        dst[i*8 + q] = src[q*K + i]
+    production planar (view/permute):  dst = tile.reshape(-1, 8, K).transpose(0, 2, 1)
+    docstring formula:                 dst[8*(w % K) + w // K] = src[w]
+    all three agree over every dword  ->  True
+
+A first attempt at this comparison said False, because the docstring formula was coded as a gather
+(`planar[:, w] = t[:, 8*(w%K)+w//K]`) instead of a scatter - a gather/scatter slip, caught by implementing
+the actual numpy op from the source rather than its prose. Worth remembering: the prose and the op agreed
+only after the op was copied.
+
+CHECK 2 - does rev J actually consume the staged bytes, and at the same rate?      YES and YES
+------------------------------------------------------------------------------------------------
+probe_dpas7 gained `-DDPAS_STAGED_LAYOUT` (input already in that order, so no internal permute). Case dirs
+were rebuilt with the production planar dword map applied and **tile order deliberately left native**, to
+isolate the dword-permute claim from the tile-order claim:
+
+    exactness (vs each case's own y_ref, fresh output file per run)
+      gate_proj  /tmp/gemv_dpE10_planar   rows 1/4/16   OK OK OK
+      down_proj  /tmp/rc_down_268_planar  rows 1/4/16   OK OK OK
+
+    rate, warm interleaved min of 4 (rev J on native bytes, permuting internally, vs rev J on staged bytes)
+      gate_proj  rows=1   14.0 vs 14.0 us    +0.0 %
+      gate_proj  rows=16  20.4 vs 20.8 us    +2.0 %
+      down_proj  rows=1   15.9 vs 15.7 us    -1.3 %
+      down_proj  rows=16  30.5 vs 30.3 us    -0.7 %
+
+So on this host the parent ALREADY emits the byte order that the B70's fastest decode kernel wants, and
+consuming it verbatim costs nothing measurable.
+
+WHY THE CPU LIKES IT TOO - and it was never a coincidence
+---------------------------------------------------------
+The AVX2 kernel's own words (moe_mul1.cpp:1978-1991): under the planar order, `avx2_gather_half_planar`
+often needs no shuffle at all - `if constexpr (planar_identity<...>()) return preg[reg];` - because a
+half-row's source dwords already sit in one register; only the non-identity cases fall back to
+`_mm256_permutevar8x32_epi32`. That is the same mechanism rev J exploits on the GPU: putting the same
+ring position of every column group adjacent turns operand routing into register identity. The CPU reached
+for it first (the note credits `benchmarks/exl3_cpu_gemm`), which is why the two layouts coincide.
+
+CONSEQUENCES
+------------
+* D3 (device-side permute at admit) is unnecessary on AVX2 hosts: staging is already verbatim-compatible.
+  Its measured price (3.46 ms per 512 MiB, probe_permute) simply does not get paid here.
+* It stays necessary as a fallback wherever the staged form is NOT planar: AVX-512 hosts (group 8, native
+  dwords) and non-integer rates (group 0). So the B70 side must be TOLD which staged layout it received -
+  the layout marker in the handoff is a correctness requirement, not cosmetics: group is 8 / 2 / 0
+  depending on tier and rate, and reading the wrong one miscomputes silently for any expert routing
+  happens not to select.
+* Remaining real work for true verbatim staging: the B70 kernel's tile index map must follow the staged
+  banding `(nt/group, kt, nt%group)` instead of checkpoint `(kt, nt)`. That is addressing only - the
+  permute claim is already verified above, and banding cannot hurt the GPU's rate (it reads whole tiles;
+  banding only improves DRAM page behaviour) - but it must be measured, not assumed, per the standing rule.
+* Nothing about the checkpoint format, oracle provenance or capacity arithmetic changes: the permuted form
+  is a staged/RAM representation, and every reference still comes from native checkpoint bytes.
+
+Reproduce:
+    python3 -c "import numpy as np; K=3; t=np.fromfile('/tmp/gemv_dpE10/weights.bin',dtype=np.uint32).reshape(-1,8*K); \
+                r=np.empty_like(t); [r.__setitem__((slice(None), i*8+q), t[:, q*K+i]) for q in range(8) for i in range(K)]; \
+                print(np.array_equal(r, t.reshape(-1,8,K).transpose(0,2,1).reshape(-1,8*K)))"
+    icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -o /tmp/revJ_staged probe_dpas7.cpp
+    python3 gate_dpas.py --staged        # regenerates the planar case dirs and asserts exactness
+    ./probe_dpas7 /tmp/gemv_dpE10_planar 1 1 2   # vs /tmp/revJ_staged

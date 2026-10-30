@@ -24,6 +24,7 @@ reports success.
 """
 import glob
 import os
+import shutil
 import subprocess
 import sys
 
@@ -62,8 +63,65 @@ def newest_file(case, before=None):
     return max(new, key=os.path.getmtime)
 
 
+def make_staged(case, K):
+    """Write <case>_planar with the PRODUCTION AVX2 staged dword order (moe_cpu_host._copy_repacked's
+    planar map: swap each tile's trailing (8, bits) dword dims), tile order deliberately left native so the
+    check isolates the dword-permute claim. Returns the new dir, or None if the case lacks weights.bin."""
+    src = os.path.join(case, "weights.bin")
+    if not os.path.exists(src):
+        return None
+    nw = 8 * K
+    t = np.fromfile(src, dtype=np.uint32)
+    assert t.size % nw == 0, f"{src}: {t.size} dwords is not a multiple of tile size {nw}"
+    out = case + "_planar"
+    if not os.path.isdir(out):
+        shutil.copytree(case, out)
+    t.reshape(-1, 8, K).transpose(0, 2, 1).reshape(-1, nw).astype(np.uint32).tofile(os.path.join(out, "weights.bin"))
+    for f in glob.glob(os.path.join(out, "y_dev*")):
+        os.remove(f)
+    return out
+
+
+def staged_checks(fails):
+    """D3-alt: assert that the B70 kernel consumes the parent's staged bytes verbatim (probe_dpas7 built
+    with -DDPAS_STAGED_LAYOUT, so it does no permute of its own) and stays bit-exact. This is the regression
+    gate for the 'copy verbatim to the B70' claim - if a future staging change alters the planar map, or the
+    kernel's tile map drifts, this is what catches it."""
+    bin_ = "/tmp/revJ_staged"
+    if not os.path.exists(bin_):
+        print("  SKIP  staged: /tmp/revJ_staged not built "
+              "(icpx -fsycl -O2 -fsycl-device-code-split=per_kernel -DDPAS_STAGED_LAYOUT -o /tmp/revJ_staged probe_dpas7.cpp)")
+        return 0
+    n = 0
+    print("\nstaged-layout input (production AVX2 planar dword order, consumed verbatim):")
+    for case, K, label, ks in CASES:
+        if K > 5 or not os.path.isdir(case) or not os.path.exists(os.path.join(case, "sx8.bin")):
+            continue
+        st = make_staged(case, K)
+        ref = np.load(os.path.join(case, "y_ref.npy")).astype(np.float32)
+        for R in (1, 16):
+            for f in glob.glob(os.path.join(st, "y_dev*")):
+                os.remove(f)
+            rc, out, err = run(bin_, [st, "1", str(R), str(ks)])
+            f = newest_file(st)
+            n += 1
+            if rc or f is None:
+                fails.append(f"{label} staged rows={R}: rc={rc} no output - {(err or out).strip()[:70]}")
+                continue
+            got = np.fromfile(f, dtype=np.float32)
+            want = ref[:, :R, :]
+            if got.size != want.size:
+                fails.append(f"{label} staged rows={R}: size {got.size} vs ref {want.size}")
+            elif not np.array_equal(got.reshape(want.shape), want):
+                fails.append(f"{label} staged rows={R}: NOT bit-exact ({int((got.reshape(want.shape) != want).sum())} differ)")
+            else:
+                print(f"  {label:<22} rows={R:<3} verbatim-staged ok")
+    return n
+
+
 def main():
     quick = "--quick" in sys.argv
+    staged = "--staged" in sys.argv
     rows = (1, 4, 16) if quick else ROWS
     fails, checks, skips = [], 0, []
 
@@ -144,6 +202,8 @@ def main():
                     fails.append(f"{label} {nm} != {base} rows={R}: size {outs[nm].size} vs {outs[base].size}")
             print(f"  {label:<22} rows={R:<3} " + (" ".join(f"{n}=ok" for n in names) if names else "NO KERNELS RAN"))
 
+    if staged:
+        checks += staged_checks(fails)
     print(f"\n{checks} comparisons, {len(fails)} failures, {len(skips)} skips")
     for s in skips:
         print(f"  SKIP  {s}")

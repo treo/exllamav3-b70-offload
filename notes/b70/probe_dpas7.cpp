@@ -514,13 +514,22 @@ int main(int argc, char **argv)
 
     // Transposed tiles: within each tile, dword q*K + i (row i of column group q) moves to i*8 + q.
     // A permutation inside each 32K-byte tile - in a real pipeline, done once when the weights load.
+    //
+    // -DDPAS_STAGED_LAYOUT says the input is ALREADY in that order, which is the production AVX2 staged
+    // form: moe_cpu_host._copy_repacked swaps each tile's trailing (8, bits) dword dims, i.e. dword w ->
+    // 8*(w%bits) + w/bits - byte-identical to the map below (verified on /tmp/gemv_dpE10: 1.536M dwords).
+    // So the B70 can consume the CPU's staged bytes verbatim; this build is how that claim is tested.
     std::vector<uint32_t> hW(ntiles * NW);
+#ifdef DPAS_STAGED_LAYOUT
+    memcpy(hW.data(), wbuf.data(), ntiles * NW * 4);
+#else
     {
         const uint32_t *src = (const uint32_t *)wbuf.data();
         for (size_t t = 0; t < ntiles; ++t)
             for (int q = 0; q < 8; ++q)
                 for (int i = 0; i < K; ++i) hW[t * NW + i * 8 + q] = src[t * NW + q * K + i];
     }
+#endif
 
     // Activation tiles: XA[kt][kb][row][4*w + b] = x8[row][kt*16 + kb*8 + w], row < RPAD (rows >= R repeat
     // R-1), w = 0..7, b = 0..3 - so each (tile, byte-block, DPAS) A operand is one contiguous run.
