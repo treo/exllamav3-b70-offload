@@ -14,7 +14,8 @@ It is a claim about the grid, not a property of memory.
 The vendor's own decode kernels are the cautionary case: they are laid out per route, one work-item per routed pick,
 and rely on cache to absorb the duplicates. Only their grouped prefill kernels bucket by expert. On a batch of 8 with
 topk 10, a per-route grid reads about five times the modelled bytes, which makes every concurrency figure in
-this plan optimistic at exactly the batch where the card becomes the binding worker.
+this plan optimistic in exactly the batch band where the card becomes the binding worker, which ADR-0048 places
+between batch 16 and 64.
 
 Two measured facts make bucketing cheap here. The parent already sorts each row's picks by expert id before any
 kernel runs, and the payoff is large: at M of 16, 160 picks hit 73 experts rather than 160, so dedup alone is worth

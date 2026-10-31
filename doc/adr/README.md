@@ -121,7 +121,7 @@ violation. It exists because one order check in this file was a tautology for a 
 | ADR-0045 | [Load refuses a configuration the machine cannot hold](ADR-0045-load-refuses-unaffordable-configurations.md) | Accepted |
 | ADR-0046 | [A gate is explained by measurement, never waived](ADR-0046-gates-may-be-explained-not-waived.md) | Accepted |
 | ADR-0047 | [Implementation starts with a one-layer vertical slice](ADR-0047-start-with-a-one-layer-vertical-slice.md) | Accepted |
-| ADR-0048 | [The offload is hidden at decode only at small batch](ADR-0048-decode-hiding-is-a-small-batch-claim.md) | Accepted |
+| ADR-0048 | [The offload is hidden at decode only over part of the batch range](ADR-0048-decode-hiding-is-a-small-batch-claim.md) | Accepted |
 | ADR-0049 | [Weights reach the matrix unit as integer product bytes, not as fp16](ADR-0049-integer-operand-route-to-the-matrix-unit.md) | Accepted |
 
 Groups: boundary and protocol, ADR-0001 to ADR-0008. Expert homes and placement, ADR-0009 to ADR-0018.

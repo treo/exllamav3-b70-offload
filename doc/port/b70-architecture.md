@@ -730,6 +730,13 @@ measured rate curve at the matched footprint:
 | 128 | 1175 | 2737 / 4363 | B70 | 974 | 611 |
 | 256 | 2107 | 3067 / 4919 | B70 | 1739 | 1084 |
 
+> **Data currency note, added when this table was transferred into
+> [`doc/adr/ADR-0048`](../adr/ADR-0048-decode-hiding-is-a-small-batch-claim.md).** This run predates the fused gate and
+> up schedule (D8, E25a) and the engine-measured parent leg (D11). `notes/b70/out_concurrency.txt` is the current run:
+> at 2.68 bpw it gives 195.6 µs parent against 38 µs card at rows 1 (107 tok/s), the card binding from rows 16 to 64, and
+> the **parent binding again** at rows 128 and 256 (1721 µs against 1262 µs, 3100 tok/s). So "B70 binds from b≈4 to 256"
+> and this table's tok/s column are both superseded, and the binding worker changes twice rather than once.
+
   The parent's rows-slope is gentle — fixed overhead ~130–146 µs plus 86–101 MiB of batch-independent
   weights plus only ~6.5 MiB per sequence-layer of state and KV — so it is overtaken by b≈4–8 and never
   retakes the lead. Consequences: (a) the b=1 "hidden with 5× margin" claim is the *one* point where the
@@ -1301,7 +1308,7 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 | placement objective = minimise summed compute | **replaced: minimise the per-layer maximum**, with `S_g` serial and `S_b`/`S_c` concurrent | 2.1a; `P_order` vs `P_lpt` differ by 0 % (Qwen3.8 b=1) to +20 % (GLM, ordered better) depending on regime **[P, from measured rates]** | E19 |
 | hottest-first within a layer | retained **while a CPU residue exists**, not as a universal rule; the boundary is **recipe-dependent** | spreading hot experts over both VRAM homes leaves colder ones to `bytes/47.4`, the most expensive byte on the box (GLM: `order` wins 9–20 %). Across five Qwen3.8 recipes: `lpt` wins +3…+9 % at 2.05/2.68/4.05/5.05 bpw, `order` wins **+43 % at 6.05 bpw**, the only one with a real residue **[M]** | E19 |
 | §2.1a's premises are recipe-general on Qwen3.8 | checked, not assumed | matched rate band 207–295 GB/s at K = 2.5–6.0; parent duty 31–45 % at every quant; residency falls 512 → 104 slots/layer only through `expert_bytes` **[M]** | a recipe that scaled the streamed non-expert tensors with bits — then the parent's duty would climb with quantisation and the "spare bandwidth on the 3090" premise would break |
-| decode figures are b=1 figures | stated, and extended to a rows axis | `plan_concurrency.py`: parent binds at b ≤ 4, B70 binds from b≈4–8 to 256; aggregate 83 → 1739 tok/s (2.68 bpw) **[P, measured rates]** | E21 — flattening earlier or lower than predicted means per-step byte cost is worse than the footprint-matched rate implies |
+| decode figures are b=1 figures | stated, and extended to a rows axis | `plan_concurrency.py`: parent binds at b ≤ 4, B70 binds from b≈4–8 to 256; aggregate 83 → 1739 tok/s (2.68 bpw) **[P, measured rates]**. Superseded by the current `out_concurrency.txt`, which prices the fused schedule: parent binds at b ≤ 8, B70 at b = 16–64, parent again at b ≥ 128, and 107 → 3100 tok/s over b = 1 → 256. See [`doc/adr/ADR-0048`](../adr/ADR-0048-decode-hiding-is-a-small-batch-claim.md) | E21 — flattening earlier or lower than predicted means per-step byte cost is worse than the footprint-matched rate implies |
 | concurrency rescues via a second kernel family | **no — via a second schedule over one arithmetic path** | the only addressable factor is rate (bytes irreducible, flops irrelevant at rows/expert ≤ 6); the rescue is the measured clustered factor, 1.46–1.64× at 2.68 bpw **[P]** on **[M]** rates | E23; if bit-identical outputs between schedules cannot be held cheaply, the two-schedule framing is wrong and it becomes two kernels |
 | prefill is fed to XMX as a chunk-wide GEMM | **rejected**: prefill is memory-bound at realistic chunks | 272 MAC/byte crossover vs 41–522 rows on the hottest expert at R = 2048 → 0–13 of 512 experts qualify **[M]** | E22 measuring the real compute-bound threshold; if it is far below 272 the DPAS path is leaving throughput on the table |
 | concurrency rescues a residue-bearing model | no | 6.05 bpw goes 156 → 146 tok/s from b=4 → 8: the CPU residue climbs with the B70 term **[P]** | E21, or a placement change that removes the residue at those batch sizes |

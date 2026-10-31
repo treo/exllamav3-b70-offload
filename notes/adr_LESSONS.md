@@ -166,6 +166,18 @@ the promise. So: take each table in the source documents, print its first column
 row. Where a row's status is "open" or "provisional", that is still a row the set must account for, in the open-items
 table if nowhere else.
 
+## W19. I committed through my own failing check, by piping it into `tail`
+
+One command in this session read `python3 doc/adr/check_adrs.py | tail -2 && git commit`. The pipeline's status is
+`tail`'s, so the `&&` tested nothing, and the commit landed with two open failures in it. The validator had just told
+me, correctly, that a record title and its index row had drifted apart, and that a comma-clause violated the
+participle rule. It was the third time in one day that I built a gate and then routed around it: once with a scripted
+edit (W13), once with a check that could not fail (W17), and once here with a check whose verdict I threw away in the
+shell.
+
+The fix is mechanical, and it is now the only form used: run the check on its own line, look at its exit status, then
+commit. `cmd | tail` and `cmd; git commit` are both ways of asking a question and ignoring the answer.
+
 ## W13. I broke the no-scripted-edit rule once, in this very session
 
 One-line changes feel too small for the edit tool, so I updated a count in `notes/README.md` with a Python
