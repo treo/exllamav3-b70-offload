@@ -1,0 +1,80 @@
+probe_xmx: a rows-deep expert GEMM, built from first principles, and it loses to 16-row bucketing — with the mechanism
+======================================================================================================================
+`probe_gemm.cpp` was rev L (a decode kernel) with a slab axis bolted on, so the schedule question was never
+asked cleanly. `probe_xmx.cpp` keeps only what the trellis FORMAT forces (funnel-shift unpack, HASH expansion,
+transposed intra-tile dwords, `xmx::dpas` with the weight tile as B and activations as A, u8/s8 -> int32) and
+re-derives the schedule. It drops the row-slab axis, the "sub" half-tile axis, gate/up fusion, the band/staged
+layout variants, and — the point — rev L's "rows <= 16" cap.
+
+THE IDEA WORTH TESTING. If rows live inside the item, a weight tile is read once per chunk regardless of rows,
+so the ceil(rows/16) amplification law disappears by construction. Register law says it should be possible:
+accumulators = rows/2 GRF, A tile = rows/2 GRF, Bop = 8 GRF, against numGRF=128 per thread — rows=32 wants
+~16 GRF of accumulators, rows=64 ~32. Neither is out of reach on paper.
+
+RESULTS (E=16, Qwen3.8@2.05, K=2, tn=40, k=4096, layer 12, WARM_S=3, 1200 reps, min-of-N, every cell bit-exact
+against the case's own y_ref.npy via the probe's new unconditional self-check):
+
+   rows   NF   best KS   xmx us    bucketing (probe_gemm A)   xmx/bucket   items at best KS
+    8      1      2       22.8          (n/a)                    —         1280
+   16      2      2       26.2          24.6                   1.07x       1280
+   32      4      2       69.8          47.6                   1.47x       1280
+   64      8      2      179.1          89.1                   2.01x       1280
+
+   (KS=1 is uniformly ~4x worse than KS=2 and KS=4 ~25% worse than KS=2 — see FILL below. The 24.6/47.6/89.1
+   control numbers are the same-session WARM_S=3 bucketing measurements from out_probe_gemm.txt.)
+
+So: **reading the weights once per chunk is not worth buying.** The clean-room kernel reproduces the tuned one
+to within 7 % at its own operating point (rows=16: 26.2 vs 24.6, with the sub axis, fusion and staged layouts
+all removed) and then degrades monotonically as rows deepen. Three measured reasons, in order of size.
+
+1. SPILLS, and where the register law actually breaks (`.spill size` from the IGC dump, `submit<2,8,NF,0>`):
+       NF=1  1539 inst     0 B        NF=2  1690 inst     0 B
+       NF=4  2914 inst  1792 B (129 refs)   NF=8  6298 inst  7808 B (2614 refs)
+   The cliff is between NF=2 and NF=4, i.e. **exactly at 16 rows**. Rev L's cap was not cargo cult — it was a
+   correct empirical boundary recorded without its reason.
+
+2. A-MILD-SPILL BEATS STREAMED OPERANDS, which was the surprise and is why the file now selects per NF
+   (`if constexpr (NF <= 4)`, costing no extra instantiations because NF is already a template parameter):
+       NF=4   hoisted A: 70.2 us, 2914 inst, 1792 B spill   |  streamed: 90.5 us, 2702 inst, 0 B spill
+       NF=8   hoisted A: 316.8 us, 6298 inst, 7808 B spill  |  streamed: 179.3 us, 5429 inst, 3392 B spill
+   Removing the spill is not automatically a win: DPAS needs its A operand in a register, so replacing one wide
+   `load_dw<ADW>` with 2*NF narrow ones serialises load->dpas per fragment. At NF=4 the spill is cheaper than
+   the serialisation; past ~4 KB of spill the ordering flips. "Minimise spills" is not a valid objective
+   function for this kernel family — time is.
+
+3. FILL, the same lever that explained the slab experiment. A rows-deep item is 4x the work of a 16-row item
+   and 1/4 the item count: at E=16, KS=1 the launch has 640 items for 2048 slots (fill 0.31), and the launch is
+   latency-bound, so it costs the same as rows=8 (37.8 vs 38.0 us) while doing 4x the useful work. Split-K buys
+   the fill back (KS=2 -> 1280 items -> 69.8 us at rows=32) but pays in partials and combine, which is why
+   KS=4 overshoots (86.8 us). Rev L's `sub` axis — which I deleted as decode heritage — was doing this same
+   fill job for free, which is most of its 7 % edge at rows=16. Heritage is sometimes load-bearing.
+
+AND THE DEEPER REASON THE PRIZE IS WORTHLESS: probe_gemm established that this family is not bandwidth-bound at
+these shapes (2560 items cost the same reading 6.6 or 13.2 MiB, 1.3 % apart). Rows-deep's only benefit is
+traffic. So it pays real costs (spills, serialised operands, lost fill) for a benefit that measures zero. That
+is a clean case of a design being wrong for a reason you can now point at, rather than merely not working.
+
+WHAT THIS CHANGES IN THE PLAN
+  * 16-row launches + split-K-for-fill stays the shape for rows>16, in the engine and in prefill. The
+    ceil(rows/16) byte amplification is real as arithmetic but does not bind, because bytes are not the
+    constraint at these sizes. b70-prefill.md 3's traffic table should be read as a capacity/energy statement,
+    not a time statement.
+  * Open, untested by necessity rather than laziness: the not-memory-bound result is measured at K=2/tn=40/E<=32
+    with the whole weight set fitting comfortably in L2. At prefill's real footprint (750 MiB/layer resident,
+    experts far beyond L2) traffic may start to bind, and then rows-deep's prize stops being worthless. The
+    cheap way to find out is this same probe at E=128/256 where weights per launch exceed 24 MiB, not a new
+    kernel.
+  * Harness: `probe_xmx` self-checks and prints FAILED loudly when the reference is missing, wrong dtype, or
+    wrong size (rev L prints nothing at rows>16 — the gap that nearly let a stale binary pass as a measurement).
+    Note the trap hit during this run: DPAS_KS is an env knob in rev L but ks is a POSITIONAL argument here, so
+    six early cells silently measured KS=1 while I believed they varied it. A knob that ignores its input
+    should fail; that is now the standard to apply to the next sweep script.
+
+Reproduce:
+    icpx -fsycl -O2 -o probe_xmx probe_xmx.cpp          # 33 s (bands restricted to native; see header)
+    python3 notes/b70/dump_gemv_case.py /tmp/pg_e16_R32 16 32 12 --with-reference \
+        --ckpt "Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4"
+    WARM_S=3 ./probe_xmx /tmp/pg_e16_R32 1200 0 2       # CASE_DIR reps rows ks
+    for R in 8 16 32 64; do NEO_CACHE_PERSISTENT=0 IGC_ShaderDumpEnable=1 \
+        IGC_DumpToCustomDir=/tmp/ax$R WARM_S=0 ./probe_xmx /tmp/pg_e16_R$R 1 >/dev/null 2>&1; done
+    grep -m1 '.spill size' /tmp/ax64/VC_*submitILi2ELi8ELi8ELi0E*.asm

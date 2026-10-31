@@ -71,6 +71,27 @@ binary (the background build had not finished; source 06:40, binary 06:18) and l
 result, which would have been recorded as "no effect" for the wrong reason. Caught by checking the mangled
 kernel name for the new template argument, not by looking at the timings. Build in the foreground, check rc.
 
+WARM_S=3 RE-RUN (requested; and it changed one conclusion)
+Runtime-SL binary rebuilt from source (1m51 s, rc=0, verified fresh by timestamp), same case dirs, 1500 reps:
+       case        A us      B us     B/A      WARM_S=1 B/A
+   E=16 R=16      24.6      24.5     1.00x        1.00x   (control, unchanged)
+   E=8  R=32      38.5      24.2     0.63x        0.63x   (fill win, unchanged)
+   E=16 R=32      47.6      54.8     1.15x        1.15x   (capacity penalty, unchanged)
+   E=32 R=16      53.8      54.0     1.00x        1.01x   (equal items, 2x bytes: no traffic effect)
+   E=16 R=64      89.1      91.0     1.02x        0.97x   <- FLIPPED
+Three of four conclusions are warm-up-insensitive, which is what makes them believable. The fourth moved:
+variant A got 6 % faster at 4 slabs (94.6 -> 89.1 us) with a properly ramped card, turning "co-scheduling
+wins at rows=64" into "co-scheduling loses slightly". So the earlier 0.96x was noise from an under-ramped
+device — the exact failure mode the tree's WARM_S protocol exists to prevent, caught by honoring a 3 s warm-up
+instead of 1 s. The honest summary is now monotone and simple: **co-scheduling never beats bucketing once the
+buckets fill the device, and wins by 1.6x when they do not.**
+
+Also adopted per review: `SL` was made a template parameter, measured (B/A 0.61/1.11/1.02/0.93 — same shape,
+no real effect), and then **reverted to a runtime field**, because the 4x instantiation blowup costs 8m06s to
+build vs 1m51s — a 4.4x compile-time penalty for a change with no measured payoff, in a probe whose inner loop
+never reads it. Keeping the analysis: the band-parameter lesson (item 13m) applies where a value is read on the
+hot path, not merely where it is known at admit time.
+
 Still owed before this is a shipping rule: the fill crossover is located between E=8 and E=16, not measured
 (E = 10/12/14 with rows 32/64); KS=1 only, and KS changes items-per-launch so the rule must be evaluated on
 items, not on E; no large-R point where weight volume could actually exceed what 2560 items can hide (this

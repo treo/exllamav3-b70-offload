@@ -66,7 +66,12 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    ~2.2 ms/layer → 105 ms/chunk → 19.2k tok/s, i.e. **the bucketed kernel sits at 1/7 of the memory roof and
    still below its own compute ceiling - the worst of both**, and the gap widens with chunk size (26.29x at
    R=8192). So the prefill case for the B70 is decided by one property: does an expert's weight bytes get read
-   once per chunk, or once per 16 rows? §4a shows the answer is a scheduling decision, not a hardware limit.
+   once per chunk, or once per 16 rows? **Measurement answered this: once per 16 rows, and it does not matter.**
+   Two escapes were built and tested — co-resident row slabs (`probe_gemm`) and rows-deep items that read each
+   tile once (`probe_xmx`) — and neither beat 16-row launches (1.47x / 2.01x worse at 32 / 64 rows for the
+   latter), because the constraint at these shapes is register pressure and device fill, not bytes
+   (`out_probe_gemm.txt`, `out_probe_xmx.txt`). Read the amplification table below as a **capacity and energy**
+   statement, not a time statement.
    For GLM the arithmetic is harsher in capacity and gentler in traffic: 2.53 GiB/layer cannot be resident on
    one 31.9 GiB card across 42 layers (106 GiB), so prefill there is a residency-policy question first - and
    its rows/expert at R=2048 is ~2048×8/288 ≈ 57 mean, ≈ 4 buckets today. GLM has no live trace, so unlike
@@ -188,3 +193,16 @@ the cheap part. Update §12's row when (1) lands.
        at fixed rows, the winner is a *dispatch* change the engine can adopt without touching the arithmetic; if
        B ties A, the additive law is real and prefill's traffic cost stands as §3 computed it -- also worth
        knowing, because it settles the R1/R2 question by removing R2's main motivation.
+
+   **RESULT (executed, and the answer came back different from what this section assumed).** Step (1) became
+   `probe_slm` (SLM staging is 1.5–6.0x slower than global reads — solid — while its "concurrent re-reads are
+   cheaper" claim did not survive a second ISA read; see `out_prefill_gemm.txt`). Step (2) became `probe_gemm`
+   (slab axis, bit-exact, no re-use gain; the A/B difference is device fill) and then `probe_xmx`, a
+   clean-room rows-deep kernel built because probe_gemm carried too much decode heritage — 12/12 bit-exact and
+   1.07x / 1.47x / 2.01x WORSE than 16-row bucketing at rows 16 / 32 / 64, with the spill cliff (0 B at NF=1/2,
+   1792 B at NF=4, 7808 B at NF=8) sitting exactly where rev L's "16 rows" cap sat. Step (3) is therefore
+   moot: rows never reach a regime where the matrix unit's compute advantage is accessible through more rows
+   per item, because registers bound rows per item at 16 first. The surviving recommendation for prefill is
+   16-row launches with split-K chosen for fill, plus the residency/admission policy in §2 — and the open
+   question that would change the verdict is weights-per-launch exceeding L2 (E=128/256 on this probe), not a
+   better GEMM.

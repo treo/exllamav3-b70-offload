@@ -577,18 +577,22 @@ share a GEMV; above ~16 rows per expert switch to the DPAS path with M = 16/32 t
 two, the decode kernel with several token rows is usually better than XMX at N=16, so the tier
 boundary is a measured constant (`EXL3_MOE_B70_DPAS_T`, tentatively 16) rather than an inherited one.
 
-**TRAFFIC MAY NOT BE A FIXED COST — HYPOTHESIS, AND NOW A MEASURED NEGATIVE
-(`notes/b70/out_prefill_gemm.txt` CONFIDENCE block; `notes/b70/out_probe_gemm.txt` for the test).**
+**TRAFFIC, TESTED TWICE AND SETTLING: the `ceil(rows/16)` law stands, and it does not bind
+(`notes/b70/out_probe_gemm.txt`, `notes/b70/out_probe_xmx.txt`).** Two mechanisms were built to beat it, both
+starting from two measured facts: this family is **not** bandwidth-bound at these shapes (2560 items cost the
+same reading 6.6 or 13.2 MiB of weights — 1.3 % apart), and schedule differences track device **FILL** (items
+per launch against 2048 slots) rather than traffic.
 Executed: `probe_gemm` implements this spec (rev L + slab axis in E25c's abandoned slot). Positive control
 passes (B at NSLAB=1 = A within 3 %) and **both arms are bit-exact on all 655,360 outputs at rows=64**
 (max rel err 0.000e+00 against the case's own reference). Result: **co-scheduling does not buy re-use** —
-B/A = 0.97x / 1.15x / 0.96x at 1 / 2 / 4 slabs, and A tracks the additive law to 3.5 % (24.7 -> 47.7 -> 94.6 µs
-for NSLAB 1/2/4). So the `ceil(rows/16)` law is a real cost of this kernel family, not an artifact of temporal
-separation, and prefill's weight traffic must be budgeted at 2.24x / 7.01x / 26.29x (§3 of `b70-prefill.md`).
-Leading mechanism (inference, not yet measured): re-use needs items *in lockstep on the same address*, and
-rev L's software-pipelined prefetch ring puts adjacent slabs dozens of dwords apart at any instant — so
-`probe_slm`'s lockstep loop and a real streaming kernel are different animals. Caveat kept from the artifact:
-no ISA comparison of the two arms yet (LESSONS 68/70), KS=1 only, E in {8,32} unmeasured.
+B/A = 0.97x / 1.15x / 1.02x at 1 / 2 / 4 slabs under the 3 s warm-up protocol (at WARM_S=1 the 4-slab cell read
+0.96x in co-scheduling's favour — that flip is why the protocol matters), and A tracks the additive law to
+3.5 % (24.7 -> 47.7 -> 94.6 µs for NSLAB 1/2/4). So the `ceil(rows/16)` law is a real cost of this kernel
+family, not an artifact of temporal separation.
+The fill law that experiment *did* establish: at E=8, where one bucket under-fills the device, co-scheduling
+is **1.59× faster** (24.3 vs 38.5 µs) — one launch of 1280 items beats two of 640 — while at E=16 the buckets
+already fill 1280/2048 slots, so there is nothing left to gain and crossing capacity costs the tail wave. That
+is D8's logic applied to row slabs, and it is a dispatch rule, not a memory technique.
 
 The part of the original proposal that measurement settled cleanly and that still stands: **SLM staging is
 1.5–6.0× slower than reading the tile globally** (2382 instruction lines vs 1749;tructions; the staged
@@ -596,17 +600,32 @@ body adds 80 `load.slm.d32x4` + 77 `store.slm.d32x4` on top of its global read, 
 size), so the "stage weights into SLM" design that this section's predecessor proposed is dead — do not write
 that kernel.
 
+**Test (2), rows-deep, closes the question.** `probe_xmx` (clean-room: no slab axis, no `sub` axis, no fusion,
+no staged bands, **no row cap**) puts the rows inside the item so a weight tile is read once per chunk
+regardless of rows — the only way to actually delete the amplification. 12/12 cells bit-exact, and it loses at
+every depth past 16 rows: vs bucketing, **1.07× at rows=16, 1.47× at 32, 2.01× at 64** (best split-K each).
+Mechanism, from `.spill size`: 0 B at NF=1/2, **1792 B at NF=4, 7808 B at NF=8** — a register cliff exactly at
+the row count rev L's cap sat on, because accumulators *and* the A operand tile both scale with rows
+(128 GRF/thread is the budget, and at rows=64 those two arrays alone want ~64). Streaming the A operand per
+fragment removes the NF=4 spill and costs **29 %** (DPAS wants A in a register; 2·NF narrow loads serialise
+load→dpas), so the probe now selects on NF via `if constexpr` — mild spill beats serialised operands, and only
+past ~4 KB does streaming win back.
+
+**Consequence: keep 16-row launches + split-K-for-fill above 16 rows, in prefill as in decode.** The byte
+amplification is real arithmetic but buys nothing measurable, because bytes are not the binding resource at
+these shapes; `b70-prefill.md` §3's traffic table should be read as a capacity/energy statement, not a time
+statement. Where this could invert: if weights per launch greatly exceed L2 (prefill's real resident footprint
+is 750 MiB/layer against 24 MiB), traffic may start to bind and rows-deep's prize stops being worthless — the
+test is this same probe at E=128/256, not a new kernel.
+
 What it did **not** settle is the positive claim I initially drew from it — that concurrent global re-reads of
 one tile are cheaper than unique reads (1689 vs 1348 GB/s of unique bytes). Reading the ISA again showed both
 bodies are dominated by scalar address arithmetic (149 `add`, 100 `shl` against 32 vector loads) and that the
 reuse mode's 32× higher per-iteration load count produced near-identical timings, i.e. the probe was
-math-bound, not memory-bound. So the `ceil(rows/16)` re-read law stands **until a real kernel bends it**: the
-hypothesis is that row-slabs of one expert scheduled *concurrently* (same work-group, slab index innermost in
-the grid order — llm-scaler rule 4) will cost far less than the additive E29 law measured with time-separated
-launches, and the test is `probe_gemm` at rows/expert 2–16 (verify) and 32–64 (prefill), scored on bytes moved
-per chunk. Design consequence either way: **map `(expert, column tile, k-slice)` to a work-group and each
-16-row slab to a work-item of that group, read B globally, no staging pass, no group barrier** — that ordering
-is what makes the dedupe possible if the hypothesis holds, and costs nothing if it does not.
+math-bound, not memory-bound. So the `ceil(rows/16)` re-read law stands, and the two candidate escapes (co-resident slabs, rows-deep items)
+were both built and measured above rather than argued about. What replaced the "design consequence either way"
+that used to sit here: 16 rows per launch remains the unit, split-K is the fill lever, and the traffic law is
+budgeted as a capacity/energy cost rather than a time cost.
 
 ## 5. Transforms, activation, quantisation
 

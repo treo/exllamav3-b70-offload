@@ -1301,6 +1301,40 @@ nothing that is the sole instance of a measurement.
     always true; (3) a surprising result is an invitation to look at the generated code before the narrative,
     not after.
 
+71. **Before rewriting something "from first principles", measure the old version's arbitrary-looking constant —
+    it is more often a boundary with a lost reason than cargo cult.** The prefill/rows work was stalled on
+    rev L's `rows <= 16` cap, which read like a heritage artifact: the accumulator register law says rows=32
+    wants ~16 GRF and rows=64 ~32, against `numGRF=128`, so deeper rows looked obviously free. `probe_xmx`
+    was written clean-room to test exactly that (no slab axis, no sub axis, no fusion, no staged layouts, no
+    cap) and it produced: spill 0 B at NF=1/2, **1792 B at NF=4, 7808 B at NF=8** — the cliff sits at 16 rows,
+    precisely where rev L's cap sat, because the *A operand tile* also scales with rows and the two together
+    exceed the file. The cap was right; only its justification was missing. So the cheap experiment before a
+    rewrite is to reproduce the old constant's boundary in the new code and ask what breaks there — and when
+    the rewrite lands within 7 % of the tuned original at the original's operating point after deleting three
+    subsystems, that is evidence the deleted machinery was load-bearing (rev L's `sub` axis was buying device
+    fill), not that it was noise.
+
+72. **"Eliminate the spill" is not an objective function; time is.** The same probe, one variable (where the
+    A operand lives), measured both directions:
+        NF=4   hoisted: 70.2 us, 2914 inst, 1792 B spill  |  streamed: 90.5 us, 2702 inst, 0 B spill
+        NF=8   hoisted: 316.8 us, 6298 inst, 7808 B spill |  streamed: 179.3 us, 5429 inst, 3392 B spill
+    Making NF=4 spill-free cost 29 %: DPAS needs its A operand in a register, so trading one wide
+    `load_dw<ADW>` for 2*NF narrow ones serialises load->dpas per fragment, and a *mild* spill is cheaper than
+    that serialisation. Past ~4 KB of spill the ordering flips back. Two rules follow: (1) report spills and
+    time as separate measurements and let time arbitrate, never optimize the proxy; (2) when a tradeoff is
+    monotone in one parameter, encode the choice on that parameter with `if constexpr` — here NF was already a
+    template parameter, so the crossover costs nothing, whereas a runtime flag would sit inside the tile loop
+    and repeat the band-as-runtime mistake (item 13m).
+
+73. **A knob that silently ignores its input is worse than no knob: it manufactures confident numbers.** During
+    this sweep six cells were measured intending to vary split-K via `DPAS_KS=`, which rev L honours but
+    `probe_xmx` takes as a *positional* argument — so all six ran KS=1 and looked internally consistent (the
+    timings differed only with rows, which is exactly what a real KS=1 series does). Caught because the
+    `items/launch` field, printed on purpose for the fill analysis, never changed when KS did. Two fixes now
+    standard in these probes: print the derived quantity the knob is supposed to move (items, fill, rows/item),
+    and make a mismatched/absent oracle print `check: FAILED ...` rather than nothing — rev L prints no check
+    line at rows>16, which is the same silence that nearly validated a stale binary last session.
+
 63. **Recompute the statistic per unit; never collapse the distribution first.** The planners took `counts_for()`
     = *layer 0's* expert-selection array and treated it as "the routing distribution" for every batch-scaling
     number. A live trace showed how bad that proxy was (layer 0 of Qwen3.8@2.68 touched 289 of 512 experts in
