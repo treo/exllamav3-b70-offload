@@ -186,10 +186,17 @@ measured (§5's owed item 1 is now the blocking one).
        * `MAX_M = 4` is **not** the lever it looked like — sweeping rows 1..128 shows no cost stair at multiples
          of 4, so job granularity does not re-stream weights the way the estimate assumed (falsified without a
          rebuild);
-       * the faithful prefill-shape CPU arm (418 experts × 4096 tokens = 98 rows/expert) measures **478 ms for one
-         layer with one assignment per pick**, which cannot be reconciled with the parent's whole-model
-         98 ms/layer. If that survives a profile-driven reroute of the bench, the parent's CPU expert leg is
-         assignment-bound at prefill shapes and fixing the grouping beats every GPU-side result in this document.
+       * the CPU expert leg **is** in the prefill path and it is the majority of it: sweeping `-mcs` at fixed
+         prompt (4096) and chunk (2048) gives **10.7 ms per CPU-homed expert per chunk**, decomposing the parent's
+         4.72 s into **~2.74 s (58 %) CPU expert work + ~1.98 s everything else** (`out_host_mem.txt` §6). That is
+         why `-mcpa` is worth +30 % — it removes part of a majority term. The B70's own all-expert leg at the same
+         chunk is ~0.73 s, so end-to-end prefill has room to land between **2.7 and 4.0 s (+18 % to +75 %)**; the
+         spread is the unsplit 1.98 s intercept, which still contains the 3090's expert leg for its resident
+         experts — the next measurement, and it is engine-side profiling, not a probe.
+         (Retracted: this bullet previously reported the bench's "478 ms/layer with one assignment per pick" as a
+         possible CPU-side aggregation bug. The column read was `asgn/expert` = `rows × topk / distinct experts`,
+         which is *picks* per expert — a derived routing statistic, not an assignment count. The header in
+         `bench_cpu_moe.py` is now `picks/exp` / `ns/pick` because the old name caused the error.)
      Against decode's 58.3 tok/s at b=1 on 2.68, prefill is ~9x faster than single-stream decode, so the point
      stands but the magnitude moved: prefill touches essentially every expert per layer (measured: **418 of 512
      experts per layer at 4096 tokens, ~98 rows/expert**), so on a capacity-starved split it is dominated by

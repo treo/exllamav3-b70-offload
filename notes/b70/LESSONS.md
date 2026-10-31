@@ -1328,22 +1328,30 @@ nothing that is the sole instance of a measurement.
     multiples of 4**, so the amplification is not happening in the way the estimate assumed. Fifteen minutes of
     measurement retired both the rebuild and the mechanism. The general shape of the shortcut: if a compile-time
     constant gates a loop, its cost is a function *with a kink at that constant*, and kinks are far cheaper to
-    look for than builds. Related: the same sweep exposed something more interesting than the lever it was testing
-    (one assignment per pick at prefill shape, `out_host_mem.txt` §5) — killing your own hypothesis is often where
-    the next one comes from.
+    look for than builds. Caution on the follow-up, though: the same sweep appeared to expose something more
+    interesting than the lever it was testing ("one assignment per pick at prefill shape"), and that too was wrong
+    - it came from a misnamed column, see LESSONS 80. Killing your own hypothesis is often where the next one comes
+    from, but the next one earns the same scrutiny, not less.
 
-80. **Know what a benchmark's independent variable actually holds fixed, or its numbers become adjectives.**
-    `bench_cpu_moe.py`'s `rows` is *tokens over the loaded expert pool*, so rows/expert = rows × topk / experts.
-    Reading three arms at face value (8 experts/128 rows at 114 µs/token, 192/96 at 119, 418/4096 at 117) looked
-    like "flat, compute-bound, ~1 GiB/s — the card must be ~28× faster", and that claim was minutes from a
-    document. Holding the real invariant fixed changes the reading entirely: only the 418×4096 arm is prefill's
-    regime, and its `asgn/expert` = 98 = rows/expert reveals one assignment per pick, which the other two arms
-    (8-15 rows per assignment) actively hide. Rules: (1) before comparing two arms of a synthetic benchmark, write
-    down which derived quantity is constant across them, and if none is, the arms are not comparable; (2) prefer a
-    column that exposes the mechanism (`asgn/expert`) over one that summarizes cost (`us/token`); (3) when a
-    cross-check against an independent measured total fails — 478 ms/layer from the bench against 98 ms/layer for
-    the parent's whole forward — the bench is not "noisy", it is *contradicting a measurement*, and that
-    contradiction is the finding worth chasing.
+80. **Know what a benchmark's independent variable holds fixed — and do not trust a column's name, check its
+    expression.** `bench_cpu_moe.py`'s `rows` is *tokens over the loaded expert pool*, so rows/expert =
+    rows × topk / experts. Reading three arms at face value (8 experts/128 rows at 114 µs/token, 192/96 at 119,
+    418/4096 at 117) looked like "flat, compute-bound, ~1 GiB/s, so the card must be ~28× faster", and that claim
+    was minutes from a document. Holding the real invariant fixed shows only the 418×4096 arm is prefill's regime.
+    Then I made a second, worse error in the same table: the column headed **`asgn/exp`** is computed as
+    `rows * topk / distinct_experts` — *picks* per expert, a derived routing statistic that is trivially 98 at
+    that shape — and I read it as "worker assignments per expert", announced "one assignment per pick" as the
+    chapter's biggest CPU-side lead, and propagated it into four documents before checking the expression. It was
+    wrong, and the failed cross-check that motivated it (478 ms/layer from the bench against 98 ms/layer for the
+    parent's whole forward) resolved benignly: sweeping `-mcs` shows prefill costs **10.7 ms per CPU-homed expert
+    per chunk**, marginal experts are *cold* (≤ 19 picks each against the bench's uniform 98), and both
+    instruments were right about their own regime.
+    Rules, in order of cost: (1) a derived column must be named for its expression — the header now reads
+    `picks/exp` / `ns/pick`, because "asgn" was not a description, it was an invitation; (2) before promoting a
+    suspicious number into a *mechanism*, re-read the line that computes it, which takes seconds and is cheaper
+    than retracting from four files; (3) keep the good part of the instinct — a cross-check against an independent
+    measurement that fails is a contradiction to chase, not noise — but chase it with an experiment that varies
+    the confounder (`-mcs`), not with a story about the column you are already staring at.
 
 81. **Recompute a load-bearing quantity from primitives; never patch its factors.** The unique-remote-bytes
     estimate in one paragraph went 20 GiB/10 % → 30 GiB/15 % → 11.5 GiB/5.7 %. The first used a hand-waved

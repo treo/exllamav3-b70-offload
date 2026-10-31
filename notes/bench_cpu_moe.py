@@ -99,8 +99,12 @@ def main():
     thr_list = [int(t) for t in a.threads.split(",")]
     torch.set_num_threads(1)
 
-    print(f"{'rows':>5} {'thr':>4} {'us/call':>10} {'us/token':>9} {'ns/asgn':>8} "
-          f"{'experts':>7} {'GiB/s':>7} {'asgn/exp':>8}")
+    print(f"{'rows':>5} {'thr':>4} {'us/call':>10} {'us/token':>9} {'ns/pick':>8} "
+          f"{'experts':>7} {'GiB/s':>7} {'picks/exp':>10}")
+    # Column names are load-bearing: this used to read 'ns/asgn' / 'asgn/exp', and the last column is
+    # rows*topk/distinct_experts -- PICKS per expert, a derived routing statistic, NOT the number of worker
+    # assignments. Reading it as assignments produced a wrong "one assignment per pick" conclusion that had to be
+    # retracted from four documents. 'pick' = one (token, expert) leg, which is what ns/pick also divides by.
     # Distinct selections cycled across the timing loop: reusing one selection would keep its
     # experts' trellis in L3 (64 MiB here) and report warm-cache rates instead of the cold-expert
     # reads a real decode step does

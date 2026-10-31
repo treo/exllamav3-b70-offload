@@ -45,14 +45,15 @@ arm running the identical prefill 4-5 times so the horizon is visible rather tha
    instrument: there is **no stair at multiples of 4** (us/token 128.8 / 112.3 / 109.5 / 109.5 / 109.9 at rows
    4 / 8 / 16 / 24 / 32), so job granularity is not costing time that way. A fifteen-minute curve retired a
    rebuild and a wrong mechanism together.
-   **What is still open, and it matters more than -mcpa does.** The faithful prefill-shape CPU arm (418 experts,
-   4096 tokens - i.e. exactly 98 rows/expert, matching live routing) measures 478 ms for ONE layer with
-   `asgn/expert` = 98.0 = **one assignment per pick**, against 8-15 rows per assignment in smaller-pool
-   configurations, and 478 ms/layer cannot be reconciled with the parent's whole-model 98 ms/layer. So "compute-
-   bound" is the best available explanation for -mcpa's gain rather than a demonstrated one, and the alternative
-   - the CPU leg is **assignment-bound**, re-streaming each expert per pick instead of per row-group - is
-   unresolved. Settling test: run `bench_cpu_moe.py` on the live routing profile at `--experts 256` (matching
-   `-mcs 256`) instead of uniform sampling and compare against 98 ms/layer (`out_host_mem.txt` §5-6).
+   **What replaced that lead, and it strengthens the -mcpa result instead of weakening it.** The `asgn/expert`
+   column in `bench_cpu_moe.py` is `rows x topk / distinct experts` - picks per expert, a derived routing
+   statistic - so my "one assignment per pick" reading was a misnamed column, not a finding; it is retracted and
+   the header is renamed (`ns/pick`, `picks/expert`). What the engine itself says (`out_host_mem.txt` §6, sweeping
+   `-mcs` at fixed prompt/chunk): prefill time scales at **10.7 ms per CPU-homed expert per 4096-token chunk**,
+   which decomposes the 4.72 s chunk into **~2.74 s (58 %) CPU expert work + ~1.98 s everything else**. So -mcpa's
+   +30 % is a slice of a majority term, the CPU leg is demonstrably in the prefill path, and the bench-versus-
+   engine cost gap is explained by routing distribution (marginal experts are cold: <= 19 picks each, against the
+   bench's uniform 98) rather than by a broken instrument on either side.
 5. **Cross-cutting consequence for the plan.** The B70's comparison base has moved: at matched 4096 tokens the
    parent is 858 tok/s plain and **1114 tok/s with `-mcpa`**, so a B70 prefill proposal must beat the
    promoted-placement number, not the plain one - and the same is true of any placement-policy claim, since the

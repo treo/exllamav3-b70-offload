@@ -89,32 +89,70 @@ DRAM - and refuse to print when the invariant breaks.
 `MAX_M = 4` in `moe_mul1.cpp:71` looked like a traffic lever: if a job carries 4 rows, a 98-row expert would be
 walked ~25 times. Tested with a cost curve instead of a rebuild - rows swept 1..128, and **there is no stair at
 multiples of 4** (us/token 128.8, 112.3, 109.5, 109.5, 109.9 at rows 4, 8, 16, 24, 32), so that lever is
-dropped; a 15-minute rebuild was not needed to learn it. But the faithful prefill-shape arm then disagreed with
-everything above:
+dropped; a 15-minute rebuild was not needed to learn it.
 
-       experts  rows    us/call      us/token   GiB/s(unique)   asgn/expert
-       418     4096     478,643        116.9         1.07          98.0
-       192       96       11,414        118.9        20.6           5.0
-         8      128       14,592        114.0         0.67           8.0
+       experts  rows    us/call      us/token   us/pick   picks/expert
+       418     4096     478,643        116.9     11.7        98.0
+       192       96       11,414        118.9     11.9       5.0
+         8      128       14,592        114.0     11.4       8.0  (pool-limited)
+         8        1          185        184.7     18.5        1.7
+       192        1          265        264.6     26.5        0.5
 
-**`asgn/expert = 98.0` at 418 experts and 4096 tokens is exactly rows/expert = 98, i.e. one assignment per
-pick** - no row batching at all in that configuration, while the smaller-pool arms do batch (~8-15 rows per
-assignment). And 478 ms for one layer's CPU work cannot be squared with the parent's *entire* measured prefill of
-4.69 s = 98 ms/layer for all 48 layers including attention, dense and the GPU-resident experts. Candidate
-explanations, none yet tested: the bench's uniform routing is a worst case against real concentrated routing;
-only ~half of picks are CPU-side in the `-mcs 256` configuration; the bench may not reproduce the engine's
-token-to-expert grouping (which is what would create the batching the small arms show); per-call OpenMP overhead
-with `--iters 3`; or the engine's CPU leg really is this expensive and the prefill forward is dominated by
-something the bench does not model.
-**The measurement that settles it:** drive `bench_cpu_moe.py` from the live routing profile instead of uniform
-sampling (`--topk` with the traced per-layer distributions), at `--experts 256` to match `-mcs 256`, and compare
-its per-layer cost against the engine's 98 ms/layer. If the profile-driven bench lands near 98 ms, the
-discrepancy is uniform-routing artefact and this note closes. If it stays at ~480 ms, **the parent's CPU expert
-leg is running one assignment per pick at prefill shapes, and fixing that grouping is a larger and cheaper win
-than anything in the B70 kernel chapter** - it would also mean the amplification law this file has been chasing
-on the GPU is dwarfed by an aggregation bug on the CPU side.
+**A retraction first.** The first version of this section read `asgn/expert = 98` as "one worker assignment per
+pick" and built a lead on it. The column is `rows * topk / distinct_experts` - **picks** per expert, a derived
+routing statistic that is trivially 98 at this shape - and the bench never reported assignment counts at all. The
+instrument's header has been renamed (`ns/pick`, `picks/expert`) because the old name caused the error, and the
+lead it generated is withdrawn. What survives is smaller but still real:
 
-## 6. WHAT TO USE THESE NUMBERS FOR
+1. **An independent cross-check of both measurements, and it passes.** At rows=1 with a 192-expert pool the bench
+   costs 26.5 us per pick; one expert is 1.172 MiB, and streaming it at the measured 42.6 GiB/s ceiling takes
+   27.5 us. Two instruments built differently - a bandwidth probe and a kernel benchmark - agree to 4 %, which is
+   the strongest evidence in this file that decode-side CPU cost is DRAM-read-bound at one expert-streaming per
+   pick.
+2. **The unresolved discrepancy moves, and it is about the engine, not the bench.** At prefill shape the bench
+   costs 11.7 us/pick. If the parent paid that for its CPU-homed experts, half of 40,960 picks/layer would cost
+   ~240 ms/layer, against the parent's *entire* measured prefill of 98 ms/layer for all 48 layers including
+   attention, dense and the GPU-resident experts. So the bench is not measuring the engine's prefill expert leg -
+   the prefill forward cannot be routing that many picks through `exl3_moe_cpu_forward` at that cost, or the CPU
+   leg is largely overlapped with GPU work rather than additive.
+   **Discriminator running as this is written:** prefill at fixed prompt (4096) and chunk (2048) with
+   `-mcs` in {32, 256, 448}. If prefill time scales with the number of CPU-homed experts, the CPU leg is in the
+   path and the bench's absolute cost is what is wrong; if it barely moves, **the prefill forward is not using
+   the CPU worker the way decode does**, which would also mean every parent-side prefill number in this chapter
+   is measuring something other than the offload path.
+
+## 6. THE -MCS SLOPE: PREFILL IS MAJORITY CPU-EXPERT WORK, AND THE DISCREPANCY DISSOLVES
+
+Prefill at fixed prompt 4096 / chunk 2048, sweeping how many experts are CPU-homed (`-mcs`), 2.05:
+
+       -mcs      experts remote      median prefill      tok/s
+       32              32            FAILED to load      -      ("Insufficient VRAM in split for model and cache",
+                                                                 the operator's low--mcs floor, reproduced)
+       256            256                 4723.9 ms       867     (0.7 % from the 873 measured earlier: reproducible)
+       448            448                 6773.2 ms       605
+
+**Prefill time scales steeply with the CPU-homed expert count: +192 experts cost +2049 ms, i.e. 10.7 ms per
+remote expert per chunk (0.223 ms per expert per layer).** Fitting time = C + s·mcs: s = 10.7 ms/expert,
+C = 4723.9 - 256 x 10.7 = **1984 ms**. So of a 4096-token prefill on 2.05, **~2.74 s (58 %) is CPU expert work**
+and ~2.0 s is everything else (attention, dense, hyper-connections, the 3090's own expert leg, launch overhead).
+That also explains why `-mcpa` is worth +30 %: it takes a slice of a majority term, not of a minor one.
+
+And it closes the §5 discrepancy without blaming either instrument. The bench's 11.7 us/pick is a *warm-cost per
+pick for an expert receiving 98 rows*; the engine's marginal 0.223 ms/expert/layer implies **<= 19 picks per
+marginal expert per layer**, because the experts added by raising `-mcs` from 256 to 448 are the COLDEST ones -
+real routing puts half the mass in ~24 experts, so marginal experts are thin, while the bench's uniform routing
+gives every loaded expert 98 rows. Two instruments, two different routing distributions, consistent costs. Neither
+is broken and neither lends its absolute number to the other.
+
+What this licenses, and what it does not: the CPU expert leg's share of prefill (58 %) and its marginal cost
+(10.7 ms/expert) are measured, and the B70's all-expert expert leg at the same chunk is ~0.73 s
+(`out_prefill_scale.txt`), so moving prefill experts to the card has room to take prefill from 4.72 s to
+somewhere in **2.7-4.0 s (+18 % to +75 % end-to-end)**. The range is wide because the 1.98 s intercept still
+CONTAINS the 3090's own expert leg for its 256 resident experts, which has never been separated out - that is the
+next measurement, and it is an engine-side profiling job (bucket the prefill forward by kernel name, as
+`bench_engine_step.py` does for decode), not a probe.
+
+## 7. WHAT TO USE THESE NUMBERS FOR
   * Safe: the host ceiling itself (42.6 GiB/s read, 24.1 GiB/s copy, 484.7 GiB/s L3), the ratio to the pinned
     link (3.2x), the unique-byte occupancy at prefill shape (11.5 GiB = 5.7 % of a 4096-token chunk), and the
     statement that at rows=1-16 with a large pool the expert kernel runs AT that ceiling (42.5-45.7 GiB/s
@@ -123,7 +161,9 @@ on the GPU is dwarfed by an aggregation bug on the CPU side.
     pool*, so rows/expert = rows x topk / experts, and two arms with different expert counts are in different
     regimes even at equal `rows`. Hold rows x topk / experts fixed, or the comparison is meaningless (this one
     nearly produced a 28x claim).
-  * Open: the §5 discrepancy, which is now the highest-value unmeasured item in the prefill chapter.
+  * Open: whether the prefill forward uses the CPU worker at all the way decode does - **answered in §6: it does,
+    and that leg is 58 % of a 4096-token prefill.** Newly open instead: the split of the 1.98 s intercept between
+    non-expert work and the 3090's own expert leg, which bounds the end-to-end prefill win.
 
 Reproduce:
     gcc -O3 -march=native -fopenmp -o probe_mem probe_mem.c
