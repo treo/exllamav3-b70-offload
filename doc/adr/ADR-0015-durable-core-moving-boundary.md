@@ -11,10 +11,12 @@ A second accelerator can serve two purposes. It can be a faster place to compute
 promotion already selects, or it can hold so many experts that promotion stops mattering. The measured
 behaviour of promotion on the parent decides between them.
 
-Under `-mcpa`, promotion counters show 403 promotions and 403 demotions in one 4096-token prefill, which
-is a set that oscillates rather than accumulates. Across three different split sizes the promoted count
-stays at 383 to 390, about eight experts per layer, whatever number of experts is remote. The relief per
-marginal remote expert decays from 4.96 ms to 3.88 ms. A mechanism whose action count does not scale
+Under `-mcpa`, promotion counters show 403 promotions and 403 demotions in one 4096-token prefill at a
+2048-token chunk, which is a set that oscillates rather than accumulates. In the separate slope fit, across three
+different split sizes, the promoted count stays at 383 to 390, about eight experts per layer, whatever number of
+experts is remote. The relief per marginal remote expert in that fit decays from 4.96 ms to 3.88 ms. The two
+counters come from different arms of the same instrument, so a quote carries its arm with it. A mechanism whose
+action count does not scale
 with the problem is a capacity mechanism, not a scaling one.
 
 Independently, dwell was measured on validity-gated traces. A top-84 tier fitted on the first 128 tokens
@@ -68,6 +70,7 @@ Neutral:
 ## Links
 
 * [`doc/port/b70-decisions.md`](../port/b70-decisions.md) D16
+* [`doc/port/b70-tiering.md`](../port/b70-tiering.md) §3 for the 403 pair and §7 for the slope-fit counters
 * [`notes/b70/out_dwell.txt`](../../notes/b70/out_dwell.txt),
   [`notes/b70/out_prefill_mcpa.txt`](../../notes/b70/out_prefill_mcpa.txt),
   [`notes/b70/analyze_dwell.py`](../../notes/b70/analyze_dwell.py)

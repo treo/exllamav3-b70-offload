@@ -31,7 +31,7 @@ What each mechanism cost, and why:
   group, and the penalty grows with tile size. The instruction census gives the mechanism. The staged body is 1177
   instructions against 719 for the identical global walk, because it adds 80 local-memory loads and 89 local-memory
   stores on top of the 80 global loads it was meant to replace. Local memory is also capped at 128 KiB per group, which
-  cannot hold a 0.49 MiB projection tile. One related hazard came from the vendor's post-mortem and applies to any future
+  cannot hold the 0.49 MiB gate projection of one expert. One related hazard came from the vendor's post-mortem and applies to any future
   attempt: a named barrier orders execution but does not make local-memory stores visible to other sub-groups, so a
   cross-sub-group exchange needs a full barrier.
 * Rows-deep items: a clean-room kernel with the row dimension inside the item, 12 of 12 cells bit-exact, measured 1.07,
