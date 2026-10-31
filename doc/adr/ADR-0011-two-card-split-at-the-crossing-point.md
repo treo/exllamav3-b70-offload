@@ -30,9 +30,11 @@ back only lengthens the critical path. We never use an equal-share rule.
 
 Positive:
 
-* The rule reproduces the measured optima and never loses where it degenerates: card share 1.00 at rows
-  4 or fewer, 0.86 to 0.88 at rows 8, 0.77 to 0.78 at rows 16 on Qwen3.8. An equal split costs 21 to 72
-  percent at rows 4 or fewer, 13 to 15 percent at rows 8, and 26 to 28 percent at rows 16. See
+* The rule reproduces the measured optima: card share 1.00 at rows 4 or fewer, 0.86 to 0.88 at rows 8,
+  and 0.77 to 0.78 at rows 16 on Qwen3.8. Both sides of the crossing point are expensive. At rows 8 the
+  optimum beats an all-card placement by 12.8 percent and beats an equal share by 65 percent.
+* An equal share is a measured loss wherever it is not the crossing point: 21 percent at batch 1, 72
+  percent at batch 4, and 54 percent at rows 16 on 2.68. See
   [`doc/port/b70-tiering.md`](../port/b70-tiering.md) §5.
 * It explains why GLM's answer differs instead of contradicting itself. GLM's geometry gives the card
   84 to 97 GB/s on prefill shapes against the parent's 190, so the crossing point sits near a half

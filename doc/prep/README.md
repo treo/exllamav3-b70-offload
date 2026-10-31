@@ -15,7 +15,8 @@ repository; every code claim carries a `file:line`.
 > **Where this leads:** these notes are the input to the port designed in
 > [`doc/port/`](../port/README.md) — the B70 offload architecture, kernel plan and harness. Read the
 > headline findings here first; the port documents say which of them change shape when the offload
-> device is fast instead of slow.
+> device is fast instead of slow. [`doc/adr/`](../adr/README.md) — the same conclusions as
+> per-decision records, each with the gate or measurement that would reopen it.
 
 Reproduce with the scripts kept in `notes/` on this branch (`git log --oneline -- notes`):
 

@@ -28,6 +28,7 @@ The system `gcc` is 16.2, which the installed nvcc refuses; the extension is bui
 | `run_e2e.sh` | `eval/perf.py` over named knob configs (`m_e2e_<cfg>.txt`) | measured-costs §8 |
 | `run_profile_ab.sh` | controlled 2×2 of cold vs warm starting placement (`m_prof_ab_*.txt`, reference profile in `refprofile_q35.json`) | measured-costs §8.3 |
 | `b70/` | Arc Pro B70 capability probes (link, notification paths, resident engine, cross-vendor/cross-process pinned region, store discipline) and `LESSONS.md` | [`doc/port/`](../doc/port/README.md) |
+| `adr_LESSONS.md` | writing lessons `W1` and following, from the consolidation of the plan into per-decision records (not a harness; no output) | [`doc/adr/README.md`](../doc/adr/README.md) |
 | `acceptance_model.py` | loads a list of placements and records teacher-forced / cached-decode / greedy logits, with `EXPERT_STATS_DIR` redirected per placement; `--dump-acts` captures real hidden states (`m_accept_model*.txt`) | port-acceptance levels C |
 | `acceptance_report.py` | scores that file with `testlib.e2e.assert_logits_agree`'s policy (KL med/mean/max, noise floor, confident top-1, greedy near-tie) (`m_accept_report2.txt`) | port-acceptance level C |
 | `acceptance_kernel.py` | CPU kernel vs a float64 oracle built only from `testlib.trellis`, plus the device reconstruct path and a bitwise-repeatability check (`m_accept_kernel*.txt`) | port-acceptance level B |

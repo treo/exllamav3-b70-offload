@@ -12,7 +12,7 @@ for 64 rows. On Qwen3.8 that is a 320 KiB activation section, 2.5 KiB of ids, 1.
 KiB output section, and a 963.8 KiB slot. A one-row decode job has about 5 KiB of real payload, spread
 across three of those sections.
 
-For a CPU worker that costs nothing extra, because the worker reads the sections it wants with ordinary
+For a CPU worker this costs nothing extra, because the worker reads the sections it wants with ordinary
 loads. For a card worker the payload must cross the link as a transfer, so the choices are three separate
 transfers, or one transfer of almost a megabyte of mostly empty space. At the measured link rate a whole
 slot is about 70 µs, which is more than the entire decode layer the job is meant to hide.

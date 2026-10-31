@@ -8,6 +8,10 @@ measured away in this directory; the third (locality) reshaped the kernel rules,
 Design and architecture for running the offloaded MoE expert computation on an **Arc Pro B70**
 (Xe2-HPG / BMG-G31, 32 Xe cores, 31.9 GiB @ 608 GB/s) instead of, or alongside, the x86 worker.
 
+> **The decision contract:** [`doc/adr/`](../adr/README.md) holds the same decisions one per file, with
+> status, evidence and reopening condition, and a traceability table back to the ledgers in these
+> documents. Read a record before changing the thing it decides. These pages stay the rationale.
+
 [`doc/prep/`](../prep/README.md) is the study of the existing CUDA + CPU-offload machinery that this
 port is built on; every claim there about the protocol stays true here. What changes is the
 *assumption* underneath it: **the offload device is no longer slow.** The B70 is a ~10× faster

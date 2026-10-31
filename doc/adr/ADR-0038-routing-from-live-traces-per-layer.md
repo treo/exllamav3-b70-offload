@@ -17,9 +17,8 @@ times too high by batch 32, measured at 10.35 times topk against a carried 21.91
 independence model itself predicts 32.2 against 32.1 measured at batch 4. The formula was right and the input was wrong.
 Separately, one wrong aggregation inflated concave statistics: layer 0 stood for the model's distribution, when layer
 0 touches 289 of 512 experts in 1920 picks, and one collapsed vector stood for 48 per-layer vectors, which inflates the
-union from 10.6 to 22.8 times and mis-states residence hit rate from 99.3 to 74.5 percent. That single aggregation error
-is worth a
-factor of 6.6 in predicted throughput.
+union from 10.6 to 22.8 times and mis-states residence hit rate from 99.3 to 74.5 percent. That single
+aggregation error is worth a factor of 6.6 in predicted throughput.
 
 The stakes are not cosmetic. A flat routing profile was the argument against building the prefill path, and live routing
 reversed it: 24.3 percent of experts cross the eligibility bar at 2048 rows and carry 94.3 percent of the picks, where
