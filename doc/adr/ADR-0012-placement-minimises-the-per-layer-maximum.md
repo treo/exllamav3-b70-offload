@@ -30,10 +30,12 @@ collapsed distribution.
 
 Positive:
 
-* The objective separates the two rules in the direction the balance implies, on modelled costs from measured rates.
-  On Qwen3.8 at batch 8 the balanced rule gains 13 percent,
-  but on GLM at batch 1 and 4 the frequency rule gains 9 and 20 percent, and in both cases the loser is the
-  rule that ignores the CPU residue.
+* The objective separates the two rules in the direction the balance implies, on modelled costs from measured
+  rates. In the current planner run, Qwen3.8 at batch 8 gains 1.5 percent from the balanced rule at 30 parent
+  slots, and 9.8 percent at 120 slots.
+* On GLM the same run gives the frequency rule 3.2 percent at batch 1 and 11.0 percent at 120 parent slots. In
+  both models the loser is the rule that ignores the CPU residue. An earlier architecture table said 13 percent,
+  and 9 to 20 percent, and those rows predate the engine-measured parent leg and the live routing traces.
 * The rule predicts its own crossover across five recipes: balanced wins by 3 to 9 percent at 2.05, 2.68,
   4.05 and 5.05 bpw, and frequency order wins by 43 percent at 6.05 bpw, the one recipe with a real 9.6
   percent residue.
@@ -48,6 +50,8 @@ Negative:
 * Two ordering rules and one selector is more surface than one rule, and the selector must read the residue
   against the live expert count rather than the decayed profile tail.
 * Gate E19 must confirm both sides at two recipes at least, one with a residue and one without.
+* The GLM rows in that run still use the Qwen microbench parent floor. The planner has not been re-run with GLM's
+  measured non-expert leg of 101.1 µs per layer, so the margin there is provisional.
 
 Neutral:
 
@@ -65,8 +69,8 @@ Neutral:
 ## Links
 
 * [`doc/port/b70-architecture.md`](../port/b70-architecture.md) §2.1a, §4
-* [`notes/b70/out_parent_budget.txt`](../../notes/b70/out_parent_budget.txt),
-  [`notes/b70/out_quant_scaling.txt`](../../notes/b70/out_quant_scaling.txt)
+* [`notes/b70/out_parent_budget.txt`](../../notes/b70/out_parent_budget.txt) is the current run of both rules,
+  and [`notes/b70/out_quant_scaling.txt`](../../notes/b70/out_quant_scaling.txt) is the recipe axis
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E19, E20
 * Related: ADR-0010, ADR-0011, ADR-0013, ADR-0038
 
@@ -75,4 +79,6 @@ Neutral:
 This record first said "minimises the per-layer maximum, and orders by frequency while a residue
 exists", which read as one rule with an exception. Measurement made it two rules with a selector, and the
 selector is the decision. The change is recorded here rather than edited silently, because the earlier
-form ships the wrong rule for the dense recipes.
+form ships the wrong rule for the dense recipes. The percentages quoted here were also re-set against the
+current planner run, because the architecture's table predates the engine-measured parent leg and the live
+routing traces.

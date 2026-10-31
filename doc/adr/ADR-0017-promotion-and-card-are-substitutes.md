@@ -13,8 +13,9 @@ proposal promises 1.26 times from one and 1.69 times from the other, the temptin
 That arithmetic is only right if the two mechanisms remove different terms.
 
 They remove the same term. On Qwen3.8 at 2.05 bpw, a 4096-token prefill chunk costs 4609 ms. A sweep of
-the split size at fixed prompt and chunk fits that as 1992 ms plus 10.24 ms per remote expert, with
-residuals under 2 ms, which puts 2619 ms, or 57 percent of the chunk, in the CPU expert leg. Promotion
+the split size at fixed prompt and chunk fits that as 1988 ms plus 10.24 ms per remote expert, with residuals under
+2 ms, which puts 2619 ms, or 57 percent of the chunk, in the CPU expert leg. A companion fit of the same arms prints
+1992 ms plus 10.23 ms, so quote the intercept with its fit rather than as a constant. Promotion
 removes 948 ms of that leg. The card's whole expert leg on the same chunk costs 734 ms. The second
 mechanism cannot remove bytes the first already moved.
 
@@ -64,7 +65,9 @@ Neutral:
 ## Links
 
 * [`doc/port/b70-decisions.md`](../port/b70-decisions.md) D15
-* [`doc/port/b70-tiering.md`](../port/b70-tiering.md) §1, §6.1
+* [`doc/port/b70-tiering.md`](../port/b70-tiering.md) §1 for the model, and §7 item 1 for the test of it. Two
+  pointers to a former "§6.1" in that file, one in its own §1 and one in `b70-architecture.md` §12, now read §7
+  item 1, because the renumbering of the tiering note left them behind.
 * [`notes/b70/run_mcs_slope.sh`](../../notes/b70/run_mcs_slope.sh)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 82
 * Related: ADR-0015, ADR-0018, ADR-0025, ADR-0036, ADR-0039

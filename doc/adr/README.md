@@ -33,8 +33,13 @@ that a reader who skims Consequences cannot miss it.
 Run the checks before commit:
 
 ```
-python3 doc/adr/check_adrs.py
+python3 doc/adr/check_adrs.py            # the records and the index
+python3 doc/adr/check_adrs.py --selftest  # proves each rule above can still fail
 ```
+
+The second command feeds the checker deliberately broken fixtures and fails if any rule cannot catch its own
+violation. It exists because one order check in this file was a tautology for a whole session, and reported
+"0 failures" the whole time ([`notes/adr_LESSONS.md`](../../notes/adr_LESSONS.md) W17).
 
 ## Terms used across the set
 
@@ -116,10 +121,13 @@ python3 doc/adr/check_adrs.py
 | ADR-0045 | [Load refuses a configuration the machine cannot hold](ADR-0045-load-refuses-unaffordable-configurations.md) | Accepted |
 | ADR-0046 | [A gate is explained by measurement, never waived](ADR-0046-gates-may-be-explained-not-waived.md) | Accepted |
 | ADR-0047 | [Implementation starts with a one-layer vertical slice](ADR-0047-start-with-a-one-layer-vertical-slice.md) | Accepted |
+| ADR-0048 | [The offload is hidden at decode only at small batch](ADR-0048-decode-hiding-is-a-small-batch-claim.md) | Accepted |
+| ADR-0049 | [Weights reach the matrix unit as integer product bytes, not as fp16](ADR-0049-integer-operand-route-to-the-matrix-unit.md) | Accepted |
 
 Groups: boundary and protocol, ADR-0001 to ADR-0008. Expert homes and placement, ADR-0009 to ADR-0018.
-Data paths, ADR-0019 to ADR-0025. Kernels and layout, ADR-0026 to ADR-0035. Cost model and method,
-ADR-0036 to ADR-0039. Delivery and verification, ADR-0040 to ADR-0047.
+Data paths, ADR-0019 to ADR-0025. Kernels and layout, ADR-0026 to ADR-0035, plus ADR-0049. Cost model and
+method, ADR-0036 to ADR-0039. Delivery and verification, ADR-0040 to ADR-0047. Scope and expectations,
+ADR-0048.
 
 ## Traceability to the planning ledgers
 
@@ -152,24 +160,61 @@ The design documents carry two decision ledgers. Every row of both maps to a rec
 | D24 | transfer is a first-class cost term | ADR-0025 |
 | D25 | parent and card do not measurably interfere, in that scope | ADR-0025, ADR-0037, ADR-0039 |
 
-Selected rows from the architecture's finality table, which had no D number:
+Rows of the architecture's finality table that had no home in the first pass, and now do:
 
 | architecture row | record |
 |---|---|
-| worker, not a second device, and the child-process engine | ADR-0001, ADR-0002 |
-| completion by pinned flag, payload by DMA in and stores out, no atomics on shared memory, every-word assertions | ADR-0004, ADR-0005, ADR-0006, ADR-0040 |
+| "the offload hides at decode" is a small-batch claim, and decode figures are b=1 figures | ADR-0048 |
+| DPAS operand route, integer product bytes rather than fp16, and the reclassification of that question | ADR-0049 |
+
+Every row of the architecture's finality table, in that document's order. The audit that produced this list is
+worth repeating when either document changes: enumerate the source table's first column and require a mapping for
+each row, because a topic list reminds you of what you remember and a row list tells you what was promised.
+
+| architecture row | record |
+|---|---|
+| worker, not a second torch device, parent protocol unchanged | ADR-0001, ADR-0003 |
+| engine in a child process | ADR-0002 |
+| completion by pinned flag, never a blocking wait | ADR-0004 |
+| payload by copy in, fenced kernel stores out | ADR-0005 |
+| no library atomics on the shared region at any scope | ADR-0006 |
+| explicit index arithmetic, and every-word assertions in kernel tests | ADR-0006, ADR-0040 |
 | three disjoint homes, two cut points, no replication | ADR-0009 |
-| native tile layout, and the locality rules that do pay | ADR-0028 |
+| native tile layout on the card, no repack | ADR-0028 |
+| locality rules, one work-group per expert fragment, contiguous per-layer memory | ADR-0028 |
+| what binds decode: instructions per weight, then bytes | ADR-0026 |
 | the byte floor holds only with expert bucketing | ADR-0029 |
-| streamed and staged prefill is dead for card-resident experts | ADR-0021 |
-| whole-layer decode offload as a split | ADR-0022 |
-| admission economics, and migration judged on churn | ADR-0014, ADR-0015 |
-| residency, spanning, and the parent's two bills | ADR-0010, ADR-0013, ADR-0023 |
-| oversized models, the disk tier, and the arena cap | ADR-0016 |
-| the int8 payload decision, and the numeric class | ADR-0020, ADR-0033 |
-| execution tiers T0, T1 and T2 | ADR-0008 |
-| code shape, knob family, and load-time refusals | ADR-0043, ADR-0044, ADR-0045 |
+| dot availability no longer gates decode, and where it is retested | ADR-0026, ADR-0049 |
+| streamed and staged prefill is dead for card-resident experts, live for host-resident | ADR-0021 |
+| the matrix-unit crossover row, superseded on units and on axis | ADR-0024 |
+| admission economics, and the break-even in uses | ADR-0014 |
+| migration judged on churn rather than picks | ADR-0014, ADR-0015 |
+| resident pick share and spanning values for the reference models | ADR-0010, ADR-0038 |
+| spanning near one whenever a residue exists, and the doubled prefill payload | ADR-0023 |
+| parent non-expert cost is engine-measured, not derived from bytes | ADR-0036 |
+| hyper-connections are unbudgeted and are the top single-stream cost | ADR-0036, and the open-items table here |
+| compare worker designs at matched batch, on the adaptation horizon | ADR-0039 |
 | normalise-at-admit is measured on AVX2 and asserted on AVX-512 | ADR-0027 |
+| worker threads are clamped by the pin set, and promotion buys mobility and prefill speed | ADR-0007, ADR-0017, ADR-0018 |
+| expert load between the two cards is balanced by time after overhead | ADR-0011 |
+| promotion and the card are substitutes over one term | ADR-0017 |
+| the shipping execution tier is one command list per job | ADR-0008 |
+| the resident engine tier stays open behind a gate | ADR-0008 |
+| the matrix-unit operand route is integer product bytes, not fp16 | ADR-0049 |
+| quantise activations on the parent, int8 payload | ADR-0020 |
+| the oversized-model verdict, cards needed and CPU share | ADR-0016 |
+| the same verdict revised by the parallel-maximum view | ADR-0016, ADR-0037 |
+| decode rates must be footprint-matched before use | ADR-0028, ADR-0036, ADR-0039 |
+| the offload hides at decode, true only at small batch | ADR-0048 |
+| the parent's expert quota is a computed budget, not an assumption | ADR-0010 |
+| the placement objective is the per-layer maximum, not summed compute | ADR-0012 |
+| hottest-first within a layer, retained only while a residue exists | ADR-0012 |
+| the parent's two bills are recipe-general on the reference model | ADR-0010 |
+| decode figures are batch-1 figures, and the rows axis | ADR-0048 |
+| a large-row rescue is a second schedule, not a second arithmetic path | ADR-0029, ADR-0031 |
+| prefill as one chunk-wide matrix multiply is rejected | ADR-0024, ADR-0034 |
+| concurrency does not rescue a residue-bearing model | ADR-0048 |
+| every knob default except the rate-derived ones is provisional | ADR-0044 |
 
 ## Gate map
 
@@ -186,14 +231,27 @@ owned.
 | E4, E4b, E4c rate, locality, banding | ADR-0026, ADR-0028 |
 | E5, E7′ link efficiency and the streaming choice | ADR-0021, ADR-0025 |
 | E8 host cost on the reserved core | ADR-0007 |
-| E9, E10 capacity curve and the parent window | ADR-0011, ADR-0012, ADR-0037 |
+| E9, E10 capacity curve and the parent window | ADR-0011, ADR-0012, ADR-0037, ADR-0048 |
 | E11, E12 churn and admission cost | ADR-0014, ADR-0015 |
 | E13, E14 spanning and realised homes | ADR-0023, ADR-0038 |
 | E18, E19, E20 parent spare bandwidth, balance rule, replication | ADR-0010, ADR-0012, ADR-0009 |
-| E21 to E23 concurrency, eligibility, batched schedule | ADR-0011, ADR-0024, ADR-0029 |
+| E21 to E23 concurrency, eligibility, batched schedule | ADR-0011, ADR-0024, ADR-0029, ADR-0048 |
 | E24, E26, E27 decode kernel, launch tax through the real path, dispatch fit | ADR-0026, ADR-0030, ADR-0032 |
 | E28, E29 repack and the row-bucket schedule | ADR-0028, ADR-0031, ADR-0034 |
 | U utilisation and power | ADR-0041 |
+
+## Other sources
+
+Six records come from parts of the plan that are not a ledger, so they appear in neither table above.
+
+| source | record |
+|---|---|
+| [`b70-architecture.md`](../port/b70-architecture.md) §4a, structural consequence 2 | ADR-0013 |
+| [`b70-architecture.md`](../port/b70-architecture.md) §3, path P1′ | ADR-0022 |
+| [`b70-harness.md`](../port/b70-harness.md), master-flag row of the acceptance table | ADR-0042 |
+| [`b70-architecture.md`](../port/b70-architecture.md) §7 code impact and §13 integration seams | ADR-0043 |
+| [`../prep/README.md`](../prep/README.md) watch-outs, and `notes/b70/mem_guard.py` | ADR-0045 |
+| [`b70-architecture.md`](../port/b70-architecture.md) §9 phases and gates | ADR-0046 |
 
 ## What is still open
 
@@ -204,7 +262,8 @@ These are the decisions a measurement can still move. Each is a live risk, not a
 | the card's activation path, which bounds the headline prefill number | ADR-0025 | one measured route among three candidates |
 | replication of the hottest experts | ADR-0009 | gate E20, and only where capacity surplus survives real context |
 | tile banding at the deployment's rate | ADR-0028 | gate E4c inside the real GEMV at that rate |
-| the resident engine tier | ADR-0008 | a measured saving of at least 20 µs per token |
+| the resident engine tier | ADR-0008 | a measured saving of at least 20 µs per token, stated in one unit |
+| the unit of the resident-engine gate, which the projected per-layer saving clears on arithmetic | ADR-0008 | restate the gate per layer, or measure the end-to-end token saving |
 | the horizon a static tier must survive | ADR-0015 | a multi-session dwell trace |
 | whether the maximum-over-homes balance holds | ADR-0037, ADR-0047 | the vertical slice, within 15 percent of wall |
 | a kernel that bends the 16-row traffic law | ADR-0031, ADR-0034 | a kernel, not an argument |

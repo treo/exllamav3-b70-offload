@@ -75,7 +75,7 @@ Neutral:
 * [`doc/prep/port-acceptance.md`](../prep/port-acceptance.md) Levels B and C
 * [`doc/port/b70-kernels.md`](../port/b70-kernels.md) §2.4, §3
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 25, item 31, item 44
-* Related: ADR-0020, ADR-0023, ADR-0026, ADR-0040
+* Related: ADR-0020, ADR-0023, ADR-0026, ADR-0040, ADR-0049
 
 ## Amendment
 

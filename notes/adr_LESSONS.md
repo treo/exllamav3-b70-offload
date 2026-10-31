@@ -128,6 +128,44 @@ useful and makes it not a measurement.
 The fix is one word in the sentence, "computed", "modelled", or "from the measured legs". That word is load-bearing
 for a builder, because it says whether a gate owes a measurement or a re-computation.
 
+## W16. A design document is a copy of an artifact, and the artifact moved
+
+Two records took their percentages from a table in `b70-architecture.md`. That table was correct when it was written,
+and the planner behind it has since been rerun twice: first with an engine-measured parent leg, then with live routing
+traces replacing the stored profiles. The current output says 1.5 and 9.8 percent where the document's table says 13,
+and it says 105.3 µs of streamed time where the document says 96.8, because the newer run divides by a measured 860 GB/s
+instead of the 936 GB/s spec. Nothing in the document was marked stale, and no number was fabricated. The transfer was
+faithful to the wrong source.
+
+So: when a record quotes a derived table, open the artifact that printed it, and compare the two dates. Where the
+artifact is newer, the record carries the artifact's numbers and names the document's table as superseded, and the
+document gets a data-currency note pointing at the record, which is what §2.1a now has. A checker cannot catch this
+class, because both numbers are real.
+
+## W17. One of my own checks could not fail
+
+The record validator reported "sections duplicated or out of template order", but its order test was written as
+`sections != sorted(set(sections), key=sections.index)`, which compares a list to a re-sort of itself by its own order.
+That is always false. The duplicate half of the message worked, because a separate length test caught it, and the order
+half was decoration with a confident name on it. It survived until I needed the order rule to check a real question,
+whether `Amendment` belongs before or after `Links`.
+
+The general form: a check earns its keep only when it has been seen to fail on the thing it claims to catch. When I
+wrote this one I tested it by running it on clean files and reading "0 failures", which is the same mistake `LESSONS`
+23 and 45 describe, made about my own tool rather than about someone else's.
+
+## W18. Audit coverage by enumerating the source, not by remembering the topics
+
+After 47 records the set felt complete, because every topic I could name had a record. Enumerating the architecture's
+finality table instead, row by row against the index, found two rows with no home at all: the batch limit on the
+decode hiding claim, and the operand route to the matrix unit. It also found three rows that were mentioned in a
+related record but never decided anywhere, such as the defect in specifying a thread count by logical processor.
+
+A topic list is what you remember. A row list is what the source promised, and a consolidation is measured against
+the promise. So: take each table in the source documents, print its first column, and require a mapping for every
+row. Where a row's status is "open" or "provisional", that is still a row the set must account for, in the open-items
+table if nowhere else.
+
 ## W13. I broke the no-scripted-edit rule once, in this very session
 
 One-line changes feel too small for the edit tool, so I updated a count in `notes/README.md` with a Python

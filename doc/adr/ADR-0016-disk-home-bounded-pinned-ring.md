@@ -47,10 +47,13 @@ Negative:
 Neutral:
 
 * Scaling out is the intended fix for this class, and the curve is computed from real selection counts rather than
-  argued: the
-  CPU-served residue for GLM falls 19.6, 6.9 then 0.9 ms per token at one, two and three cards. Combining
-  homes as a maximum rather than a sum then says the third card buys nothing until the parent's leg drops
-  below about 135 µs per layer. See ADR-0037.
+  argued. The CPU busy time for GLM falls to 19.6, 6.9 then 0.9 ms per token at one, two and three cards, at the
+  2 GiB parent slice that sweep used. Those are per-worker busy times, and the homes run at once, so the balance is a
+  maximum rather than a sum. See ADR-0037.
+* That same table's verdict that a third card buys nothing rests on an assumed parent leg of 300 µs per layer. The
+  measured legs are 101.1 µs for GLM and a 122 µs floor for Qwen3.8. Both are below the 135 µs at which that verdict
+  flips, so a third card is an open question with a cheap named test, not a zero. A second caveat stands regardless,
+  because the per-card rate at a 32 MiB footprint has never been measured for this geometry.
 * Dropping the host arena entirely is an opt-in mode, offered only when every expert fits the card, and it
   forbids eviction because an evicted expert has nowhere to go.
 
@@ -72,3 +75,10 @@ Neutral:
   [`notes/scan_expert_capacity.py`](../../notes/scan_expert_capacity.py)
 * [`notes/b70/mem_guard.py`](../../notes/b70/mem_guard.py)
 * Related: ADR-0009, ADR-0010, ADR-0013, ADR-0014, ADR-0045
+
+## Amendment
+
+This record first repeated the design document's conclusion that a third card buys nothing for GLM. That conclusion was
+computed against an assumed parent leg of 300 µs per layer, and the parent leg is now measured at 101.1 µs, so
+the sweep's per-worker numbers stand while its verdict does not. The re-derivation of the card-count question at the
+measured parent leg is open work, and it belongs with gates E9 and E10.

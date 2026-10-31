@@ -21,7 +21,7 @@ Derived, and it is the load-bearing arithmetic: on 2.05 prefill the CPU expert l
 chunk (57 %)**, `-mcpa` removes **948 ms of that term (36 %)**, and moving the whole expert leg to the card costs
 **734 ms**. The floor is therefore **2724 ms = 1.69×**, and it is the *same floor* whether `-mcpa` is on or not —
 because the second mechanism cannot remove bytes the first already moved. Claiming 1.69 × 1.26 would be counting
-one term twice (LESSONS 82). §6.1 reports this tested against measurement, including the two things the model did
+one term twice (LESSONS 82). §7 item 1 reports this tested against measurement, including the two things the model did
 not predict: `-mcpa` costs +221 ms of overhead, and its relief saturates because the promoted set is a fixed-size
 window.
 

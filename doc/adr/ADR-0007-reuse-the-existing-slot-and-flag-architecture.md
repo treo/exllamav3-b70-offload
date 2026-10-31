@@ -56,6 +56,9 @@ Neutral:
 
 * The CPU worker's thread-count default of physical cores minus one is deliberate, not naive. The card
   has no thread pool to size, because the card schedules its own engines.
+* What is a defect is specifying that default by logical-processor count. Thirty-two worker threads on sixteen
+  pinned logical processors measured 1.82 times worse than sixteen, which is why the card's two engine threads
+  are sized from the pin set rather than from the processor count.
 
 ## Alternatives considered
 

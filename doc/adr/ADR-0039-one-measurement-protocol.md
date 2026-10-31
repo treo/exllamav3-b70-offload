@@ -34,6 +34,8 @@ rules, each with the quantity it protects:
    14.4 GB/s.
 9. Report profiled runs separately from timed runs, and never use a blocking wait as instrumentation.
 10. Make every gate exit nonzero on failure, and print a visible marker when a probe cell cannot be measured.
+11. Do not let a proxy bound the thing it leaves out. A walk over the same bytes with no arithmetic cannot
+    price the arithmetic, and it reported 292 GB/s for a kernel that later measured 61.4 on the same bytes.
 
 ## Consequences
 
@@ -70,7 +72,7 @@ Neutral:
 
 ## Links
 
-* [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) items 15, 17, 19, 37, 45, 46, 54, 56, 66, 73, 75, 76
+* [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) items 15, 16, 17, 19, 20, 37, 45, 46, 54, 56, 66, 73, 75, 76
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) hygiene rules and cadence
 * [`doc/prep/measured-costs.md`](../prep/measured-costs.md) §8.3
 * Related: ADR-0036, ADR-0037, ADR-0038, ADR-0040, ADR-0041, ADR-0046

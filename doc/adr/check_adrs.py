@@ -105,8 +105,11 @@ def check_structure(path: pathlib.Path, text: str, errs: list[str]) -> None:
     extra = [s for s in sections if s not in REQUIRED_SECTIONS + OPTIONAL_SECTIONS]
     if extra:
         errs.append(f"{path.name}: sections outside the template {extra}")
-    if sections != sorted(set(sections), key=sections.index) or len(sections) != len(set(sections)):
-        errs.append(f"{path.name}: sections duplicated or out of template order")
+    if any(sections.count(s) > 1 for s in sections):
+        errs.append(f"{path.name}: a section appears twice")
+    want = [s for s in REQUIRED_SECTIONS + OPTIONAL_SECTIONS if s in sections]
+    if sections != want:
+        errs.append(f"{path.name}: section order is {sections}, expected {want}")
 
     for bullet in META_BULLETS:
         if not re.search(rf"^- {bullet}: \S", text, flags=re.M):
@@ -124,8 +127,15 @@ def check_structure(path: pathlib.Path, text: str, errs: list[str]) -> None:
 
     if "\t" in text:
         errs.append(f"{path.name}: tabs, use spaces")
-    if re.search(r"—|--(?=\w)", text):
-        errs.append(f"{path.name}: em-dash or double-hyphen between statements: name the relation")
+    if re.search(r"—", text):
+        errs.append(f"{path.name}: em-dash between statements: name the relation")
+    if re.search(r"(?<=\w)--(?=\w)", text):
+        errs.append(f"{path.name}: double hyphen between words: name the relation")
+    for line in prose_lines(text):
+        plain = CODE_SPAN_RE.sub(" ", line)
+        plain = LINK_RE.sub(r"\1", plain)
+        if re.search(r"(?<=[\w.\"')])\s+[-\u2013]\s+(?=[a-z])", plain):
+            errs.append(f"{path.name}: spaced hyphen between statements: {line[:70]}")
     if ";" in re.sub(CODE_SPAN_RE, "", text):
         errs.append(f"{path.name}: semicolon, write two sentences")
 
@@ -180,9 +190,10 @@ def check_style(path: pathlib.Path, text: str, errs: list[str], warns: list[str]
             errs.append(f"{path.name}: '-ing' clause after a comma ({hit.group(1)}), start a new sentence: {line[:70]}")
 
 
-def check_index(files: list[pathlib.Path], errs: list[str]) -> None:
+def check_index(files: list[pathlib.Path], errs: list[str], here: pathlib.Path | None = None) -> None:
     """The index in README.md must agree with the records it lists."""
-    readme = HERE / "README.md"
+    here = here or HERE
+    readme = here / "README.md"
     if not readme.exists():
         errs.append("README.md: missing index")
         return
@@ -194,7 +205,7 @@ def check_index(files: list[pathlib.Path], errs: list[str]) -> None:
         if fid not in listed:
             errs.append(f"README.md: index omits {fid}")
     for fid, title, href, status in rows:
-        path = (HERE / href).resolve()
+        path = (here / href).resolve()
         if not path.exists():
             errs.append(f"README.md: {fid} links to a missing file {href}")
             continue
@@ -210,14 +221,121 @@ def check_index(files: list[pathlib.Path], errs: list[str]) -> None:
         if target.startswith(("http://", "https://", "#")):
             continue
         target = target.split("#")[0]
-        if target and not (HERE / target).resolve().exists():
+        if target and not (here / target).resolve().exists():
             errs.append(f"README.md: broken link {target} (label {label!r})")
+
+    # traceability: every record must be mapped back to a source, so that an unmapped
+    # decision cannot enter the set unnoticed
+    if "## Traceability" not in text:
+        errs.append("README.md: no Traceability section, so records cannot be mapped back to a source")
+    else:
+        mapped = set(re.findall(r"ADR-\d{4}", text.split("## Traceability", 1)[1]))
+        for f in files:
+            fid = "ADR-" + f.name[4:8]
+            if fid not in mapped:
+                errs.append(f"README.md: {fid} has no source mapping in the traceability tables")
+
+
+def selftest() -> int:
+    """Prove that each check can fail, on purpose, in a temporary directory.
+
+    A check that has never been seen to fail is decoration (notes/b70/LESSONS.md item 45, and
+    notes/adr_LESSONS.md W17). Each fixture below violates exactly one rule and must produce a
+    failure that names it.
+    """
+    import shutil
+    import tempfile
+
+    head = "# ADR-9001: Fixture\n\n- Status: Accepted\n- Date: 2026-01-01\n- Deciders: t\n- Tags: `x`\n\n"
+    good_sections = "## Context\n\nOk.\n\n## Decision\n\nOk.\n\n## Consequences\n\nOk.\n\n## Alternatives considered\n\nOk.\n\n## Links\n\nOk.\n"
+    cases = {
+        "order": head + "## Context\n\nOk.\n\n## Decision\n\nOk.\n\n## Consequences\n\nOk.\n\n## Links\n\nOk.\n\n## Alternatives considered\n\nOk.\n",
+        "missing-section": head + "## Context\n\nOk.\n\n## Consequences\n\nOk.\n\n## Alternatives considered\n\nOk.\n\n## Links\n\nOk.\n",
+        "unknown-section": head + good_sections + "\n## Notes\n\nOk.\n",
+        "bad-status": head.replace("- Status: Accepted", "- Status: Shipped") + good_sections,
+        "broken-date": head.replace("- Date: 2026-01-01", "- Date: 01/01/2026") + good_sections,
+        "bad-reference": head + good_sections.replace("## Links\n\nOk.\n", "## Links\n\nSee ADR-9999 and [`nope`](nope.md).\n"),
+        "banned-word": head + good_sections.replace("## Context\n\nOk.\n", "## Context\n\nYou should fix it.\n"),
+        "contraction": head + good_sections.replace("## Context\n\nOk.\n", "## Context\n\nIt don't work.\n"),
+        "semicolon": head + good_sections.replace("## Context\n\nOk.\n", "## Context\n\nOne thing; another thing.\n"),
+        "long-sentence": head + good_sections.replace(
+            "## Context\n\nOk.\n",
+            "## Context\n\n" + " ".join([f"word{i}" for i in range(40)]) + ".\n",
+        ),
+        "dash": head + good_sections.replace("## Context\n\nOk.\n", "## Context\n\nThis one - not that one.\n"),
+    }
+    tmp = tempfile.mkdtemp(prefix="adr-selftest-")
+    failures = 0
+    try:
+        for name, text in cases.items():
+            p = pathlib.Path(tmp) / "ADR-9001-fixture.md"
+            p.write_text(text)
+            errs: list[str] = []
+            check_structure(p, text, errs)
+            check_references(p, text, {"ADR-9001"}, errs)
+            check_style(p, text, errs, [], False)
+            if not errs:
+                print(f"SELFTEST FAIL: the {name} fixture passed, so the rule behind it cannot fail", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"selftest ok: {name} -> {errs[0][:96]}")
+        # index completeness: a record missing from the index must fail
+        d = pathlib.Path(tmp)
+        (d / "ADR-9001-fixture.md").write_text(head + good_sections)
+        (d / "README.md").write_text("# index\n")
+        errs = []
+        check_index(sorted(d.glob("ADR-*.md")), errs, here=d)
+        if not errs:
+            print("SELFTEST FAIL: an index that omits a record was accepted", file=sys.stderr)
+            failures += 1
+        else:
+            print(f"selftest ok: index-omission -> {errs[0][:96]}")
+
+        # traceability: a record that the index lists but no source table maps must fail
+        (d / "README.md").write_text(
+            "# index\n\n| ID | Record | Status |\n|---|---|---|\n"
+            "| ADR-9001 | [Fixture](ADR-9001-fixture.md) | Accepted |\n\n"
+            "## Traceability\n\n| ledger row | record |\n|---|---|\n| D1 | nothing |\n"
+        )
+        errs = []
+        check_index(sorted(d.glob("ADR-*.md")), errs, here=d)
+        if not any("source mapping" in e for e in errs):
+            print("SELFTEST FAIL: a record with no source mapping was accepted", file=sys.stderr)
+            failures += 1
+        else:
+            print("selftest ok: unmapped-record -> a record without a source mapping fails the index")
+        # positive control: a clean fixture must produce no failure at all, or the
+        # negative results above prove nothing
+        clean = head + good_sections
+        (d / "ADR-9001-fixture.md").write_text(clean)
+        (d / "README.md").write_text(
+            "# index\n\n| ID | Record | Status |\n|---|---|---|\n"
+            "| ADR-9001 | [Fixture](ADR-9001-fixture.md) | Accepted |\n"
+            "\n## Traceability\n\n| ledger row | record |\n|---|---|\n| D1 | ADR-9001 |\n"
+        )
+        errs = []
+        check_structure(d / "ADR-9001-fixture.md", clean, errs)
+        check_references(d / "ADR-9001-fixture.md", clean, {"ADR-9001"}, errs)
+        check_style(d / "ADR-9001-fixture.md", clean, errs, [], False)
+        check_index(sorted(d.glob("ADR-*.md")), errs, here=d)
+        if errs:
+            print(f"SELFTEST FAIL: the clean fixture was rejected: {errs[0][:96]}", file=sys.stderr)
+            failures += 1
+        else:
+            print("selftest ok: clean fixture passes every check")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return 1 if failures else 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--selftest", action="store_true", help="run the negative fixtures and exit")
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     files = sorted(HERE.glob("ADR-*.md"))
     if not files:

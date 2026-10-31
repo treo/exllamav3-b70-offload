@@ -26,7 +26,8 @@ each item re-reads the whole activation row, which is a megabyte of cache traffi
 We will bucket rows by expert as a precondition of the cost model, not as an optimisation. One bucket is one
 expert plus its assigned row range, and it is the unit of grid work, built in the expert-sorted order the parent already
 produces, and the activation gather is folded into the load rather than done as a separate pass. Every batch gate
-reports bytes actually read, not bytes touched.
+reports bytes actually read, not bytes touched. Where a large-row case needs a different grid, we will run it as a
+second schedule over one unpack path, and not as a second arithmetic implementation.
 
 ## Consequences
 
@@ -41,6 +42,9 @@ Positive:
 Negative:
 
 * One more device pass, `b70_bucket_sel`, in front of every job, with its own correctness surface.
+* A second schedule over one unpack path still needs the locality property twice. The grid differs between the
+  small-row and large-row forms, so the ordering rules of ADR-0028 must hold in both, and each form is scored
+  against the same byte floor.
 * Padding a bucket is forbidden and this must be enforced by the tiler, not by convention. 24 rows expressed as one
   padded 32-row launch costs 61.8 µs, while 16 plus 8 as two buckets costs about 38 µs.
 * Rows per expert must be logged per layer, because the same distribution decides matrix-unit eligibility in

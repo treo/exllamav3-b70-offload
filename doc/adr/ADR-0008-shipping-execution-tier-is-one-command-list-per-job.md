@@ -54,6 +54,10 @@ Neutral:
 
 * The engine thread spins on `data_ready` in host memory with an ordinary host load, exactly as the CPU
   worker does. Notification does not use the link in any tier.
+* The gate's unit is weaker than it first looks, and this record states it rather than smoothing it over. At 48 MoE
+  layers, 20 µs per token is about 0.4 µs per layer. The projected 2 to 5 µs per layer clears the bar on
+  arithmetic alone, so what the gate tests is a realised end-to-end saving against the occupancy and drain cost, not
+  the projected one. Restating the gate in one unit is open work.
 
 ## Alternatives considered
 
@@ -72,3 +76,10 @@ Neutral:
   [`notes/b70/out_resident.txt`](../../notes/b70/out_resident.txt),
   [`notes/b70/out_e25c_barrier.txt`](../../notes/b70/out_e25c_barrier.txt)
 * Related: ADR-0004, ADR-0035, ADR-0039
+
+## Amendment
+
+The first version carried the two inherited figures side by side without converting them: a saving of 2 to 5 µs per
+layer, and a gate of 20 µs per token. Converted, the projection exceeds the gate by a factor of 5 to 12, which lets
+an estimate appear to pass a gate that exists to test a measurement. The decision is unchanged, and the gate now
+carries its unit next to it.

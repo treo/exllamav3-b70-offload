@@ -68,4 +68,4 @@ Neutral:
   [`notes/b70/out_notify.txt`](../../notes/b70/out_notify.txt),
   [`notes/b70/out_doorbell.txt`](../../notes/b70/out_doorbell.txt)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 1, item 10
-* Related: ADR-0003, ADR-0005, ADR-0008, ADR-0039
+* Related: ADR-0003, ADR-0005, ADR-0008, ADR-0039, ADR-0048

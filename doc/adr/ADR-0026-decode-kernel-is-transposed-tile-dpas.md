@@ -37,7 +37,7 @@ Positive:
 
 * A batch-1 MoE layer costs 43.6 µs on the card in three launches, or 40.9 µs with the fused pair of
   ADR-0030, against a measured parent non-expert leg of 195.6 µs, so decode
-  work hides with margin.
+  work hides with margin at that batch. ADR-0048 bounds the claim.
 * The streaming path is at the wall, so remaining gains are bytes, locality and fixed cost rather than
   instructions. The kernel is balanced rather than dominated: its own floor modes put fetch and arithmetic at
   8.9 and 10.9 µs against a 14.0 µs measurement.
@@ -80,7 +80,7 @@ Neutral:
 * [`notes/b70/out_revl.txt`](../../notes/b70/out_revl.txt),
   [`notes/b70/out_ks_grid.txt`](../../notes/b70/out_ks_grid.txt),
   [`notes/b70/gate_dpas.py`](../../notes/b70/gate_dpas.py)
-* Related: ADR-0027, ADR-0028, ADR-0029, ADR-0030, ADR-0031, ADR-0032, ADR-0033
+* Related: ADR-0027, ADR-0028, ADR-0029, ADR-0030, ADR-0031, ADR-0032, ADR-0033, ADR-0048, ADR-0049
 
 ## Amendment
 
