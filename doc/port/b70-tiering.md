@@ -15,7 +15,7 @@ from “big model / big quant” (GLM, 2.68+):
 |---|---|---|---|
 | Qwen3.8@2.05, `-mcs 256` | comfortable | **+30 %** prefill (858 → 1114 tok/s) | **substitute** over one term: combined cap 1.69×, incremental only 1.34× |
 | Qwen3.8@2.68, `-mcs 384` | thin | **+50 %** (490 → 736) | mostly substitute, larger prize because the CPU leg is bigger |
-| GLM@3.05, 109.3 GiB of experts vs 24 GiB | essentially none | not measured | **complement**: the card is the only home with slack, and it is also what removes the `S_c` residue that the `P_order` table keeps winning on |
+| GLM@3.05, 109.3 GiB of experts vs 24 GiB | essentially none | **−29 % at decode b=1 (16.0 → 11.4 tok/s)**; prefill not measured | **complement and then some**: the parent is 71 % exposed stall, so the card is the only way to lift the step; but promotion must be throttled hard, since a GLM expert upload costs 0.66 ms |
 
 Derived, and it is the load-bearing arithmetic: on 2.05 prefill the CPU expert leg is **2619 ms of a 4609 ms
 chunk (57 %)**, `-mcpa` removes **948 ms of that term (36 %)**, and moving the whole expert leg to the card costs
@@ -112,6 +112,7 @@ makes the card *slower* per byte than the 3090, which is the whole reason GLM's 
 | Qwen3.8@2.68 | 8 | 0.88 | 373.2 | 616.8 | 420.9 | **+12.8 %** |
 | Qwen3.8@2.68 | 16 | 0.78 | 666.0 | 1028.2 | 841.7 | **+26.4 %** |
 | Qwen3.8@2.05 | 16 | 0.77 | 505.8 | 774.7 | 648.1 | **+28.1 %** |
+| GLM@3.05 | 1 | **0.51** | **296 µs/layer (measured T_parent)** | 300 | 574 | **+94 %** — splitting is mandatory at b=1 |
 | GLM@3.05 † | 4 | 0.58 | 1351.8 | 1479.0 | 2287.8 | **+69 %** |
 | GLM@3.05 † | 8 | 0.52 | 2418.3 | 2481.9 | 4575.6 | **+89 %** |
 | GLM@3.05 † | 16 | 0.48 | 4466.2 | 4584.7 | 9151.2 | **+105 %** |
@@ -131,12 +132,24 @@ non-expert term, so the card has ~1.25 s of free shadow and the parent has none:
 (2.68: 37.5 GiB), and then the leftover belongs on its *hot* end, not spread evenly.
 
 Three things this arithmetic is **not**, stated because they are the parts that could move the numbers:
-  * † **GLM's `T_parent` (595 µs/layer) is an assumption, not a measurement** — `rate_b = 132 GB/s` is a
-    decode-shaped constant, and the measurement attempt just failed twice for identified harness reasons
-    (`out_engine_step.txt` §9: `-mcs` cannot exceed 287 so VRAM cannot be shed far enough, and the CPU-arena
-    sizing then refuses at `-cs 4096`). D11 says charge the parent engine-measured or not at all, so **the GLM
-    rows in §5 are a direction, not a result** — and they are the rows where the answer flips to ~50/50, which
-    is precisely why the harness needs a GLM-specific arm before this table is used for a build decision.
+  * † **GLM's parent leg is now measured** (rows ≥ 4 above still use the pre-measurement `T_parent = 595` and are
+    superseded by the b=1 row): **non-expert = 101.1 µs/layer, device total 406.7, wall 1392.2 µs/layer** at
+    ctx 2048 / b=1 / `-mcs 258` / `-mct 15` (`out_engine_step.txt` §11). Three things follow, and the first one
+    corrected a row of this table that I had written on the assumed value:
+    * `T_parent` is **5.9× smaller** than the 595 µs I assumed, so GLM's crossover is not at rows≈5 — **the card
+      is already the binding worker at b=1**, and the optimum card share is 0.51 (296 vs 574 µs/layer all-card).
+      Equal splitting really is right for GLM, but because the parent's non-expert shadow is tiny, not merely
+      because the two homes have similar byte rates.
+    * **71 % of the GLM step is exposed stall** (wall 1392 vs device 407 µs/layer). The parent is waiting on the
+      CPU worker, not computing. That makes GLM the strongest case in this plan for the card — moving picks off
+      the worker addresses the stall *and* the device term — and it also means the max(·) model here,
+      which only balances device terms, understates the gain.
+    * **`-mcpa` is not free at decode on GLM: 16.0 → 11.4 tok/s (−29 %)**, with the `copy` bucket going
+      0.2 → 151.2 µs/layer, i.e. ~2.1 MiB per layer per token of promotion traffic. Promotion cost scales with
+      expert size — 0.66 ms to upload a GLM expert against 0.09 ms for Qwen@2.05 — so the "free at decode steady
+      state, +30-50 % on prefill" summary I wrote earlier holds only for small experts. On GLM the two
+      mechanisms have to be priced separately per direction, and a card-side tier must be throttled far harder
+      than the parent's (§3) or it will spend the step moving weights.
   * The parent non-expert growth with rows (×1.15 / ×1.5 / ×1.95 at b=4/8/16) borrows the `PARENT_FLOOR_US`
     *shape* and applies it to the engine-measured b=1 *level*. The b>1 device-bucket split is a known open
     measurement, so the crossover batch (`rows ≈ 5-6` on 2.68, where splitting starts to pay) is ±one row.

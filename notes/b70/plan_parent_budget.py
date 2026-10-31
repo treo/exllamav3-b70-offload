@@ -162,7 +162,14 @@ PARENT_ENGINE_US = {"2.05bpw": 141.9, "2.68bpw": 195.6,
                     # device-time minus the expert bucket at ctx 4096 / b=1 / -mct 15, and each was taken at the
                     # SMALLEST -mcs that loads for that recipe (448 for the four largest), so the -mcs differs
                     # between entries: that is a property of the shipping stack, not a free variable.
-                    "4.05bpw": 190.8, "4.18bpw": 207.9, "5.05bpw": 207.3, "6.05bpw": 207.5}
+                    "4.05bpw": 190.8, "4.18bpw": 207.9, "5.05bpw": 207.3, "6.05bpw": 207.5,
+                    # GLM is measured under a DIFFERENT arm than the ladder above (ctx 2048, -cs 4096, -mcs 258,
+                    # plain -mct 15), because GLM will not fit the 4096/8192 configuration. Two consequences when
+                    # reading GLM rows: the level is ctx-2048 (so ctx-scaling reuses the Qwen SHAPE, which is a
+                    # real approximation, not a measurement), and the GLM step is 71% exposed STALL (wall 1392.2
+                    # vs device 406.7 us/layer) that this device-derived level does not represent at all - any
+                    # GLM verdict from parent_us() is therefore a device-term bound, not a wall-clock forecast.
+                    "3.05bpw": 101.1}
 PARENT_ENGINE_HEAD_US_PER_LAYER = 14.0    # Qwen3.5 control: generator 196.9 vs forward-only 182.6 us/layer
 
 

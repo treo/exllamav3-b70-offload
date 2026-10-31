@@ -1377,7 +1377,7 @@ nothing that is the sole instance of a measurement.
     Same failure as LESSONS 66's unmatched-batch gain, one level up: after fixing the baseline, fix **which term
     each mechanism acts on**, then combine over a shared term by removing the term once. Three rules: (1) report
     each mechanism's share of the named term (948/2619 = 36 %), not just its ratio; (2) the competitive baseline
-    must include free knobs — `-mcpa` is a flag anyone can set, worth +30-50 % on prefill and ~nothing at decode
+    must include free knobs — `-mcpa` is a flag anyone can set, worth +30-50 % on prefill and near-neutral on Qwen decode
     steady state, so every plain-mode “today” figure in this chapter understates the bar the B70 must clear;
     (3) a substitution claim is cheap to falsify: prefill time vs `-mcs` should flatten from 10.23 ms/expert to
     ~6.5 ms/expert with `-mcpa` on. Write that prediction down before testing it, because the case where it fails
@@ -1413,6 +1413,20 @@ nothing that is the sole instance of a measurement.
     fixed window because the destination is cramped, the right answer is *capacity* (the card holds 84 of 288 GLM
     experts per layer, or any model's whole half-mass tail) and the policy can stay coarse. If it were
     policy-bound, more VRAM would not have helped.
+
+85. **"This knob is free at steady state" is a claim about a shape, not about the knob.** I wrote that -mcpa was
+    worth +30-50 % on prefill and ~nothing at decode, having measured Qwen3.8@2.05/2.68 (where decode is
+    bandwidth-bound at the host's read ceiling, so relocation cannot help) and reached parity at 384 tokens in an
+    earlier session. On GLM the same flag costs **29 % of decode throughput** (16.0 → 11.4 tok/s): the copy
+    bucket goes 0.2 → 151.2 µs/layer, ~2.1 MiB per layer per token of promotion traffic, because promotion cost
+    scales with expert bytes and a GLM expert upload is 0.66 ms against 0.09 ms for a Qwen@2.05 one — 8× the
+    price per move, at a churn rate tuned for the cheap case. So the sign of a placement knob is a function of
+    the object size it moves, and generalising it across models in the same family is exactly the error LESSONS
+    54 warns about with byte rates. Rule: when a mechanism's cost is proportional to some physical quantity
+    (bytes moved, tiles walked, experts resident), state the measured value AS a function of that quantity and
+    re-evaluate the sign for each model, rather than carrying a verdict from the first one measured — and note
+    that the prefill gains I measured were on Qwen too, so GLM's prefill response to -mcpa is genuinely unknown,
+    not presumed positive.
 
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is

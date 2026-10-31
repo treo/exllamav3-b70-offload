@@ -78,9 +78,18 @@ def main():
     nl = getattr(config, "num_hidden_layers", None) or len(model.blocks)
     is_rec = model.caps.get("recurrent_states", False)
     dev = torch.device("cuda")
-    ids = torch.randint(1000, 200000, (1, args.ctx + args.tokens + args.warm + 64), device="cpu")
+    # Synthetic ids must stay inside THIS model's vocab. The range used to be a hardcoded [1000, 200000), which
+    # was harmless on Qwen3.8 (vocab_size 248,320) and produced IndexError: index out of range in self on GLM
+    # (vocab_size 154,880) - a bench bug that looked exactly like a GLM harness/capacity failure and cost a
+    # measurement attempt. Stay 8192 below the top so pad/eos-adjacent ids (GLM pads at 154,820) are never used.
+    n_vocab = int(getattr(config, "vocab_size", 0) or 0)
+    id_hi = min(200000, n_vocab - 8192) if n_vocab else 200000
+    if id_hi <= 1100:
+        raise SystemExit(f"vocab_size {n_vocab} leaves no room for the synthetic id range")
+    ids = torch.randint(1000, id_hi, (1, args.ctx + args.tokens + args.warm + 64), device="cpu")
     print(f"\nengine step bench: {getattr(config, '_name', 'model')}  layers {nl}  ctx {args.ctx}  "
-          f"b=1  recurrent_states={is_rec}  mcs={args.moe_cpu_split} mcl={args.moe_cpu_offload}")
+          f"b=1  recurrent_states={is_rec}  mcs={args.moe_cpu_split} mcl={args.moe_cpu_offload}  "
+          f"ids in [1000,{id_hi}) of vocab {n_vocab or 'unknown'}")
 
     def step(i, with_head=False):
         rec = [cache.get_test_state(i)] if is_rec else None
