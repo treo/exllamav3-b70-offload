@@ -1428,6 +1428,18 @@ nothing that is the sole instance of a measurement.
     that the prefill gains I measured were on Qwen too, so GLM's prefill response to -mcpa is genuinely unknown,
     not presumed positive.
 
+86. **For an exl3 export, the shard files are the inventory; `model.safetensors.index.json` is not.** I checked
+    whether GLM-5.3 ships its MTP head by listing keys in the index and got a confident "no": 148,024 entries,
+    zero matching `.layers.45.`, zero `enorm`/`hnorm`/`eh_proj`. Reading the shard headers directly gave 43
+    expert-bearing layers (ids 3..45), 288 experts each, 109.3 GiB, and `model.language_model.layers.45.{hnorm,
+    enorm,eh_proj}` present — a ~3,530-tensor delta that is almost exactly one MoE layer plus its norms. The
+    index is stale (written before the head was appended) and, per `loader/safetensors.py:403` ("Scan directory
+    for .safetensors files and build collection…"), the engine never consults it — so the staleness is harmless
+    to us and lethal to any tool that trusts the index, including the next question I ask with the wrong
+    instrument. Rule: when a claim is about what a checkpoint *contains*, enumerate the shard headers; treat an
+    index/metadata file as a claim about a claim, and when two instruments disagree about a fact, prefer the one
+    the loader itself uses (this is LESSONS 81 again, with files instead of arithmetic).
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
     unchanged and is what LESSONS 68 refers to.)

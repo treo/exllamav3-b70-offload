@@ -180,7 +180,7 @@ model load) is recorded so nobody re-litigates it:
 | routed experts | **288, uniform across every MoE layer** | 151,554 tensor names parsed; `distinct experts per layer = [288]` |
 | MoE layers in the serving path | **42** (indices 3-44) — the plan's `layers=42` is correct | indices 3-45 carry `.mlp.experts.*`, but layer 45 also carries `enorm/eh_proj/hnorm` and `num_nextn_predict_layers = 1`: **it is the MTP layer**, not per-token serving |
 | dense prefix | 3 layers (`first_k_dense_replace = 3`) | config + tensors |
-| routed bytes | **109.3 GiB total, 2.54 GiB/layer, 9.03 MiB/expert** | summed `data_offsets`, gate/up/down exactly equal at 36.42 GiB each |
+| routed bytes | **109.3 GiB total, 2.54 GiB/layer, 9.03 MiB/expert** | summed `data_offsets`, gate/up/down exactly equal at 36.42 GiB each. Re-measured directly off the shard headers on 2025-11: 43 expert-bearing layers (ids 3..45) x 288 experts, **9.04 MiB/expert**, 1.15 GiB of non-routed `.mlp.` bytes — and `model.safetensors.index.json` is **stale** (~3,530 tensors missing, all of them the MTP head), so it must not be used as the inventory; the loader scans the shards (`loader/safetensors.py:403`), see LESSONS 86 |
 | **shared experts** | present on all 42+1 MoE layers, **~25 MiB/layer**, plus routers at 2.25 MiB/layer (`e_score_correction_bias`, `topk_method = noaux_tc`, sigmoid, `norm_topk_prob`) | non-routed `.mlp.*` families, 1.15 GiB total |
 
 Two things that look like errors in my own reasoning and are not, written down because each was about to become a
