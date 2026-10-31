@@ -1362,6 +1362,20 @@ nothing that is the sole instance of a measurement.
     loader's 1.172 MiB. Same discipline as `check_tables.py`: a claim that can be derived should be *computed*,
     and a correction that changes the direction of an argument deserves the extra minute.
 
+82. **Two optimizations that remove the same term are substitutes: sum the term, never the speedups.** Parent
+    prefill on 2.05 measures 4609 ms, of which the `-mcs` slope puts **2619 ms (57 %) in the CPU expert leg**;
+    `-mcpa` removes 948 ms of that leg, and moving the whole leg to the card costs 734 ms. Both mechanisms
+    therefore bottom out at the same place — 4609 − 2619 + 734 = **2724 ms = 1.69×** — and arithmetic that
+    multiplied `-mcpa`'s 1.26× by the card's 1.69× would promise 2.13× from a system that cannot exceed 1.69×.
+    Same failure as LESSONS 66's unmatched-batch gain, one level up: after fixing the baseline, fix **which term
+    each mechanism acts on**, then combine over a shared term by removing the term once. Three rules: (1) report
+    each mechanism's share of the named term (948/2619 = 36 %), not just its ratio; (2) the competitive baseline
+    must include free knobs — `-mcpa` is a flag anyone can set, worth +30-50 % on prefill and ~nothing at decode
+    steady state, so every plain-mode “today” figure in this chapter understates the bar the B70 must clear;
+    (3) a substitution claim is cheap to falsify: prefill time vs `-mcs` should flatten from 10.23 ms/expert to
+    ~6.5 ms/expert with `-mcpa` on. Write that prediction down before testing it, because the case where it fails
+    means the 948 ms came from somewhere else entirely and the model above is wrong.
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
     unchanged and is what LESSONS 68 refers to.)
