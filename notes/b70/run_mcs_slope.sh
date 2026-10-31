@@ -19,23 +19,30 @@ OUT=/tmp/mcs_slope
 mkdir -p "$OUT"
 
 echo "label   mcs   median_prefill_ms   tok/s   promotions   note"
-for MCS in 32 128 256 384 448; do
-    log="$OUT/mcs$MCS.log"
+# MODE=plain reproduces the CPU-leg slope; MODE=mcpa re-fits it under promotion, which is the test of whether
+# -mcpa and the B70 draw on the same term (they do: slope 10.24 -> 5.59 ms/expert, intercept +221 ms).
+MODE="${1:-both}"
+for FLAG in $( [ "$MODE" = mcpa ] && echo "-mcpa" ; [ "$MODE" = plain ] && echo "-" ; [ "$MODE" = both ] && echo "- -mcpa" ); do
+  TAG=$([ "$FLAG" = "-" ] && echo plain || echo mcpa)
+  for MCS in 32 128 256 384 448; do
+    log="$OUT/${TAG}_mcs$MCS.log"
+    extra=(); [ "$FLAG" != "-" ] && extra+=(-mcpa)
     python3 -u notes/bench_live_trace.py -m "$M" -cs 16384 --prefill 4096 --prefill-reps 3 \
-        --corpus varied --decode 32 --reps 6 -chunk_size 2048 --stats-dir "$OUT/stats$MCS" \
-        --out "$OUT/mcs$MCS.json" -mcs "$MCS" -mct 15 > "$log" 2>&1
+        --corpus varied --decode 32 --reps 6 -chunk_size 2048 --stats-dir "$OUT/stats_${TAG}_$MCS" \
+        --out "$OUT/${TAG}_mcs$MCS.json" -mcs "$MCS" -mct 15 "${extra[@]}" > "$log" 2>&1
     med=$(grep -oE "\(median of [0-9]+\): +[0-9.]+ ms +-> +[0-9]+ tok/s" "$log" | head -1)
     prom=$(grep -oE "[0-9]+ promotions" "$log" | head -1)
     note=""
     grep -q "Insufficient VRAM" "$log" && note="load failed: split too small for model+cache"
     [ -z "$med" ] && [ -z "$note" ] && note="no prefill measurement (rc!=0?) - read nothing"
-    printf "%-7s %4s   %-30s %-13s %s\n" "mcs" "$MCS" "${med:- -}" "${prom:--}" "$note"
+    printf "%-6s %4s   %-30s %-13s %s\n" "$TAG" "$MCS" "${med:- -}" "${prom:--}" "$note"
+  done
 done
-echo "# fit time = C + s*mcs from the surviving rows; s is the marginal cost of one CPU-homed expert per chunk,"
-echo "# C is everything that is not CPU expert work. Measured 2025-11 (3 surviving arms: 256/384/448):"
-echo "#   time = 1991.6 ms + 10.23 ms * mcs, residuals < 2 ms over a 1.4x range of remote-expert counts"
-echo "#   -> 2.05 prefill at 4096 tokens: ~2619 ms (57%) CPU expert work, ~1992 ms everything else"
-echo "#   -> arms at -mcs 32 and 128 fail to load ('Insufficient VRAM in split for model and cache'): the split"
-echo "#      floor the operator reported, reproduced here as a by-product of the slope design"
-echo "# NOTE on precision: within one process the arms fit this line to <2 ms, but the same -mcs value measured"
-echo "# in a different process varied by 2.4% (4608.9 vs 4723.9 ms). Trust the slope, not the absolute level."
+echo "# fit time = C + s*mcs per mode; s is the marginal cost of one CPU-homed expert per chunk and C is"
+echo "# everything that is not CPU expert work. Measured 2025-11 (3 surviving arms each, 256/384/448):"
+echo "#   plain: time = 1988 ms + 10.24 ms * mcs   residuals < 2 ms"
+echo "#   -mcpa: time = 2210 ms +  5.59 ms * mcs   residuals < 30 ms, promotions ~385 at EVERY mcs (saturating)"
+echo "#   -> CPU expert work is 57% of a 2.05 prefill (2619 ms of 4609 ms); -mcpa takes it to 39% at a cost of"
+echo "#      +221 ms of non-expert overhead; the card's floor is 1988 + 734 = 2722 ms = 1.69x either way."
+echo "# NOTE on precision: within one process the arms fit to <2 ms (plain) / <30 ms (-mcpa), but the same"
+echo "# -mcs value across processes varied by 2.4%. Trust slopes; treat intercepts as +/- ~120 ms."

@@ -1374,7 +1374,23 @@ nothing that is the sole instance of a measurement.
     steady state, so every plain-mode “today” figure in this chapter understates the bar the B70 must clear;
     (3) a substitution claim is cheap to falsify: prefill time vs `-mcs` should flatten from 10.23 ms/expert to
     ~6.5 ms/expert with `-mcpa` on. Write that prediction down before testing it, because the case where it fails
-    means the 948 ms came from somewhere else entirely and the model above is wrong.
+    means the 948 ms came from somewhere else entirely and the model above is wrong. **Result: tested, and it held
+    (10.24 → 5.59 ms/expert, −45 % against −36 % predicted), and the residuals taught two more things — see 83.**
+
+83. **A mechanism whose action count does not scale with the problem is a capacity mechanism, not a scaling one:
+    read the counter, not the ratio.** `-mcpa` measured +30 % on 2.05 and +50 % on 2.68, which invites the story
+    "more remote experts ⇒ promotion helps more, so scale it up." The counter says otherwise: promotions were
+    390 / 383 / 384 at `-mcs` 256 / 384 / 448 — a **fixed ~8 experts per layer regardless of how many experts were
+    remote** — and the relief per marginal expert decayed (4.96 ms saved per expert over 256→384, 3.88 over
+    384→448), with the `-mcpa` fit visibly dirtier than the plain one (±30 ms vs ±2 ms). The mechanism is a
+    bounded window, so its benefit is capped while the problem it fights grows. Two rules: (1) when a ratio and a
+    counter disagree, the counter is the mechanism and the ratio is its shadow — a speedup number cannot tell you
+    this, a promotion count can, which is exactly why LESSONS 66 insisted on adaptation counters alongside latency;
+    (2) before proposing a second, bigger instance of a placement mechanism (here: the B70 as another promotion
+    destination), check whether the first instance is capacity-bound or policy-bound. If the promoted set is a
+    fixed window because the destination is cramped, the right answer is *capacity* (the card holds 84 of 288 GLM
+    experts per layer, or any model's whole half-mass tail) and the policy can stay coarse. If it were
+    policy-bound, more VRAM would not have helped.
 
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is

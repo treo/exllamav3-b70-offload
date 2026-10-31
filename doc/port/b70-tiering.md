@@ -21,7 +21,9 @@ Derived, and it is the load-bearing arithmetic: on 2.05 prefill the CPU expert l
 chunk (57 %)**, `-mcpa` removes **948 ms of that term (36 %)**, and moving the whole expert leg to the card costs
 **734 ms**. The floor is therefore **2724 ms = 1.69×**, and it is the *same floor* whether `-mcpa` is on or not —
 because the second mechanism cannot remove bytes the first already moved. Claiming 1.69 × 1.26 would be counting
-one term twice (LESSONS 82).
+one term twice (LESSONS 82). §5.1 reports this tested against measurement, including the two things the model did
+not predict: `-mcpa` costs +221 ms of overhead, and its relief saturates because the promoted set is a fixed-size
+window.
 
 ## 2. CAPACITY GEOMETRY — WHY BIG MODELS ARE THE GOOD CASE
 
@@ -87,16 +89,39 @@ Three consequences for the design:
 
 ## 5. OPEN, IN PRIORITY ORDER
 
-1. **The falsifiable prediction of the substitution story.** Re-run the `-mcs` slope with `-mcpa` enabled. If both
-   mechanisms draw on the CPU-expert term, the slope must flatten from 10.23 ms/expert toward
-   10.23 − 948/256 ≈ **6.5 ms/expert**. If the slope is unchanged, `-mcpa`'s 948 ms came from somewhere else
-   (cache locality, transfer overlap, the 3090's own expert leg), and this note's central claim is wrong.
+1. ~~The falsifiable prediction of the substitution story~~ **TESTED, and it held — plus it exposed a sharper
+   fact than the prediction itself.** Re-running the `-mcs` slope with `-mcpa` on (same prompt/chunk/reps):
+
+       | fit                       | intercept C | slope s     | residuals   | promotions/arm |
+       |---------------------------|-------------|-------------|-------------|----------------|
+       | plain                     | 1988 ms     | **10.24 ms/expert** | −0.6/+1.7/−1.1 ms | 0 |
+       | `-mcpa`                   | **2210 ms** | **5.59 ms/expert**  | +9.9/−29.8/+19.8 ms | 390/383/384 |
+
+   * The slope flattens by **45 %** (predicted 36 %), so `-mcpa` demonstrably acts on the CPU-expert term and the
+     substitute model is right: the card's floor is 1988 + 734 = **2722 ms = 1.69×**, `-mcpa` alone reaches
+     3650 ms, and the card's **incremental** value on a promoted baseline is **1.34×**. Nothing multiplied.
+   * **`-mcpa` is not free: its intercept rises +221 ms** (4.8 % of the plain chunk) — promotion/demotion work
+     charged to non-expert time. That is the first quantitative cost of the mechanism on this box, and it is why
+     the measured relief falls short of the bytes moved.
+   * **The promoted set is a fixed-size window, so `-mcpa` saturates.** Promotions stayed at 383-390 across
+     `-mcs` 256/384/448 (~8 experts/layer regardless of how many experts are remote), and per-interval relief
+     decays (4.96 ms/expert saved from 256→384, 3.88 from 384→448). The fit is also visibly less clean under
+     `-mcpa` (±30 ms vs ±2 ms), which is what a bounded mechanism looks like. **This is the strongest argument in
+     this note for the B70 as a capacity tier rather than a faster ranking target**: ranking relief is bounded by
+     the window the 3090 can spare (~8 experts/layer), while capacity relief scales — the card can hold 84 of 288
+     GLM experts per layer, or the whole half-mass tail of any model here.
+   * Break-even: `-mcpa` pays on prefill above ~**48** remote experts, i.e. for essentially every real split —
+     and its value grows with `-mcs`, which is why 2.68 (`-mcs 384`) gained +50 % against 2.05's +30 %.
+   * Caveat on linearity: the `-mcpa` slope is a 3-point fit with ±30 ms residuals, so treat 5.59 ms/expert as
+     ±0.5, and note the two low `-mcs` arms still cannot be measured because they fail to load.
 2. **Hot-set dwell time.** Does the identity of the top-24 experts per layer persist across chunks and across
-   sessions? LESSONS 66 measured churn counts but not stability. This decides static-with-capacity versus dynamic
-   promotion, and it is cheap: emit per-layer top-N sets per chunk from the live tracer and intersect them.
-3. **GLM has no live trace and no `-mcpa` measurement.** Its 109.3 GiB expert set makes it the case where the
-   argument matters most, and its routing concentration is still taken from the *stored* profile, which this tree
-   has twice shown to understate hot-tail statistics by ~6× in count and ~15× in pick share.
+   sessions? Churn counts are measured (and are fixed-size, per above), stability is not. This decides
+   static-with-capacity versus dynamic promotion, and it is cheap: emit per-layer top-N sets per chunk from the
+   live tracer and intersect them.
+3. **GLM has no live trace and no `-mcpa` measurement** — and the saturation result above makes it the case where
+   the difference matters most: if relief is capped at ~8 experts/layer whatever the remote count, then on a model
+   with 288 experts/layer and no 3090 slack, `-mcpa` can only ever touch a few percent of the picks, and the card
+   is the only mechanism that scales.
 4. **Two promotion targets, one policy.** Nothing measured about interference when both the 3090 and the B70 can
    receive promotions: double-promotion, ping-pong between cards, and who owns admission when both are interested.
    The B70 worker's handoff already carries placement state; this is a design question before it is a bug.
