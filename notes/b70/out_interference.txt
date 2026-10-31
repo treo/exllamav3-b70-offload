@@ -1,0 +1,19 @@
+=== E36v2 co-execution interference (run_plan_close4.sh). Alternating engine-alone / engine+card, 3 pairs.
+=== The first attempt (one run each) said the engine was 30 % FASTER with the card saturated, which is
+=== order/warm-state drift, not interference. Design change: interleave and compare medians.
+--- card ALONE (3 windows, its own launch time):
+gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
+revL ks 4 rows 16 1-proj     layout native:    148.0 us    708.4 G-w/s   177.1 GB/s(trellis)   [single-launch   151.4 us]  [M 8x2, 40 tiles x 64 experts]
+gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
+revL ks 4 rows 16 1-proj     layout native:    149.0 us    703.7 G-w/s   175.9 GB/s(trellis)   [single-launch   152.1 us]  [M 8x2, 40 tiles x 64 experts]
+gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
+revL ks 4 rows 16 1-proj     layout native:    148.6 us    705.9 G-w/s   176.5 GB/s(trellis)   [single-launch   152.0 us]  [M 8x2, 40 tiles x 64 experts]
+--- alternating:
+  pair 1 engine-alone :   model.forward, b=1:  16336.2 us/token  =  340.3 us/layer  (  61.2 tok/s of parent step time)
+  pair 1 engine+card  :   model.forward, b=1:  15881.8 us/token  =  330.9 us/layer  (  63.0 tok/s of parent step time)
+  pair 1 card-under-load: gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
+revL ks 4 rows 16 1-proj     layout native:    148.5 us    706.2 G-w/s   176.6 GB/s(trellis)   [single-launch   152.4 us]  [M 8x2, 40 tiles x 64 experts]
+  pair 2 engine-alone :   model.forward, b=1:  15752.4 us/token  =  328.2 us/layer  (  63.5 tok/s of parent step time)
+  pair 2 engine+card  :   model.forward, b=1:  16558.4 us/token  =  345.0 us/layer  (  60.4 tok/s of parent step time)
+  pair 2 card-under-load: gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
+revL ks 4 rows 16 1-proj     layout native:    148.7 us    705.1 G-w/s   176.3 GB/s(trellis)   [single-launch   150.8 us]  [M 8x2, 40 tiles x 64 experts]

@@ -72,8 +72,21 @@ def main():
     ap.add_argument("--warm", type=int, default=12)
     ap.add_argument("--lmhead", action="store_true")
     ap.add_argument("--no-prof", action="store_true")
+    ap.add_argument("--allow-tight", action="store_true",
+                    help="run even when the memory guard objects (see notes/b70/mem_guard.py; this is the "
+                         "configuration that hard-hung the box on 2025-11, so it needs a watching human)")
     args = ap.parse_args()
 
+    # Memory guard BEFORE any tensor is read. An unattended GLM arm rebooted this machine; the guard belongs in
+    # the loader path, not in a queue script's list of arms (mem_guard.py explains why, LESSONS 87).
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "b70"))
+    from mem_guard import require_headroom as _guard                        # noqa: E402
+    _mdir = str(getattr(args, "model_dir", "") or getattr(args, "model", "") or "")
+    if _mdir:
+        _guard(_mdir, bool(getattr(args, "mcpa", False) or getattr(args, "moe_cpu_pinned_arena", False)),
+               args.allow_tight, quiet=True)
     model, config, cache, tokenizer = model_init.init(args, quiet=True, progress=False)
     nl = getattr(config, "num_hidden_layers", None) or len(model.blocks)
     is_rec = model.caps.get("recurrent_states", False)

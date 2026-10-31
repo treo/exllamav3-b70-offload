@@ -134,6 +134,10 @@ def mem_preflight(model_dir: str, mcpa: bool, allow_tight: bool) -> None:
 
 
 
+from mem_guard import require_headroom as mem_preflight   # noqa: E402  (the local definitions below are the
+                                                           # originals, kept only as a fallback; this binding wins)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(allow_abbrev=False, description=__doc__.split("\n")[0])
     ap.add_argument("--model", "-m", required=True)

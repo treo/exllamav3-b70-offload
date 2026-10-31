@@ -119,6 +119,9 @@ def main():
                          "(a second domain is the only way to test whether the cross-session "
                          "agreement with independence is a corpus artifact)")
     ap.add_argument("--stats-dir", default="/tmp/live_stats")
+    ap.add_argument("--allow-tight", action="store_true",
+                    help="run even when the memory guard objects (notes/b70/mem_guard.py; GLM on this box is "
+                         "87 % of host RAM and one such arm hard-hung the machine, LESSONS 87)")
     ap.add_argument("--dump-snaps", default="",
                     help="write the raw per-token per-layer expert-delta trace (sparse JSON) to this path. The "
                          "aggregated profiles under profiles/live/ hold per-expert TOTALS, which are invariant "
@@ -176,6 +179,13 @@ def main():
         init_args += ["-mcl", str(args.mcl)]
     if args.mcpa:
         init_args.append("-mcpa")
+
+    # Memory guard BEFORE the load. Lives in the loader path rather than in whichever queue script happens to
+    # list this arm, because a queue script edited under a refused multi-edit call kept running GLM arms after I
+    # had "removed" them (mem_guard.py, LESSONS 87).
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "b70"))
+    from mem_guard import require_headroom                                  # noqa: E402
+    require_headroom(str(args.model_dir), bool(args.mcpa), args.allow_tight, quiet=True)
 
     with e2e.load_model(args.model_dir, None, *init_args, cache_tokens=args.cache_size, warmup=True) as lm:
         nl = len(getattr(lm.model, "blocks", [])) or getattr(lm.config, "num_hidden_layers", 0)
@@ -256,7 +266,20 @@ def main():
         def run(n, trace=False):
             gen = lm.generator()
             snaps = []
-            prev = hist_snapshot(mods) if trace else None
+            step_toks = []
+            # OBSERVER EFFECT, stated rather than hidden: clearing `_split_hist` also wipes the evidence the
+            # engine's own promotion policy ranks on, so this is done ONLY when -mcpa is off. With promotion
+            # active we leave history alone and rely on the diff baseline below instead.
+            if trace and not args.mcpa:
+                with torch.inference_mode():      # _split_hist is an inference tensor; zeroing it outside the
+                    for m in mods:                # context raises "Inplace update to inference tensor outside
+                        h = getattr(m, "_split_hist", None)   # InferenceMode is not allowed"
+                        if h is not None:
+                            h.zero_()
+            # Baseline is taken at the FIRST streamed step, not before the loop: by then the session's prefill has
+            # already been counted, and prompt-sized histograms were exactly what broke the first dwell analysis
+            # (interval 0 held 7720 picks = 772 prompt tokens x topk 10, against 10 for every real decode step).
+            prev = None
             per_tok = []
             from exllamav3 import Job
             from exllamav3.generator.sampler import ArgmaxSampler
@@ -271,6 +294,8 @@ def main():
                     if r["stage"] != "streaming" or r.get("token_ids") is None:
                         continue
                     k = len(r["token_ids"].view(-1).tolist())
+                    step_toks.append(k)      # the token axis: a step that advanced 772 tokens was a PREFILL, and
+                                             # a dwell window must not be measured in "steps" that are not tokens
                     t1 = time.perf_counter()
                     per_tok.append((t1 - t0) / max(k, 1))
                     t0 = t1
@@ -278,12 +303,30 @@ def main():
                     if trace:
                         nperm_changes[0] += perm_changes()
                         cur = hist_snapshot(mods)
-                        # With N jobs stepping together this snapshot's diff IS the batch's expert set, so its
-                        # size is a direct measurement of union(N) - no independence assumption anywhere.
-                        snaps.append([[(c[i] - p[i]) if c[i] is not None and p[i] is not None else None
-                                       for i in range(len(c))] for c, p in zip(cur, prev)])
-                        prev = cur
-            return per_tok, snaps
+                        if prev is None:
+                            prev = cur
+                            snaps.append([[] for _ in cur])   # the prefill interval, excluded (see baseline note)
+                        else:
+                            # The engine rotates/clears `_split_hist` itself (its promotion policy needs a windowed
+                            # view), so a diff can go NEGATIVE when a rotation lands between two reads. That is
+                            # not noise to clamp - clamping turns a broken interval into a plausible one - but an
+                            # interval with no information, so it is recorded EMPTY and counted. Empty rather than
+                            # None on purpose: four downstream consumers of `snaps` had to be taught about None
+                            # and a fifth kept tripping, which is the representation being wrong, not the callers.
+                            step_diff = []
+                            for c, p in zip(cur, prev):
+                                if c is None or p is None:
+                                    step_diff.append([])
+                                    continue
+                                dl = [cv - pv for cv, pv in zip(c, p)]
+                                if dl and min(dl) < -1e-6:
+                                    n_reset[0] += 1
+                                    step_diff.append([])
+                                else:
+                                    step_diff.append(dl)
+                            snaps.append(step_diff)
+                            prev = cur
+            return per_tok, snaps, step_toks
 
         # Migration counters: hot/cold swapping between the CPU arena and the GPU slots. Throughput alone cannot
         # tell "the pinned arena is slower" from "the pinned arena lets hot experts migrate up, which pays off
@@ -296,9 +339,10 @@ def main():
             return pr, dm, tick
         pr0, dm0, tk0 = mig_counters()
 
+        n_reset = [0]
         nperm_changes = [0]
-        pt, _ = run(args.decode)                      # pass A: timing only (generator: head + sampler in)
-        _pt2, snaps = run(args.decode, trace=True)     # pass B: tracing only
+        pt, _, _ = run(args.decode)                      # pass A: timing only (generator: head + sampler in)
+        _pt2, snaps, step_toks = run(args.decode, trace=True)     # pass B: tracing only
         med = statistics.median(pt) * 1e6
         tail = sorted(pt)[int(0.9 * len(pt))] * 1e6
         print(f"  decode wall: median {med:8.1f} us/token  p90 {tail:8.1f}  -> {1e6/med:6.1f} tok/s  "
@@ -324,25 +368,34 @@ def main():
             print(f"  model.forward-only pass FAILED ({type(exc).__name__}: {str(exc)[:90]}) - head/sampler split "
                   f"stays unmeasured for this model")
 
+        if n_reset[0]:
+            print(f"  NOTE: the engine rotated its own selection histogram {n_reset[0]} times during the traced "
+                  f"pass; those (layer, step) intervals are marked unusable and EXCLUDED, not clamped to zero. "
+                  f"Effective coverage: {len(snaps) - n_reset[0]}/{len(snaps)} steps.")
         if nperm_changes[0]:
             print(f"  WARNING: the expert permutation changed {nperm_changes[0]} times DURING the traced pass - "
                   f"the per-token sets above may attribute picks to wrong experts (diversity inflated). Traces "
                   f"are trustworthy only with a stable permutation, i.e. without -mcpa, or with swapping off.")
         if args.jobs > 1:
-            sizes = [[sum(1 for v in s[L] if v and v > 0) for s in snaps] for L in range(len(mods))]
+            sizes = [[sum(1 for v in (s[L] or []) if v and v > 0) for s in snaps] for L in range(len(mods))]
             per_layer = [statistics.median(x) for x in sizes]
             print(f"  CONCURRENT union({args.jobs}): median distinct experts touched per step, per layer - "
                   f"mean {statistics.mean(per_layer):.1f}, min {min(per_layer):.1f}, max {max(per_layer):.1f} "
                   f"(measured on live parallel streams, not modelled)")
         if args.dump_snaps:
             os.makedirs(os.path.dirname(os.path.abspath(args.dump_snaps)), exist_ok=True)
+            # One entry per (step, layer): the (expert, picks) pairs, or None if the interval was dropped. Kept
+            # SPARSE on purpose - dense would be 256 x 48 x 512 numbers for ~6k nonzero cells per step.
+            steps_json = [[None if Lv is None else [[i, int(v)] for i, v in enumerate(Lv) if v]
+                           for Lv in s] for s in snaps]
             with open(args.dump_snaps, "w") as fh:
                 json.dump({"model_dir": str(args.model_dir), "decode_steps": args.decode, "jobs": args.jobs,
                            "engine_args": list(init_args), "mcpa": bool(getattr(args, "mcpa", False)),
                            "layers": [getattr(m, "name", f"layer{i}") for i, m in enumerate(mods)],
-                           "steps": [[[ [i, int(v)] for i, v in enumerate(Lv) if v] for Lv in s] for s in snaps]},
-                          fh)
-            nz = sum(len(Lv) for s in snaps for Lv in s)
+                           "hist_rotations_dropped": n_reset[0],
+                           "step_tokens": step_toks,
+                           "steps": steps_json}, fh)
+            nz = sum(len(c) for s in steps_json for c in s if c)
             print(f"  raw trace -> {args.dump_snaps}  ({len(snaps)} steps x {len(mods)} layers, {nz} nonzero "
                   f"(expert,delta) pairs; ~{os.path.getsize(args.dump_snaps)/1e6:.1f} MB)")
         if args.prefill:
@@ -417,7 +470,7 @@ def main():
         # positive for picked experts and slightly NEGATIVE for unpicked ones (decay), not zero. Taking "the
         # positives" is therefore fragile; taking the largest `topk` diffs is exact, provided topk is right - so
         # topk is measured from the data (modal number of positive diffs) and printed for audit.
-        pos_counts = [sum(1 for v in tl[L] if v and v > 0) for L in range(len(mods)) for tl in snaps]
+        pos_counts = [sum(1 for v in (tl[L] or []) if v and v > 0) for L in range(len(mods)) for tl in snaps]
         tk = statistics.mode(pos_counts)
         sel = []
         for L in range(len(mods)):

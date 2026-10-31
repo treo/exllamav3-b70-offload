@@ -1460,6 +1460,38 @@ nothing that is the sole instance of a measurement.
     go to `notes/b70/logs/` on disk, and regenerable multi-GB case dirs to `$HOME/.cache`, not the repo and not
     `/tmp`.
 
+88. **A refused multi-edit call applies NOTHING — and if you don't re-read the file, you will believe it applied
+    the parts you wanted.** I sent three edits to a queue script in one call: remove the GLM arm from a loop,
+    remove it from a second loop, and add a comment. The tool refused the call because two of the three anchors
+    overlapped, so **zero** edits landed; I said "GLM is out of the unattended queue" from the intent rather
+    than the file, and an hour later a GLM load ran unattended on the machine that had hung two hours earlier —
+    it happened to survive, which is the only reason this is a lesson and not an apology. Three rules: (1) after
+    ANY edit to a file that governs an action, grep for the thing you removed before scheduling the action; the
+    verification is one line and the failure mode is the box; (2) treat a refused batch as wholly unapplied, not
+    partially applied — the atomic behaviour is the point of the tool; (3) most importantly, **a policy stated in
+    a shell script is a note to self**. The durable fix is `notes/b70/mem_guard.py`, called from the loader path
+    of all three benches, so the refusal happens wherever the model is opened and no list of arms has to be kept
+    correct by hand. Verified empirically, not by reading: both benches now exit with `REFUSING to open
+    ...GLM...` in under a second, before any tensor read.
+
+89. **A trace has to be tested on its TIME axis, not just its distribution — and an "interval" is not a token.**
+    The dwell instrument (per-step diffs of the engine's selection histogram) produced two results that were each
+    internally consistent and collectively impossible. First version: window sums of `8030, 320, 320, … , −28376`.
+    The negatives came from the engine rotating `_split_hist` on its own cadence (my diffs spanned a rotation);
+    the 8030 was not stale state at all but the session PREFILL — 772 prompt tokens × topk 10 = 7720 picks landing
+    in the first interval, because `prev` was snapshotted before the generator ran. Fixed by taking the baseline
+    at the first streamed step and treating a rotation as an interval with NO information (empty, counted, printed)
+    rather than clamping it — clamping converts a broken measurement into a plausible one, which is the worst
+    thing an instrument can do. Second failure was subtler: q205 and q268 traces had statistically identical
+    marginals (top-28 pick share 0.115 vs 0.112, same hottest experts — routing is quant-independent, as
+    established) yet rank-band survival of 94 % and 8.6 %. The distributions agreed while the ORDERINGS did not:
+    q268's early hot set shared 17/28 experts with its middle and **0/28** with its end — below the 1.5 expected
+    from two random 28-subsets of 512, i.e. an anti-correlated remapping. So `analyze_dwell.py` now runs a
+    validity gate (first-window top-k vs last-window top-k against the random baseline) and refuses to print
+    half-lives when it fails. The general rule: when a temporal statistic disagrees between two runs whose
+    marginals agree, the marginal test was never sufficient — check that the index basis is stable across the
+    whole series before believing anything about *when* things happened.
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
     unchanged and is what LESSONS 68 refers to.)

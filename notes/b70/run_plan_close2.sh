@@ -27,7 +27,10 @@ Q=$LOG
 say() { echo "### $* $(date '+%m-%d %H:%M:%S')" | tee -a $Q/progress.txt; }
 mem()  { echo "  MemAvailable $(awk '/MemAvailable/{printf \"%.0f GiB\", $2/1048576}' /proc/meminfo)" | tee -a $Q/progress.txt; }
 
-while pgrep -f "b70/[r]un_plan_close" >/dev/null; do sleep 30; done
+# Wait for the FIRST queue only -- and the pattern must not match this script's own name. The first version
+# waited on "b70/[r]un_plan_close", which also matches run_plan_close2.sh, i.e. ITSELF, so the queue sat in its
+# own sleep loop forever and printed nothing. Same self-match class as the pkill trap noted earlier in this plan.
+while pgrep -f "bash notes/b70/run_plan_close\.sh" >/dev/null; do sleep 30; done
 say "REVISED QUEUE START"
 
 run_pre() {
@@ -114,8 +117,7 @@ say "S4 done"
 
 # ---------------------------------------------------------------- S5: dwell traces (static vs dynamic tiering, D16)
 for spec in "q205 Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 256 256" \
-            "q268 Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 384 256" \
-            "glm GLM-5.3-Flash-exl3@3.05bpw 258 128"; do
+            "q268 Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 384 256"; do
   set -- $spec; tag=$1; mdl=$2; mcs=$3; steps=$4
   mem; say "S5 dwell trace $tag ($steps steps, permutation-stable: no -mcpa)"
   timeout 2400 python3 -u notes/bench_live_trace.py -m "$MD/$mdl" -cs 16384 --decode "$steps" --reps 2 \
@@ -125,10 +127,10 @@ done
 # GLM dwell is an ATTENDED item: a GLM load on this box has no memory reserve, so it runs interactively with
 # -cs 4096 and eyes on MemAvailable, not inside an unattended queue.
 : > $B/out_dwell.txt
-for f in dwell_q205 dwell_q268 dwell_glm; do
+for f in dwell_q205 dwell_q268; do
   [ -s "$B/profiles/live/$f.json" ] || { echo "skip $f (no trace)" >> $B/out_dwell.txt; continue; }
   { echo "== $f"; python3 $B/analyze_dwell.py "$B/profiles/live/$f.json" --k 8,32,64,84,128,256 --window 32 \
       --layers 0; } >> $B/out_dwell.txt 2>&1
 done
-say "REVISED QUEUE COMPLETE -> out_interference.txt, out_probe_gemm_midE.txt, out_probe_gemm_glm.txt,"
+say "REVISED QUEUE COMPLETE -> out_interference.txt, out_probe_gemm_midE.txt,"
 say "  out_prefill_kscale.txt, out_dwell.txt, and $Q/pr_*.log"
