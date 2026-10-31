@@ -1,0 +1,79 @@
+# Parent PREFILL decomposition by kernel — first pass (recovered; the machine rebooted mid-queue)
+
+WHAT THIS FILE IS. `notes/b70/bench_parent_prefill.py` (new this session) forwards a real multi-chunk prompt
+through the engine's own chunker (`Job`/`gen.iterate`, no hand-rolled cache math) and buckets device time by
+kernel, to decompose the 1988 ms intercept from the `-mcs` slope fit into non-expert vs GPU-expert. That is
+blocker 1 in `b70-decisions.md` ("What this ledger deliberately does NOT decide").
+
+The numbers below were PRINTED BY FINISHED COMMANDS (`rc=0` lines in the queue progress log) but the log files
+themselves lived in `/tmp/queue/`, which is tmpfs and did not survive the reboot at ~12:07 on 2025-11. They are
+transcribed from the terminal output that was still on screen, so:
+
+  * every figure here is a *recovered transcription*, not a reproducible artifact yet;
+  * `run_plan_close2.sh` re-runs every arm in this file with the fixed attribution and will supersede it. Do not
+    quote these numbers in a decision without checking that file first.
+
+PROVENANCE BUGS FOUND BY RUNNING THIS (both fixed in the script, both affect the columns below):
+  1. `self_device_time_total` is microseconds for the WHOLE profile. The first version printed it as ms (1000x)
+     and then "dropped the warm-up chunk" by dividing buckets by `nchunks-1` — which did not drop anything (the
+     aggregate profiler cannot separate chunks) and inflated every bucket by 33 %. So for the three arms tagged
+     [old] below, the bucket columns are printed/1.333 = corrected. `device per chunk` and `wall` are unaffected
+     (they used `nchunks`).
+  2. `prof_wall` returned by `drain()` is ALREADY per chunk, so `busy = per_chunk/(prof_wall*nchunks)` reported
+     22.6 % on a run that was 90 % device-busy. Corrected by hand below (x4).
+
+ARMS. Qwen3.8 2.05/2.68 at chunk 4096, `-mct 15`, cache = chunks+512, corpus = `fixtures/prefill_pool.txt`
+(12 distinct docs, varied — LESSONS 76), one warm drain + 3 wall drains + 1 profiled drain.
+
+| arm | tok/s | wall ms/chunk | device ms/chunk | device-busy | GPU expert ms/chunk | non-expert ms/chunk |
+|---|---|---|---|---|---|---|
+| q205 `-mcs 256`        [old] | 996 | 4112 (median of 3 = 5207 profiled) | 4697.3 | ~90 % (printed 22.6, x4) | 967 (printed 1289.5/1.333) | 3730 (printed 4973.6/1.333) |
+| q205 `-mcs 448`        [old] | 737 | 5558 | 5794.0 | > 100 % of the *median* wall, 87 % of the profiled pass | 925 (printed 1233.9/1.333) | 4869 (printed 6491.4/1.333) |
+| q205 `-mcs 256 -mcpa`  [old] | 1391 | 2944 | 2666.3 | n/a (line truncated on screen) | n/a | n/a |
+| q268 `-mcs 384`              | 602 | 6804 | 7220.1 | 89.2 % | n/a (not transcribed) | n/a |
+| q268 `-mcs 384 -mcpa`        | 948 | 4321 | 5521.0 | 96.4 % | n/a | n/a |
+| GLM `-mcs 258` chunk 4096    | 119 | 34460 (3 passes: 34460/34398/34482) | 32592.6 | 87.9 % | n/a (killed before print) | n/a |
+
+WHAT THESE SUPPORT ALREADY (conservative, pending the re-run):
+
+1. **Prefill is device-bound, not stall-bound, on the parent.** Device-busy 88-96 % at every arm whose columns
+   are trustworthy. That is the opposite of GLM *decode* (71 % stall, `out_engine_step.txt` §11) and it is the
+   reason the `max(·)` balance in the cost model has been adequate for prefill: there is little waiting to
+   hide. D19's warning applies to decode-shaped steps, not to a 4096-token chunk.
+2. **`-mcpa` reproduces on a second, independent instrument.** 2.05: 996 -> 1391 tok/s (+40 %); 2.68: 602 -> 948
+   (+57 %). The first instrument (`run_prefill_mcpa.sh`, generator throughput) said +30 % and +50 % on the same
+   corpus. Same sign, same magnitude, different code path — so D15/D20's prefill premise is not an artifact of
+   one harness. Note the LEVELS differ (+40 vs +30), which is the usual within-process-vs-cross-process
+   discipline: trust the direction and the slope, not the absolute.
+3. **The intercept is dominated by non-expert work.** At 2.05/-mcs 256 the GPU's expert bucket is ~967 ms of a
+   4697 ms device total (21 %), leaving ~3.7 s/chunk non-expert — the same order as the 1988 ms intercept but
+   larger, which matters: the intercept was fitted as "everything that does not scale with homed experts", and
+   this says the non-expert device term alone is ~1.9x that. Two readings are possible and the re-run's
+   `-mcs 448` delta decides between them: either the profiled pass includes work the wall-clock fit charges to
+   the slope (GPU-side experts for the 256 experts that stay local), or the intercept absorbed host-side CPU
+   time that never appears as device time at all. **Do not quote a prefill multiplier until that is resolved** —
+   it is the difference between "the card's expert leg is additive" and "it partially replaces measured work".
+4. **GLM prefill runs at all**: 119 tok/s at chunk 4096 with 258 of 288 experts homed on the CPU (vs Qwen's
+   602-996). Directionally consistent with 9 MiB experts and 42 MoE layers, and it is the first GLM prefill
+   number this plan has ever had. It is also the arm whose sibling (`-mcpa`) killed the machine — see below.
+
+THE CRASH, AND WHAT IT TEACHES (LESSONS 87). The queue's next arm was GLM + `-mcpa` + chunk 2048, and the box
+hard-hung and rebooted. This is not a surprise in hindsight and the arithmetic is brutal: GLM's routed experts
+are **109.3 GiB on a 125 GiB-RAM machine — 87 % of host memory** — and the CPU home's arena plus pinned staging
+(`EXL3_MOE_CPU_WSLOTS` x 32 MiB, `EXL3_MOE_ARENA_HUGEPAGE=1`) are **locked pages**, which are not reclaimable
+when the page cache needs to grow. Swap is 8 GiB of zram. So the configuration had essentially zero reserve, and
+`-mcpa` is precisely the mechanism that asks for more locked pages. The engine had already told me this and I
+filed it under "self-contradictory error message": the `-mcs 287 -cs 4096` attempt of an earlier session died
+with `CPU MoE expert arena (256 MiB in total) needs 256 MiB of host memory, but only 1902 MiB is ...`. That was
+not a bug to be annoyed at; it was the resource owner reporting a real shortage. Queuing that arm unattended was
+the actual error.
+
+Changes made as a result (see the same commit):
+  * `bench_parent_prefill.py` gains a memory preflight: it refuses to start when `MemAvailable` minus the
+    projected pinned arena is under a floor, prints peak RSS per pass, and refuses GLM-class models under
+    `-mcpa` unless `--allow-tight` is passed explicitly.
+  * `run_plan_close2.sh` drops the GLM+`-mcpa` arm entirely and adds a `MemAvailable` line to every arm's log.
+  * GLM arms run at chunk 2048 with `--reps 1` (2 chunks) and no promotion, and the queued probes avoid E=512
+    dumps at high quant (a 6.05bpw E=512 case is ~5 GiB host and ~5 GiB device, which is fine for RAM only if
+    nothing else is holding pages).
+</content>

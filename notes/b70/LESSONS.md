@@ -1440,6 +1440,26 @@ nothing that is the sole instance of a measurement.
     index/metadata file as a claim about a claim, and when two instruments disagree about a fact, prefer the one
     the loader itself uses (this is LESSONS 81 again, with files instead of arithmetic).
 
+87. **An error message you decide is "weird" is a hypothesis about a resource until you check it, and an
+    unattended queue turns that hypothesis into a reboot.** An earlier GLM arm died with
+    `CPU MoE expert arena (256 MiB in total) needs 256 MiB of host memory, but only 1902 MiB is ...` — a message
+    whose numbers look self-contradictory (needs 256, has 1902). I recorded it as "self-contradictory, worth
+    reading the source someday" and moved on. Later a GLM + `-mcpa` + chunked-prefill arm **hard-hung the
+    machine and forced a reboot**. The arithmetic was never subtle: GLM's routed experts are 109.3 GiB on a
+    125 GiB box = 87 % of RAM, the CPU home holds *pinned* pages (staging slots, huge-page arena) that neither
+    reclaim nor swap-out can take back, swap is 8 GiB of zram, and `-mcpa` requests more locked pages by design.
+    The message was the resource owner reporting a genuine shortage in wording I found annoying, and I converted
+    a warning into a curiosity. Three rules: (1) when an error names a resource, go measure that resource before
+    judging the message — "inconsistent wording" and "inconsistent system" look identical from the console; (2)
+    a queue that runs arms nobody is watching must refuse the arms that can take the box down, so
+    `bench_parent_prefill.py` now has a `mem_preflight` (shard-header expert bytes vs `MemAvailable`, stricter
+    under `-mcpa`, stricter still above 50 % of RAM) that runs BEFORE the load — a guard that fires once the
+    weights are resident is a post-mortem; (3) **artifacts never go in tmpfs.** Every log of that queue was in
+    `/tmp/queue`, so the reboot deleted a day of prefill decomposition and it survives only as a transcription
+    of what was still on screen (`out_prefill_decomp.txt`, marked as recovered and queued for re-run). Logs now
+    go to `notes/b70/logs/` on disk, and regenerable multi-GB case dirs to `$HOME/.cache`, not the repo and not
+    `/tmp`.
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
     unchanged and is what LESSONS 68 refers to.)

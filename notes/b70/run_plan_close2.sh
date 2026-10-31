@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Second GPU queue: (A) re-run the prefill decomposition with the FIXED attribution (the first pass divided by
-# chunks-1 to "drop" the warm-up chunk, which inflated every bucket by 33 % and cannot be undone by hand for the
-# per-kernel rows), then (B) capture the raw routing time series that dwell analysis needs.
+# Remaining plan-phase GPU work, revised after the machine hard-hung on a GLM + -mcpa + chunked-prefill arm.
 #
-# It waits for run_plan_close.sh to finish rather than racing it: two engine processes on this box share the
-# 15-core CPU worker and both numbers become meaningless.
+# Two structural changes vs the first version of this queue, both direct consequences of that hang:
+#   1. LOGS GO TO Disk. The first queue wrote to /tmp/queue, which is tmpfs: the reboot deleted every log, and
+#      the prefill decomposition had to be recovered by transcribing the terminal ($B/out_prefill_decomp.txt).
+#      Progress and per-arm logs now live in notes/b70/logs/ (gitignored) so a crash costs a re-run, not data.
+#   2. NO GLM +-mcpa ARM. GLM's routed experts are 109.3 GiB on a 125 GiB box (87 % of RAM) and the CPU home
+#      holds PINNED pages; -mcpa asks for more of them while a 4096-token chunk needs a bigger cache. The engine
+#      had already reported an arena shortage once and I filed it under "weird error message" (LESSONS 87).
+#      bench_parent_prefill.py now refuses such arms by itself, so this script does not have to remember.
+#
+# Sections: S1r re-run prefill decomposition (fixed attribution) | S2 co-execution interference |
+#           S3 mid-E co-scheduling rung | S4 GLM geometry + high-K buckets | S5 dwell traces
 set +e
 cd "$(dirname "$0")/../.." || exit 1
 ROOT=$PWD
@@ -12,48 +19,120 @@ source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1
 source notes/env.sh >/dev/null 2>&1
 MD=/home/treo/projects/vendor/tabbyAPI/models
 B=notes/b70
-Q=/tmp/queue
-mkdir -p $Q
-say() { echo "### $* $(date +%H:%M:%S)" | tee -a $Q/progress.txt; }
+LOG=$B/logs
+CS=$HOME/.cache/b70cases
+mkdir -p $CS
+mkdir -p $LOG
+Q=$LOG
+say() { echo "### $* $(date '+%m-%d %H:%M:%S')" | tee -a $Q/progress.txt; }
+mem()  { echo "  MemAvailable $(awk '/MemAvailable/{printf \"%.0f GiB\", $2/1048576}' /proc/meminfo)" | tee -a $Q/progress.txt; }
 
-while pgrep -f "b70/[r]un_plan_close.sh" >/dev/null; do sleep 30; done
-say "QUEUE2 START (queue1 finished)"
+while pgrep -f "b70/[r]un_plan_close" >/dev/null; do sleep 30; done
+say "REVISED QUEUE START"
 
 run_pre() {
   local tag=$1 mdl=$2 chunk=$3 reps=$4 mcs=$5; shift 5
-  say "S1r $tag (chunk $chunk reps $reps mcs $mcs $*)"
+  mem; say "S1r $tag (chunk $chunk reps $reps mcs $mcs $*)"
   timeout 2700 python3 -u "$B/bench_parent_prefill.py" --model "$MD/$mdl" --chunk "$chunk" --reps "$reps" \
-      -- -mcs "$mcs" -mct 15 "$@" > "$Q/pr2_$tag.log" 2>&1
-  echo "  rc=$? -> $(grep -E 'NON-EXPERT PREFILL|device-time per chunk|tok/s' $Q/pr2_$tag.log | tail -3 | tr '\n' '|')" \
+      -- -mcs "$mcs" -mct 15 "$@" > "$Q/pr_$tag.log" 2>&1
+  echo "  rc=$? -> $(grep -E 'NON-EXPERT PREFILL|device-time per chunk|tok/s' $Q/pr_$tag.log | tail -3 | tr '\n' '|')" \
       | tee -a $Q/progress.txt
 }
 run_pre q205_mcs256 Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 4096 3 256
 run_pre q205_mcs448 Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 4096 3 448
 run_pre q205_mcpa   Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 4096 3 256 -mcpa
 run_pre q268_mcs384 Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 4096 3 384
-run_pre glm_c2048   GLM-5.3-Flash-exl3@3.05bpw 2048 2 258
-run_pre glm_mcpa    GLM-5.3-Flash-exl3@3.05bpw 2048 2 258 -mcpa
+run_pre q405_mcs448 Qwen3.8-Flash-Next-exl3-4.05bpw_h6_ng6 4096 2 448
+# GLM: plain only, one timed chunk, and the guard decides whether even that runs.
+run_pre glm_c2048   GLM-5.3-Flash-exl3@3.05bpw 2048 1 258
 
-# ---------------------------------------------------------------- B: dwell traces
-say "S4 dwell trace 2.05 (256 decode steps, permutation-stable: no -mcpa)"
-timeout 2400 python3 -u notes/bench_live_trace.py -m $MD/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 \
-    -cs 16384 --decode 256 --reps 2 -mcs 256 -mct 15 \
-    --dump-snaps $B/profiles/live/dwell_q205.json > $Q/dwell_205.txt 2>&1
-echo "  rc=$? -> $(grep -E 'raw trace|CONCURRENT|WARNING' $Q/dwell_205.txt | tail -2 | tr '\n' '|')" | tee -a $Q/progress.txt
-say "S4 dwell trace 2.68"
-timeout 2400 python3 -u notes/bench_live_trace.py -m $MD/Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 \
-    -cs 16384 --decode 256 --reps 2 -mcs 384 -mct 15 \
-    --dump-snaps $B/profiles/live/dwell_q268.json > $Q/dwell_268.txt 2>&1
-echo "  rc=$?" | tee -a $Q/progress.txt
-say "S4 dwell trace GLM (its working arm; shorter run because GLM decodes at 11-16 tok/s)"
-timeout 2400 python3 -u notes/bench_live_trace.py -m "$MD/GLM-5.3-Flash-exl3@3.05bpw" \
-    -cs 8192 --decode 128 --reps 2 -mcs 258 -mct 15 \
-    --dump-snaps $B/profiles/live/dwell_glm.json > $Q/dwell_glm.txt 2>&1
-echo "  rc=$?" | tee -a $Q/progress.txt
+# ---------------------------------------------------------------- S2: co-execution interference
+say "S2 dump interference case (E=64 R=16)"
+timeout 900 python3 $B/dump_gemv_case.py $CS/ix_case 64 16 12 \
+    --ckpt "$MD/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4" > $Q/dump_ix.log 2>&1
+echo "  dump rc=$? -> $(ls $CS/ix_case 2>/dev/null | wc -l) files" | tee -a $Q/progress.txt
+hammer() { WARM_S=6 timeout 600 "$ROOT/$B/probe_gemm" $CS/ix_case 2500 16 4; }
+say "S2a card ALONE"
+for i in 1 2 3; do hammer > $Q/card_solo_$i.txt 2>&1; done
+say "S2b engine ALONE"
+timeout 1800 python3 -u "$ROOT/notes/bench_engine_step.py" -m $MD/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 \
+    -cs 8192 --ctx 4096 --tokens 48 -mcs 256 -mct 15 --no-prof > $Q/eng_solo.txt 2>&1
+echo "  -> $(grep 'model.forward' $Q/eng_solo.txt | head -1 | tr -s ' ')" | tee -a $Q/progress.txt
+say "S2c BOTH"
+( for i in 1 2 3 4 5 6; do hammer > $Q/card_ovl_$i.txt 2>&1; done ) & HPID=$!
+sleep 20
+timeout 1800 python3 -u "$ROOT/notes/bench_engine_step.py" -m $MD/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 \
+    -cs 8192 --ctx 4096 --tokens 48 -mcs 256 -mct 15 --no-prof > $Q/eng_ovl.txt 2>&1
+EC=$?; wait $HPID
+echo "  engine rc=$EC -> $(grep 'model.forward' $Q/eng_ovl.txt | head -1 | tr -s ' ')" | tee -a $Q/progress.txt
+{ echo "=== E36 co-execution interference (generated by run_plan_close2.sh S2)"
+  echo "--- engine alone:";        grep 'model.forward' $Q/eng_solo.txt
+  echo "--- engine, card saturated:"; grep 'model.forward' $Q/eng_ovl.txt
+  echo "--- card launch, ALONE (run 3):"; tail -14 $Q/card_solo_3.txt
+  echo "--- card launch, UNDER ENGINE LOAD (runs 2..5):"
+  for i in 2 3 4 5; do tail -14 $Q/card_ovl_$i.txt; done; } > $B/out_interference.txt 2>&1
+say "S2 done -> $B/out_interference.txt"
 
-for f in dwell_q205 dwell_q268 dwell_glm; do
-  [ -s "$B/profiles/live/$f.json" ] || { echo "  skip $f (no trace)" | tee -a $Q/progress.txt; continue; }
-  { echo "== $f"; python3 $B/analyze_dwell.py "$B/profiles/live/$f.json" --k 8,32,64,84,128,256 --window 32 --layers 0; } \
-      >> $B/out_dwell.txt 2>&1
+# ---------------------------------------------------------------- S3: mid-E co-scheduling rung (D17's missing rung)
+OUT=$B/out_probe_gemm_midE.txt
+{ echo "# mid-E co-scheduling: probe_gemm A (sequential bucket launches, shipped shape) vs B (co-resident slabs,"
+  echo "# one launch). Qwen3.8@2.05 layer 12, WARM_S=3, ks=2. B/A < 1 means co-scheduling wins."
+  echo "# Why: live routing puts ~124 eligible experts in ONE launch at R=2048, between the measured rungs"
+  echo "# E=16 (B loses) and E=512 (B wins 9-16%). D17 could not decide its own operating point without this."
+  echo "# generated by run_plan_close2.sh S3"; } > $OUT
+for spec in "128 64" "256 64" "128 32"; do
+  set -- $spec; E=$1; R=$2
+  CD=$CS/midE_e${E}_r${R}
+  mem; say "S3 dump E=$E rows=$R"
+  timeout 1200 python3 $B/dump_gemv_case.py $CD $E $R 12 \
+      --ckpt "$MD/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4" > $Q/dump_midE_${E}_${R}.log 2>&1
+  [ -d "$CD" ] || { echo "  dump FAILED E=$E rows=$R" | tee -a $OUT; continue; }
+  for m in A B; do
+    echo "== GEMM_MODE=$m E=$E rows=$R" >> $OUT
+    GEMM_MODE=$m WARM_S=3 timeout 900 "$ROOT/$B/probe_gemm" $CD 500 $R 2 >> $OUT 2>&1
+  done
 done
-say "QUEUE2 COMPLETE"
+say "S3 done -> $OUT"
+
+# ---------------------------------------------------------------- S4: GLM geometry + high-K bucket cost
+say "S4 dump GLM geometry case (E=64 R=64, K=3, tiles_n=128)"
+timeout 1200 python3 $B/dump_gemv_case.py $CS/gg_glm64 64 64 12 --ckpt "$MD/GLM-5.3-Flash-exl3@3.05bpw" \
+    > $Q/dump_glm.log 2>&1
+{ echo "# probe_gemm at GLM geometry (K=3, tiles_n=128, E=64 sampled of 288, rows=64) -- the shape every GLM"
+  echo "# prefill figure in b70-tiering.md 5 is currently SCALED from Qwen rates rather than measured."
+  echo "# generated by run_plan_close2.sh S4"
+  echo "# generated with the memory guard active; case dir is host+device ~2 GiB"; } > $B/out_probe_gemm_glm.txt
+for m in A B; do
+  echo "== GEMM_MODE=$m GLM geometry rows=64 ks=2" >> $B/out_probe_gemm_glm.txt
+  GEMM_MODE=$m WARM_S=3 timeout 900 "$ROOT/$B/probe_gemm" $CS/gg_glm64 500 64 2 >> $B/out_probe_gemm_glm.txt 2>&1
+done
+say "S4 dump 4.05 (K=4) E=512 R=64"
+timeout 1500 python3 $B/dump_gemv_case.py $CS/gg_q405_E512 512 64 12 \
+    --ckpt "$MD/Qwen3.8-Flash-Next-exl3-4.05bpw_h6_ng6" > $Q/dump_405.log 2>&1
+{ echo "# prefill expert cost at higher quant: does the 5.70 us/expert-bucket primitive (D18, measured at K=3)"
+  echo "# hold at K=4/K=6, or does it scale with bytes? 2.05 arm for comparison is out_prefill_scale.txt."
+  echo "# generated by run_plan_close2.sh S4"; } > $B/out_prefill_kscale.txt
+for c in $CS/gg_q405_E512; do
+  echo "== GEMM_MODE=A $c rows=64 ks=2" >> $B/out_prefill_kscale.txt
+  GEMM_MODE=A WARM_S=3 timeout 900 "$ROOT/$B/probe_gemm" $c 400 64 2 >> $B/out_prefill_kscale.txt 2>&1
+done
+say "S4 done"
+
+# ---------------------------------------------------------------- S5: dwell traces (static vs dynamic tiering, D16)
+for spec in "q205 Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4 256 256" \
+            "q268 Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8 384 256" \
+            "glm GLM-5.3-Flash-exl3@3.05bpw 258 128"; do
+  set -- $spec; tag=$1; mdl=$2; mcs=$3; steps=$4
+  mem; say "S5 dwell trace $tag ($steps steps, permutation-stable: no -mcpa)"
+  timeout 2400 python3 -u notes/bench_live_trace.py -m "$MD/$mdl" -cs 16384 --decode "$steps" --reps 2 \
+      -mcs "$mcs" -mct 15 --dump-snaps $B/profiles/live/dwell_$tag.json > $Q/dwell_$tag.txt 2>&1
+  echo "  rc=$? -> $(grep -E 'raw trace' $Q/dwell_$tag.txt | tail -1)" | tee -a $Q/progress.txt
+done
+: > $B/out_dwell.txt
+for f in dwell_q205 dwell_q268 dwell_glm; do
+  [ -s "$B/profiles/live/$f.json" ] || { echo "skip $f (no trace)" >> $B/out_dwell.txt; continue; }
+  { echo "== $f"; python3 $B/analyze_dwell.py "$B/profiles/live/$f.json" --k 8,32,64,84,128,256 --window 32 \
+      --layers 0; } >> $B/out_dwell.txt 2>&1
+done
+say "REVISED QUEUE COMPLETE -> out_interference.txt, out_probe_gemm_midE.txt, out_probe_gemm_glm.txt,"
+say "  out_prefill_kscale.txt, out_dwell.txt, and $Q/pr_*.log"

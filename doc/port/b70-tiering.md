@@ -15,7 +15,7 @@ from “big model / big quant” (GLM, 2.68+):
 |---|---|---|---|
 | Qwen3.8@2.05, `-mcs 256` | comfortable | **+30 %** prefill (858 → 1114 tok/s) | **substitute** over one term: combined cap 1.69×, incremental only 1.34× |
 | Qwen3.8@2.68, `-mcs 384` | thin | **+50 %** (490 → 736) | mostly substitute, larger prize because the CPU leg is bigger |
-| GLM@3.05, 109.3 GiB of experts vs 24 GiB | essentially none | **−29 % at decode b=1 (16.0 → 11.4 tok/s)**; prefill not measured | **complement and then some**: the parent is 71 % exposed stall, so the card is the only way to lift the step; but promotion must be throttled hard, since a GLM expert upload costs 0.66 ms |
+| GLM@3.05, 109.3 GiB of experts vs 24 GiB — and **87 % of host RAM** (125 GiB box, pinned staging on top), so the CPU home has no reserve either: a GLM `+ -mcpa` chunked-prefill arm hard-hung this machine (LESSONS 87) | essentially none | **−29 % at decode b=1 (16.0 → 11.4 tok/s)**; prefill not measured | **complement and then some**: the parent is 71 % exposed stall, so the card is the only way to lift the step; but promotion must be throttled hard, since a GLM expert upload costs 0.66 ms |
 
 Derived, and it is the load-bearing arithmetic: on 2.05 prefill the CPU expert leg is **2619 ms of a 4609 ms
 chunk (57 %)**, `-mcpa` removes **948 ms of that term (36 %)**, and moving the whole expert leg to the card costs

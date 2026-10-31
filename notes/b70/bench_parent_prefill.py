@@ -59,6 +59,70 @@ from bench_engine_step import classify                        # noqa: E402 - one
 POOL = os.path.join(HERE, "fixtures", "prefill_pool.txt")
 
 
+def meminfo_kb() -> dict:
+    out = {}
+    with open("/proc/meminfo") as fh:
+        for line in fh:
+            p = line.split(":")
+            if len(p) == 2:
+                out[p[0].strip()] = int(p[1].strip().split()[0])
+    return out
+
+
+def routed_expert_gib(model_dir: str) -> float:
+    """Sum routed-expert bytes straight from the safetensors HEADERS.
+
+    Not from model.safetensors.index.json: on GLM-5.3 that file is stale by ~3,530 tensors (it predates the MTP
+    head), and a capacity guard that reads it would under-estimate exactly the model that needs guarding
+    (LESSONS 86). Header-only reads, so this is ~1 s even at 17 shards.
+    """
+    import glob
+    import json as _json
+    import re
+    import struct
+    pat = re.compile(r"\.mlp\.experts\.")
+    els = {"F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I8": 1, "U8": 1, "I16": 2, "BOOL": 1}
+    tot = 0
+    for f in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
+        with open(f, "rb") as fh:
+            n = struct.unpack("<Q", fh.read(8))[0]
+            hdr = _json.loads(fh.read(n))
+        for k, v in hdr.items():
+            if k == "__metadata__" or not pat.search(k):
+                continue
+            nb = 1
+            for d in v.get("shape", []):
+                nb *= int(d)
+            tot += nb * els.get(str(v.get("dtype")), 1)
+    return tot / 2.0 ** 30
+
+
+def mem_preflight(model_dir: str, mcpa: bool, allow_tight: bool) -> None:
+    """Refuse to start an arm that leaves the box no memory reserve.
+
+    WHY (this is a post-mortem, not paranoia). GLM-5.3's routed experts are 109.3 GiB on a 125 GiB machine = 87 %
+    of host RAM, and the CPU home holds PINNED pages (weight staging slots, huge-page arena hint) which survive
+    neither reclaim nor swap-out when the page cache is squeezed. A GLM + -mcpa + chunked-prefill arm queued
+    unattended hard-hung the machine and forced a reboot; the engine had warned about arena memory in an earlier
+    session and I had dismissed the wording as self-contradictory (LESSONS 87).
+    """
+    mi = meminfo_kb()
+    tot_g, avail_g = mi["MemTotal"] / 2.0 ** 20, mi["MemAvailable"] / 2.0 ** 20
+    swap_g = mi.get("SwapTotal", 0) / 2.0 ** 20
+    rgib = routed_expert_gib(model_dir)
+    need = 12.0 + (8.0 if mcpa else 0.0) + (20.0 if rgib > 0.5 * tot_g else 0.0)
+    print(f"  preflight: MemTotal {tot_g:.0f} GiB, MemAvailable {avail_g:.0f} GiB, swap {swap_g:.0f} GiB, "
+          f"routed experts {rgib:.1f} GiB ({100 * rgib / tot_g:.0f} % of RAM) -> needs >= {need:.0f} GiB free")
+    if avail_g < need and not allow_tight:
+        raise SystemExit(
+            f"REFUSING to run: {avail_g:.0f} GiB available, {need:.0f} GiB wanted. This model's expert set is "
+            f"{100 * rgib / tot_g:.0f} % of host RAM and the CPU home pins pages for staging"
+            + (" while -mcpa asks for more" if mcpa else "") +
+            ". Free memory or drop the arm: a hard hang costs the whole queue and the logs in /tmp with it. "
+            "--allow-tight overrides (and should be used only when you are watching the box).")
+
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(allow_abbrev=False, description=__doc__.split("\n")[0])
     ap.add_argument("--model", "-m", required=True)
@@ -67,8 +131,10 @@ def main() -> None:
                          "with our divisor. Refuses to run if you also pass -chunk_size with another value.")
     ap.add_argument("--reps", type=int, default=3, help="timed chunks (one extra chunk is prepended as warm-up)")
     ap.add_argument("--cache", type=int, default=0, help="cache tokens (default: exactly what we will feed)")
-    ap.add_argument("--all-chunks", action="store_true", help="attribute device time over ALL chunks, "
-                    "including the warm-up chunk (default: drop chunk 1)")
+    ap.add_argument("--all-chunks", action="store_true", help="no-op kept for the record: the aggregate "
+                    "profiler cannot separate the warm-up chunk, so attribution is over all chunks either way")
+    ap.add_argument("--allow-tight", action="store_true", help="run anyway when the memory preflight objects "
+                    "(see mem_preflight: this is the arm that rebooted the box once)")
     ap.add_argument("--allow-short", action="store_true", help="permit a corpus shorter than requested")
     args, engine_args = ap.parse_known_args()
     # argparse hands the "--" separator itself back in the extras on this path, and the engine's parser - which
@@ -91,6 +157,10 @@ def main() -> None:
     cache_tokens = args.cache or (want + 512)
     if cache_tokens < want + 8:
         raise SystemExit(f"--cache {cache_tokens} cannot hold {want} prompt tokens + 1 decode")
+
+    # BEFORE the load, not after it: the arm that hung the box died inside loading/first-forward, so a guard that
+    # runs once the weights are resident is a post-mortem, not a guard.
+    mem_preflight(args.model, "-mcpa" in engine_args, args.allow_tight)
 
     with e2e.load_model(args.model, None, *engine_args, cache_tokens=cache_tokens, warmup=True) as lm:
         model, cache, config = lm.model, lm.cache, lm.config
@@ -129,6 +199,9 @@ def main() -> None:
 
         _ = drain()                                          # autotuner/pipeline warm before anything counts
         walls = [drain() for _ in range(3)]
+        import resource
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2.0 ** 10
+        print(f"  peak RSS this process: {rss:.1f} GiB (pinned arenas are charged outside this number)")
         med = statistics.median(walls)
         print(f"  wall per chunk: median {med:8.1f} ms  (passes: {' '.join(f'{w:.0f}' for w in walls)})")
         print(f"  -> {args.chunk / med * 1000.0:7.0f} tok/s  =  {med * 1000 / nl:7.1f} us/layer")
