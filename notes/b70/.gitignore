@@ -34,3 +34,4 @@ probe_barrier
 
 probe_groupfused
 probe_slm
+probe_gemm

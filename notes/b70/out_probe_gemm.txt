@@ -1,0 +1,70 @@
+probe_gemm A/B: co-scheduling row-slabs does NOT bend the additive traffic law — E29's law holds
+=================================================================================================
+Implements the spec in `doc/port/b70-prefill.md` §6. Same arithmetic, same bytes read, only the temporal
+relationship of the re-reads differs, so the A/B delta isolates the re-use hypothesis that `probe_slm` had
+suggested (and that this tree had already demoted to a hypothesis — see `out_prefill_gemm.txt`'s CONFIDENCE
+block; this probe now retires it).
+
+  variant A = control: NSLAB sequential 16-row launches, i.e. what the engine does above 16 rows today.
+  variant B = one launch, slab as a grid axis with the slab index varying FASTEST, so items differing only in
+              row-slab are adjacent and therefore co-resident (the ordering `probe_slm`'s hint implied).
+Base: rev L (`probe_dpas9.cpp`), slab axis installed in the slot E25c abandoned. Case: Qwen3.8@2.05 (K=2,
+integer K required — 2.68bpw gives K=2.5 and the ring math refuses it, which is the probe telling the truth
+rather than a bug), E=16, tn=40, k=4096, layer 12, KS=1, WARM_S=0.5, 800 reps.
+
+   rows  NSLAB     A (sequential)      B (co-scheduled)     B/A     additive prediction (A x NSLAB)
+    16     1        24.7 us             23.9 us            0.97x     24.7   <- POSITIVE CONTROL passes
+    32     2        47.7 us             54.8 us            1.15x     49.4   <- B is WORSE than buckets
+    64     4        94.6 us             90.6 us            0.96x     98.8   <- B within noise of additive
+
+WHAT IT ESTABLISHES
+1. **The control holds, so the numbers mean something.** A at rows=16 equals B at NSLAB=1 within 3 %, and A
+   scales additively: 24.7 -> 47.7 -> 94.6 us for 1 -> 2 -> 4 slabs (predicted 24.7 / 49.4 / 98.8; measured
+   within 3.5 %). That independently reproduces E29's additive law (`out_rows_gt16.txt`) on a fresh case dir,
+   in a fresh window, on a kernel I wrote today — the law is not an artifact of rev J's harness.
+2. **Co-scheduling the slabs does not buy re-use.** B is 15 % WORSE at rows=32 and 4 % better at rows=64 — i.e.
+   statistically indistinguishable from additive once you allow the 3 % run-to-run noise this tree has already
+   measured at schedule minima (median 0.34 %, p90 1.33 %, max 3.17 % across 46 overlapping cells). Doubling
+   the thread count to halve per-item work keeps the total cost constant: the second slab re-reads the weights
+   at full price.
+3. **Therefore the traffic model in b70-prefill.md §3 stands as a real cost, not a scheduling artifact:**
+   a resident expert's bytes are moved ceil(rows/16) times per chunk, measured 2.24x / 7.01x / 26.29x at
+   R = 512 / 2048 / 8192 on live routing. Prefill on this card pays that bill, so its economics are governed
+   by weight traffic after all — which is the opposite of the optimism that re-scoped prefill into scope, and
+   needs to be reflected there before any prefill build decision.
+
+MECHANISM, as far as the evidence goes (stated as inference, not measurement): the duplicate reads are NOT
+absorbed even when adjacent. The likely reason is that this kernel's items stream the whole trellis tile
+sequentially (rev L's prefetch ring, `PF_DIST` tiles deep), so at any instant two adjacent items are dozens of
+dwords apart in the tile and their footprints do not coincide in time — unlike `probe_slm`'s lockstep loop,
+where 32 items addressed the identical dword in the same instruction. So the precondition for re-use is not
+"co-resident" but "in lockstep on the same address", which a software-pipelined streaming kernel does not
+provide for free. Testing that distinction (a slab variant with a shared, explicitly synchronized tile index)
+is the next experiment if prefill stays in scope.
+
+NOT YET DONE (all cleared for the correctness claim; still open for the mechanism claim)
+  * **Bit-exactness: VERIFIED, both arms, rows=64.** Comparing the probe's dumped `y_dev_ks1_r64.bin` against
+    the case dir's own `y_ref.npy` (655,360 outputs = E 16 x 64 rows x n):
+        mode B: exact = 100.00 %, max rel err = 0.000e+00
+        mode A: exact = 100.00 %, max rel err = 0.000e+00
+    So the slab plumbing is right — PART's rows dimension (RPADT), the per-slab XA windows, and the row offsets
+    all behave — and the additive B/A ratio cannot be blamed on a silently-wrong upper half. Note the probe
+    itself prints no `check:` line at rows > 16 (rev L's oracle path is not reached on this branch); the
+    verification above was done externally on the dumped Y, which is the file the probe already writes.
+    **Worth fixing in the harness**: a rows>16 run should self-report exactness rather than staying silent.
+  * KS swept only at 1; the re-use question could differ at KS=4 where each item walks a shorter tile run
+    (shorter streams overlap more). E in {8, 32} unmeasured. No ISA dump on either arm yet — and per LESSONS
+    68/70 the load-shape equality between A and B should still be shown, not assumed, before the 1.15x is
+    attributed to memory rather than to codegen differences the `%`-based id decomposition may have introduced.
+    Counter-evidence to weigh honestly: both arms are bit-exact and A tracks the additive law to 3.5 %, so
+    whatever the 1.15x at rows=32 is, it is not a wrong-answer artifact.
+  * KS swept only at 1; the re-use question could differ at KS=4 where each item walks a shorter tile run
+    (shorter streams overlap more). E in {8, 32} unmeasured. No ISA dump on either arm yet — and per LESSONS
+    68/70 the load-shape equality between A and B must be shown, not assumed, before the 1.15x is attributed
+    to memory rather than to codegen differences the `%`-based id decomposition may have introduced.
+
+Reproduce:
+    python3 notes/b70/dump_gemv_case.py /tmp/pg_e16_R32 16 32 12 --with-reference \
+        --ckpt "Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4"
+    GEMM_MODE=A WARM_S=0.5 ./probe_gemm /tmp/pg_e16_R32 800      # buckets, control
+    GEMM_MODE=B WARM_S=0.5 ./probe_gemm /tmp/pg_e16_R32 800      # co-scheduled slabs

@@ -577,9 +577,21 @@ share a GEMV; above ~16 rows per expert switch to the DPAS path with M = 16/32 t
 two, the decode kernel with several token rows is usually better than XMX at N=16, so the tier
 boundary is a measured constant (`EXL3_MOE_B70_DPAS_T`, tentatively 16) rather than an inherited one.
 
-**TRAFFIC MAY NOT BE A FIXED COST — but this is a HYPOTHESIS now, not a measurement
-(`notes/b70/out_prefill_gemm.txt`, with its own CONFIDENCE block).** What `probe_slm` settled is negative and
-useful: **SLM staging is 1.5–6.0× slower than reading the tile globally** (2382 instruction lines vs 1749;tructions; the staged
+**TRAFFIC MAY NOT BE A FIXED COST — HYPOTHESIS, AND NOW A MEASURED NEGATIVE
+(`notes/b70/out_prefill_gemm.txt` CONFIDENCE block; `notes/b70/out_probe_gemm.txt` for the test).**
+Executed: `probe_gemm` implements this spec (rev L + slab axis in E25c's abandoned slot). Positive control
+passes (B at NSLAB=1 = A within 3 %) and **both arms are bit-exact on all 655,360 outputs at rows=64**
+(max rel err 0.000e+00 against the case's own reference). Result: **co-scheduling does not buy re-use** —
+B/A = 0.97x / 1.15x / 0.96x at 1 / 2 / 4 slabs, and A tracks the additive law to 3.5 % (24.7 -> 47.7 -> 94.6 µs
+for NSLAB 1/2/4). So the `ceil(rows/16)` law is a real cost of this kernel family, not an artifact of temporal
+separation, and prefill's weight traffic must be budgeted at 2.24x / 7.01x / 26.29x (§3 of `b70-prefill.md`).
+Leading mechanism (inference, not yet measured): re-use needs items *in lockstep on the same address*, and
+rev L's software-pipelined prefetch ring puts adjacent slabs dozens of dwords apart at any instant — so
+`probe_slm`'s lockstep loop and a real streaming kernel are different animals. Caveat kept from the artifact:
+no ISA comparison of the two arms yet (LESSONS 68/70), KS=1 only, E in {8,32} unmeasured.
+
+The part of the original proposal that measurement settled cleanly and that still stands: **SLM staging is
+1.5–6.0× slower than reading the tile globally** (2382 instruction lines vs 1749;tructions; the staged
 body adds 80 `load.slm.d32x4` + 77 `store.slm.d32x4` on top of its global read, and 128 KiB/group caps tile
 size), so the "stage weights into SLM" design that this section's predecessor proposed is dead — do not write
 that kernel.
