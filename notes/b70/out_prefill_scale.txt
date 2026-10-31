@@ -74,8 +74,41 @@ nearly independent of how the picks spread. At R=4096 that law says 2560 (measur
 (= 3.7 us/token/layer measured), which means the tok/s figure is essentially flat above R~1024 — prefill on the
 B70 does not get much better by batching harder, it gets better only if the amplification drops.
 
-## 3. WHAT THIS DOES AND DOES NOT SAY
+## 3. THE CHUNK-SIZE / FIXED-COST QUESTION (measured attempt, and a harness defect it exposed)
 
+The parent spends a FIXED amount per prefill forward, so prefill tok/s depends on how many tokens amortize it,
+and 2048 is too short to read the realistic value. Trying 4096 directly (`notes/b70/run_prefill_long.sh`,
+WARM_S-analogous engine runs, `-cs 16384`):
+
+       arm                        tokens measured    prefill tok/s    us/MoE layer/token
+       2.05  requested 4096            1158               535               39.0
+       2.68  requested 4096            1158               290               71.9
+       (committed baselines: 2.05 655 tok/s, 2.68 479 tok/s at 2048 tokens)
+
+1. **THE HARNESS SILENTLY MEASURED A SHORTER PROMPT THAN REQUESTED.** `bench_live_trace.py` printed "prefill:
+   prompt corpus only 1158 tokens requested 4096; measuring what exists" and carried on, so the run would have
+   been recorded as a 4096-token measurement while timing 1158 tokens. The corpus is a contiguous slice of a
+   fixed text pool whose total length is only a few thousand tokens, so requests above that truncate depending
+   on the sampled offset. **No 4096-token prefill number exists yet**, and the fix is a prerequisite, not a
+   nicety: feed `--prompt-file` a text with >= 8192 tokens (or make the sampler wrap the corpus) AND make a
+   truncated prefill an ERROR rather than a warning, since the whole point of the arm is its token count.
+2. **The amortization the request was about is visible anyway, and it is large.** Going from 1158 to 2048 tokens
+   per chunk raised throughput 535 -> 655 tok/s on 2.05 (+22 %) and 290 -> 479 on 2.68 (+65 %). Per-MoE-layer
+   per-token cost fell from 39.0 -> ~31.9 us and 71.9 -> ~43.5 us. That is a fixed per-chunk cost of roughly
+   (39.0-31.9) x 48 x 2048/1e3 ~ 700 ms-scale per forward being spread over more tokens, i.e. **the parent's
+   prefill speed is not a single number and quoting one without its chunk size is meaningless** - which is
+   exactly the criticism this chapter makes of byte-rate models, applied to ourselves.
+3. **Second harness defect**: `--decode 8` crashed the post-measurement statistics (`StatisticsError: mean
+   requires at least one data point`) after the prefill number had printed, so no JSON was written and the
+   script's arm guard correctly refused to read anything. Decode sampling needs >= 32 tokens (the value the
+   committed baseline script uses); the guard earning its keep is the silver lining.
+
+Until (1) is fixed, the honest prefill comparison stays at 2048-token chunks: parent 655 / 479 tok/s whole-step
+against 5360 tok/s of B70 expert-leg work, and the end-to-end B70-prefill figure remains UNMEASURED because the
+parent's non-expert prefill cost per chunk has still not been bucketed (the `--ctx N --tokens 1` attempt
+measured decode: its buckets were identical at ctx 1024 and 4096, which is how I know).
+
+## 4. WHAT THIS DOES AND DOES NOT SAY
   * **Against today's stack**: measured parent prefill is 655 tok/s (2.05) / 479 tok/s (2.68) for the WHOLE
     step (`run_prefill_baseline.sh`). The B70 expert leg alone would run 2048 tokens in 382 ms -> 5360 tok/s of
     expert work. So the expert leg is not the obstacle and B70 prefill is worth ~8x — **but that comparison is
