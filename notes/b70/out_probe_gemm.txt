@@ -96,7 +96,7 @@ buckets fill the device, and wins by 1.6x when they do not.**
 Also adopted per review: `SL` was made a template parameter, measured (B/A 0.61/1.11/1.02/0.93 — same shape,
 no real effect), and then **reverted to a runtime field**, because the 4x instantiation blowup costs 8m06s to
 build vs 1m51s — a 4.4x compile-time penalty for a change with no measured payoff, in a probe whose inner loop
-never reads it. Keeping the analysis: the band-parameter lesson (item 13m) applies where a value is read on the
+never reads it. Keeping the analysis: the band-parameter lesson (item M12) applies where a value is read on the
 hot path, not merely where it is known at admit time.
 
 Still owed before this is a shipping rule: the fill crossover is located between E=8 and E=16, not measured

@@ -1447,7 +1447,7 @@ nothing that is the sole instance of a measurement.
     time as separate measurements and let time arbitrate, never optimize the proxy; (2) when a tradeoff is
     monotone in one parameter, encode the choice on that parameter with `if constexpr` — here NF was already a
     template parameter, so the crossover costs nothing, whereas a runtime flag would sit inside the tile loop
-    and repeat the band-as-runtime mistake (item 13m).
+    and repeat the band-as-runtime mistake (item M12).
 
 73. **A knob that silently ignores its input is worse than no knob: it manufactures confident numbers.** During
     this sweep six cells were measured intending to vary split-K via `DPAS_KS=`, which rev L honours but

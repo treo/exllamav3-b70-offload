@@ -7,7 +7,7 @@ comes from a different place, and they bound how far it goes.
 
 WHAT IS MEASURED vs COMPUTED. Kernel costs are the measured rev L joint-table values (gate+up pair + down per
 expert, best (fused?, KS) per (E, rows); `plan_decode_cost.best_launch`), which are flat in rows precisely
-because the tokens-on-M layout (kernels.md 13p/13q) makes the marginal row ~5% of an expert read. Routing is
+because the tokens-on-M layout (kernels.md M15/M16) makes the marginal row ~5% of an expert read. Routing is
 the live per-token expert sets from `notes/b70/profiles/live/live_268.json` (48 layers x 192 tokens), so
 "which experts does a batch touch" is measured, not modelled. What is *computed* is the combination of the two
 and the ceilings; nothing here is measured end-to-end on a real verify step.

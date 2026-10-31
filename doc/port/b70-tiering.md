@@ -154,7 +154,49 @@ Reproduce: the tables are computed from `plan_parent_budget.MODELS` constants by
 `plan_parent_budget.policy(lpt=True, parent_expert_rate=190)` implements the same objective as a greedy cut and
 already beats the frequency-ordered cut in exactly the rows where the table above says splitting pays.
 
-## 6. OPEN, IN PRIORITY ORDER
+## 6. GLM'S EXPERT STRUCTURE IS NOT QWEN'S — VERIFIED AGAINST THE TENSOR INVENTORY
+
+The tiering arithmetic above leans on `plan_parent_budget.MODELS["GLM@3.05"]`, which I had reason to distrust. It
+is **right**, and the two "corrections" I was about to make were both wrong; the audit (`safetensors` headers, no
+model load) is recorded so nobody re-litigates it:
+
+| quantity | value | how verified |
+|---|---|---|
+| routed experts | **288, uniform across every MoE layer** | 151,554 tensor names parsed; `distinct experts per layer = [288]` |
+| MoE layers in the serving path | **42** (indices 3-44) — the plan's `layers=42` is correct | indices 3-45 carry `.mlp.experts.*`, but layer 45 also carries `enorm/eh_proj/hnorm` and `num_nextn_predict_layers = 1`: **it is the MTP layer**, not per-token serving |
+| dense prefix | 3 layers (`first_k_dense_replace = 3`) | config + tensors |
+| routed bytes | **109.3 GiB total, 2.54 GiB/layer, 9.03 MiB/expert** | summed `data_offsets`, gate/up/down exactly equal at 36.42 GiB each |
+| **shared experts** | present on all 42+1 MoE layers, **~25 MiB/layer**, plus routers at 2.25 MiB/layer (`e_score_correction_bias`, `topk_method = noaux_tc`, sigmoid, `norm_topk_prob`) | non-routed `.mlp.*` families, 1.15 GiB total |
+
+Two things that look like errors in my own reasoning and are not, written down because each was about to become a
+bad edit:
+
+1. **"43 MoE layers" is wrong.** Counting tensor indices gives 3-45 inclusive = 43, but index 45 is the MTP head,
+   which does not run per token. The plan's 42 stands. Counting layers is only correct if you know which layers
+   the serving path walks.
+2. **The shared expert does *not* go through the bucketed MoE path.** `block_sparse_mlp.py:460` holds
+   `self.shared_experts` as a `GatedMLP` submodule of the MoE block — a dense MLP, tiled over all rows by the
+   dense kernels. My first pass applied the ⌈rows/16⌉ law to it and produced 256 re-reads of 25 MiB per layer
+   (1.5 s/chunk of pure fiction). The correct model charges it once per chunk on the dense path. It *does* add a
+   fixed per-token expert leg that placement cannot move: **a GLM token pays topk 8 routed + 1 shared**, so
+   per-token expert work is ~12.5 % higher than `topk` alone implies, and that share belongs to whichever card
+   holds the dense path (the 3090), not to the placement decision at all.
+
+**What actually changes for GLM prefill** (derived from measured primitives, not measured end to end —
+flagged as derived): the routed experts are 9.03 MiB each and a 4096-token chunk puts ~114 rows on each, so the
+bucket law reads each one 8 times: 4096 × 8 / 16 buckets/layer × 9.03 MiB = **20.3 GiB/layer, 854 GiB per chunk**.
+At the card's *measured* prefill bucket cost that is roughly **3-5 s per 4096-token chunk** — about 5-7× Qwen@2.68's
+measured 0.73 s — and unlike the Qwen case the byte volume, not fill, is the binding term (`rate_b` for GLM is 132
+GB/s on decode shapes, the lowest in the ladder, because its geometry is `tiles_n = 128` and cannot fuse).
+Consequences worth acting on: (i) **GLM is where a deeper-M kernel would actually pay**, since 8 buckets per expert
+is exactly the amplification `probe_xmx` could not beat — but the same 128-GRF accumulator bound applies, and a
+9 MiB expert makes the A-operand pressure worse, so the expectation should be pessimistic until measured;
+(ii) `out_prefill_scale.txt`'s "prefill on the card" numbers **must not be reused for GLM** — they are Qwen-shaped
+by construction; (iii) the honest next measurement is `probe_gemm` at GLM geometry (K = 3, tn = 128, E = 288,
+rows = 64) rather than any extrapolation, and the quant ladder should extend to `K = 6` prefill buckets while it
+is running.
+
+## 7. OPEN, IN PRIORITY ORDER
 
 1. ~~The falsifiable prediction of the substitution story~~ **TESTED, and it held — plus it exposed a sharper
    fact than the prediction itself.** Re-running the `-mcs` slope with `-mcpa` on (same prompt/chunk/reps):

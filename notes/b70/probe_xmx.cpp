@@ -502,7 +502,7 @@ static void submit(const Launch &L)
 template <int K, int Band>
 static void submit_kb(int mr, int nf, const Launch &L)
 {
-    // probe_xmx asks for MR=8 always (the DPAS M limit for u8/s8, kernels.md 2c item 13e) and varies
+    // probe_xmx asks for MR=8 always (the DPAS M limit for u8/s8, kernels.md 2c item M4) and varies
     // NF = rows/8, so the fan-out must be on NF ALONE. The version below (inherited from rev L, where NF never
     // exceeded 2) tested nf == 2 and otherwise switched on mr - so NF=4 would have fallen through to
     // submit<K,8,1,...> and silently computed 8 rows instead of 32, reporting a wrong answer as a fast one.
@@ -703,7 +703,7 @@ int main(int argc, char **argv)
     int NF_REQ = (m.R + 7) / 8;
     const int NF = NF_REQ <= 1 ? 1 : NF_REQ <= 2 ? 2 : NF_REQ <= 4 ? 4 : NF_REQ <= 8 ? 8 : 0;
     if (NF == 0) { fprintf(stderr, "rows %d needs NF>8: re-instantiate or lower rows\n", m.R); return 2; }
-    const int MR = 8;                             // DPAS M for u8/s8 on this target (kernels.md 2c item 13e)
+    const int MR = 8;                             // DPAS M for u8/s8 on this target (kernels.md 2c item M4)
     const int RPAD = MR * NF;                     // rows the item actually carries
 
     // (E29's shared-stream buckets and the ablation switches lived here in rev J; both are kept in

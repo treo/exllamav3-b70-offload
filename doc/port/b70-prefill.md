@@ -21,7 +21,7 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    FIRST, A UNITS CORRECTION to the version of this note that cited "272 rows". That figure is
    (367e12/2 MAC/s) ÷ 674e9 B/s = 272 **MAC per byte**, which belongs to 1-byte-per-weight formats.
    Trellis weights are 0.375 B each and the integer-DPAS route spends 4 MACs per weight-token
-   (kernels.md §2c item 13b), so the arithmetic-intensity bar is 4/0.375 ≈ 10.7 MAC/byte and the
+   (kernels.md §2c item M1), so the arithmetic-intensity bar is 4/0.375 ≈ 10.7 MAC/byte and the
    **eligibility crossover is ~26 rows/expert at the 674 GB/s copy peak, or ~59 at the 292 GB/s this
    GEMV family actually achieves** (kernels.md §4 says exactly this; this note had it wrong).
 
