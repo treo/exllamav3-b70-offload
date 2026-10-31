@@ -31,7 +31,7 @@ larger gain.
 Positive:
 
 * No layer is left empty, which removes the worst-case term from the residue.
-* Mixed-rate layers are handled by the natural unit, since a byte quota prices a 2.5 bpw expert and a
+* Mixed-rate layers are handled by the natural unit, because a byte quota prices a 2.5 bpw expert and a
   3 bpw expert differently.
 * The per-layer budget is also the quantity that sets the spanning fraction, so one number serves
   placement and the activation model.

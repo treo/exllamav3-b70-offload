@@ -8,12 +8,12 @@
 ## Context
 
 The cost model says a layer's expert traffic is the union of the experts its rows touch, times each expert's byte
-size. That is true only if the kernel reads an expert once per layer per step however many rows picked it. It is a
-claim about the grid, not a property of memory.
+size. That is true only if the kernel reads an expert once per layer per step, whatever the number of rows that pick it.
+It is a claim about the grid, not a property of memory.
 
 The vendor's own decode kernels are the cautionary case: they are laid out per route, one work-item per routed pick,
 and rely on cache to absorb the duplicates. Only their grouped prefill kernels bucket by expert. On a batch of 8 with
-topk 10, a per-route grid reads about five times the modelled bytes, which would make every concurrency figure in
+topk 10, a per-route grid reads about five times the modelled bytes, which makes every concurrency figure in
 this plan optimistic at exactly the batch where the card becomes the binding worker.
 
 Two measured facts make bucketing cheap here. The parent already sorts each row's picks by expert id before any
@@ -23,8 +23,8 @@ each item re-reads the whole activation row, which is a megabyte of cache traffi
 
 ## Decision
 
-We will bucket rows by expert as a precondition of the cost model, not as an optimisation. The bucket, meaning one
-expert plus its assigned row range, is the unit of grid work, built in the expert-sorted order the parent already
+We will bucket rows by expert as a precondition of the cost model, not as an optimisation. One bucket is one
+expert plus its assigned row range, and it is the unit of grid work, built in the expert-sorted order the parent already
 produces, and the activation gather is folded into the load rather than done as a separate pass. Every batch gate
 reports bytes actually read, not bytes touched.
 
@@ -33,7 +33,7 @@ reports bytes actually read, not bytes touched.
 Positive:
 
 * The byte floor the placement and concurrency models rest on becomes a measured property of the kernel.
-* Bucketing is what makes the locality rules of ADR-0028 expressible, since consecutive items in a bucket read
+* Bucketing is what makes the locality rules of ADR-0028 expressible, because consecutive items in a bucket read
   neighbouring tiles of one expert.
 * The bucketing pass is small and unit-testable on its own: the permutation must be stable, and the counts must sum
   to the number of picks.
@@ -44,11 +44,11 @@ Negative:
 * Padding a bucket is forbidden and this must be enforced by the tiler, not by convention. 24 rows expressed as one
   padded 32-row launch costs 61.8 µs, while 16 plus 8 as two buckets costs about 38 µs.
 * Rows per expert must be logged per layer, because the same distribution decides matrix-unit eligibility in
-  ADR-0024 and a bucketing bug would move both at once.
+  ADR-0024 and a bucketing bug moves both at once.
 
 Neutral:
 
-* Sorting on the host is not an option, since it would need a readback and the parent must never block. The bucket
+* Sorting on the host is not an option, because it needs a readback and the parent must never block. The bucket
   list is built on the device.
 
 ## Alternatives considered
@@ -59,7 +59,7 @@ Neutral:
   cache.
 * Bucket by column band instead of by expert: rejected, because it dedups nothing across picks and splits the
   activation reuse that the expert bucket provides.
-* Skip bucketing at batch 1, where each expert takes about one row: rejected, because it would be a second grid
+* Skip bucketing at batch 1, where each expert takes about one row: rejected, because it is a second grid
   layout to maintain for a case the bucketed form already handles.
 
 ## Links

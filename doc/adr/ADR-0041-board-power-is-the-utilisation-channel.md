@@ -32,7 +32,7 @@ Positive:
 * A resident engine that spins without work becomes visible, which is exactly the failure mode that ADR-0008 keeps behind a
   gate.
 * The traffic amplification that ADR-0031 accepts as a time cost stops being invisible, because it is charged to energy.
-* It gives a decision rule for optimisation: work eliminated beats latency hidden, since speed cannot be bought without
+* It gives a decision rule for optimisation: work eliminated beats latency hidden, because speed cannot be bought without
   spending the same watts on a power-capped part.
 * A prefill run that never rises above about 120 W is not using the card, whatever it reports for throughput.
 
@@ -44,11 +44,11 @@ Negative:
   voltage-regulator at 94 °C were still climbing, so a plan that raises sustained load carries an unquantified risk in the
   voltage-regulator stage.
 * Two questions this channel raises belong to the operator rather than to the design: whether about 87 W sustained is
-  acceptable in the target chassis, and how the card's draw interacts with the parent's in a shared power budget.
+  permitted in the target chassis, and how the card's draw interacts with the parent's in a shared power budget.
 
 Neutral:
 
-* Engine activity and stall counters complement power rather than replace it, since they separate "busy" from "stalled" but
+* Engine activity and stall counters complement power rather than replace it, because they separate "busy" from "stalled" but
   not "useful work" from "re-read".
 
 ## Alternatives considered

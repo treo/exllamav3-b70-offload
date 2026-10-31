@@ -30,8 +30,8 @@ collapsed distribution.
 
 Positive:
 
-* The objective predicts the measured winners. On Qwen3.8 at batch 8 the balanced rule gains 13 percent;
-  on GLM at batch 1 and 4 the frequency rule gains 9 and 20 percent, and in both cases the loser is the
+* The objective predicts the measured winners. On Qwen3.8 at batch 8 the balanced rule gains 13 percent,
+  but on GLM at batch 1 and 4 the frequency rule gains 9 and 20 percent, and in both cases the loser is the
   rule that ignores the CPU residue.
 * The rule predicts its own crossover across five recipes: balanced wins by 3 to 9 percent at 2.05, 2.68,
   4.05 and 5.05 bpw, and frequency order wins by 43 percent at 6.05 bpw, the one recipe with a real 9.6
@@ -58,7 +58,7 @@ Neutral:
 * Minimise summed compute: rejected, it double-counts concurrent homes and hides the ceiling.
 * One ordering rule for every recipe: rejected, because the sign of the comparison flips at 6.05 bpw.
 * Solve the partition exactly: rejected as unnecessary, because a single greedy pass over the frequency
-  order reproduces the measured optimum at every point sampled, and an exact solve would need statistics
+  order reproduces the measured optimum at every point sampled, and an exact solve needs statistics
   the planner does not have.
 
 ## Links
@@ -74,4 +74,4 @@ Neutral:
 This record first said "minimises the per-layer maximum, and orders by frequency while a residue
 exists", which read as one rule with an exception. Measurement made it two rules with a selector, and the
 selector is the decision. The change is recorded here rather than edited silently, because the earlier
-form would have shipped the wrong rule for the dense recipes.
+form ships the wrong rule for the dense recipes.

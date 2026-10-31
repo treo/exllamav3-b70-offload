@@ -8,7 +8,7 @@
 ## Context
 
 Experts homed on the parent compete for the same memory as the KV cache, the recurrent state, and the
-streamed non-expert weights. The size of that slice is therefore not a free parameter. An early draft
+streamed non-expert weights. The size of that slice is not a free parameter. An early draft
 of this plan assumed 2 GiB. That assumption was a guess, and it was eight times too small.
 
 "The parent is busy" is two different claims, and they pull in opposite directions. The capacity bill

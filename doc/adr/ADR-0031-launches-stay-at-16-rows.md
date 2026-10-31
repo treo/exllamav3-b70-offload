@@ -14,7 +14,7 @@ additive in launches: twice the rows cost 2.00 times, three times cost 2.98 and 
 bit-exact against its own output slice.
 
 That law has an uncomfortable implication for prefill. At 2048 rows it re-reads each touched expert 7.01 times, and at
-8192 rows 26.29 times. Two mechanisms that would remove the re-reads were built and measured, and both lost. See
+8192 rows 26.29 times. Two mechanisms designed to remove the re-reads were built and measured, and both lost. See
 ADR-0034. The reason they lost is the finding that decides this record: at these shapes the binding resource is
 register pressure and device fill, not bytes. A controlled test showed 2560 work-items cost the same against 6.6 MiB
 and against 13.2 MiB of weights, 1.3 percent apart.
@@ -53,7 +53,7 @@ Negative:
 
 Neutral:
 
-* The amplification law is a property of this kernel family at these shapes. A kernel that bends it would reopen this
+* The amplification law is a property of this kernel family at these shapes. A kernel that bends it reopens this
   record, and no candidate for such a kernel survives measurement today.
 
 ## Alternatives considered

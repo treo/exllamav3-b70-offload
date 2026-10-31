@@ -12,7 +12,7 @@ capped by slots, and each slot holds a row capacity. Weight movement is double-b
 weight-staging slots. A pinned flag region already has an address map for doorbell and completion.
 Workers are registered per model component, which is how a draft head gets its own worker and budget.
 
-The card could use these structures or define its own. Defining its own is faster to write in the first
+The card can use these structures or define its own. Defining its own is faster to write in the first
 week and costs more everywhere after that: a second protocol needs its own coherency evidence, its own
 slot arithmetic and its own accounting, and the operator-facing flags `-mcs`, `-mcl` and `-mcpa` then
 have to describe two systems at once.
@@ -46,7 +46,7 @@ Positive:
 Negative:
 
 * The card inherits a single reserved host core for submission and flag servicing. Nothing
-  synchronous may be added to that core, which is why ADR-0004 exists as a rule and not a preference.
+  synchronous can be added to that core, which is why ADR-0004 exists as a rule and not a preference.
 * Two weight-staging slots of 32 MiB cap how many experts move at once. At the measured link rate a
   32 MiB slot takes about 2.4 ms.
 * `MOE_FLAGS_SIZE` is derived from slot counts, so raising a slot count without recomputing it is a

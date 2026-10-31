@@ -9,7 +9,7 @@
 
 For a large model the expert set exceeds every tier. GLM-5.3-Flash at 3.05 bpw carries 108.84 GiB of
 routed-expert trellis. This box has 31.9 GiB of card memory and 125.6 GiB of host DRAM, and the parent
-holds a model of its own. A full host arena for that checkpoint would leave about 14 GiB for the parent
+holds a model of its own. A full host arena for that checkpoint leaves about 14 GiB for the parent
 process, the pinned ring, in-flight weights and the page cache, which is not a working margin. An
 attempted GLM chunked-prefill run with promotion on hard-hung this machine, so the risk is not
 hypothetical.
@@ -51,7 +51,7 @@ Neutral:
   homes as a maximum rather than a sum then says the third card buys nothing until the parent's leg drops
   below about 135 µs per layer. See ADR-0037.
 * Dropping the host arena entirely is an opt-in mode, offered only when every expert fits the card, and it
-  forbids eviction because an evicted expert would have nowhere to go.
+  forbids eviction because an evicted expert has nowhere to go.
 
 ## Alternatives considered
 
@@ -59,7 +59,7 @@ Neutral:
   on a 125 GiB box leaves no reserve for the parent, and the guard that refuses such a configuration is
   already in the loader path. See ADR-0045.
 * Memory-map the checkpoint and let the page cache serve experts: rejected for the hot path, because the
-  transfer to the card still needs a pinned buffer and an unmapped page fault inside a job path would put
+  transfer to the card still needs a pinned buffer, and an unmapped page fault inside a job path puts
   disk latency in front of the parent.
 * Keep only a subset of layers resident and leave the rest to the CPU permanently: rejected, because a
   layer with no resident expert pays the CPU rate on every token, which ADR-0013 prevents.

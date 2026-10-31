@@ -17,7 +17,7 @@ at 100 of 100 repetitions, cold lines and host-dirtied lines, in process and acr
 16 KiB out with stores plus a flag costs 7.0 to 9.0 µs end to end.
 
 The asymmetry is the whole decision. The inbound direction must use the copy engine, and the outbound
-direction can and should use stores, which removes a device-to-host copy, a second submission and an
+direction can use stores, which removes a device-to-host copy, a second submission and an
 extra completion from the return path.
 
 ## Decision

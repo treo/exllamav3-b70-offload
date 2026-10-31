@@ -38,14 +38,14 @@ Positive:
   job to the CPU worker if the card is late, so a coherency or starvation problem becomes a performance failure rather than a
   hang.
 * A negative result is still a decision. If the slice cannot be built in a few days, the handoff seam is deeper than the
-  integration map claims, and that answer changes the plan more cheaply than any measurement would.
+  integration map claims, and that answer reaches the plan more cheaply than any measurement.
 
 Negative:
 
 * It answers nothing about prefill, so the activation path of ADR-0025 stays open after it lands, and the headline prefill
   multiplier stays a projection.
 * A batch-dependent error in the prediction means the maximum-over-device-terms balance is structurally wrong and the plan
-  needs a queueing model. The slice can produce that outcome, and narrowing the slice does not avoid it.
+  needs a queueing model. The slice can produce that outcome, and narrowing the slice does not prevent it.
 * One layer cannot expose cross-layer effects such as cache interference between consecutive layers, which ADR-0028 flags as
   plausible and unmeasured.
 
@@ -57,7 +57,7 @@ Neutral:
 
 ## Alternatives considered
 
-* Build the full decode path first: rejected, because the composition question would then be answered by a system too large
+* Build the full decode path first: rejected, because the composition question is then answered by a system too large
   to attribute.
 * Build prefill first: rejected, because it needs the same handoff plus the unpriced activation path, which is the larger
   unknown.

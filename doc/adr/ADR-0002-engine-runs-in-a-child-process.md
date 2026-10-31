@@ -19,14 +19,14 @@ and write the result into memory that the parent and the parent's GPU also see. 
 process avoids that requirement, but keeps the other three problems.
 
 A second constraint is directional and measured: `cudaHostRegister` refuses memory that the xe driver
-pinned. Registration therefore has one legal owner, and it is the parent.
+pinned. Registration thus has one legal owner, and it is the parent.
 
 ## Decision
 
 We will run the engine in a child process, on a `multiprocessing.shared_memory` segment that the
 parent pins and registers. The parent owns and registers the control region. The engine never
-allocates memory that the parent must see. The engine owns all card memory: expert weights, staging
-and scratch.
+allocates memory that the parent must see. The engine owns all card memory: expert weights, weight
+staging and scratch.
 
 ## Consequences
 
@@ -44,7 +44,7 @@ Positive:
 
 Negative:
 
-* The result depends on driver behaviour that can change. The attach test therefore runs per commit,
+* The result depends on driver behaviour that can change. The attach test runs per commit,
   not once.
 * Two processes now hold placement state and both must agree. The parent is the single writer.
 * Debugging spans a process boundary, so the engine needs its own log file rather than the parent's

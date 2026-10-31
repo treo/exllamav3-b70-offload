@@ -9,7 +9,7 @@
 
 Two failure classes in this work ended the same way, with the machine unavailable rather than with an error. An oversized
 model with promotion enabled asked for a host arena of 109 GiB on a 125 GiB box and hard-hung it from a queue script,
-because the guard that would have refused the run lived in the benchmark wrapper and the script did not call it. The other
+because the guard that refuses such a run lived in the benchmark wrapper, and the script did not call it. The other
 class is quieter and equally expensive: the code assumes properties that nothing enforces. The per-expert byte layout is
 derived from expert 0's dimensions, while the loader permits a different rate per matrix. Every offloaded layer is assumed
 to share widths, and that one is asserted. Rates do vary per layer in a shipped checkpoint, from 2.5 to 3 bpw inside one
@@ -36,15 +36,15 @@ Positive:
   one.
 * Enforcing the layout and rate assumptions is also what makes the admit-time conformance sample of ADR-0027 sufficient,
   because a layout surprise can then only arrive through the staged bytes, which are sampled.
-* Printed refusals make a wrong prediction attributable, which is what ADR-0014's offline planner needs in order to be
+* Printed refusals make a wrong prediction attributable, which is what ADR-0014's offline planner needs to be
   falsifiable rather than decorative.
 
 Negative:
 
-* Configurations that would have limped along are now refused, so the message quality matters, and the escape hatch has to be
+* Configurations that formerly limped along are now refused, so the message quality matters, and the escape hatch must be
   a documented flag rather than an edit to a source file.
-* One assertion is a behaviour change for existing checkpoints: a model with mixed rates inside a layer currently loads and
-  would now be refused. No local checkpoint has that shape, and the assertion is the cheaper risk.
+* One assertion is a behaviour change for existing checkpoints. A model with mixed rates inside a layer currently
+  loads, and that shape is now refused. No local checkpoint has that shape, and the assertion is the cheaper risk.
 * A guard in a shared path is a dependency for every harness and every example script, which is where the original bypass
   came from.
 

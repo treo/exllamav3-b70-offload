@@ -50,7 +50,7 @@ Negative:
 Neutral:
 
 * Prefill uses a larger per-job row capacity, 256 rows rather than 64, for the same reason: each job carries
-  a 7 to 9 µs handshake, so 32 jobs per layer would add a quarter of a millisecond per layer of pure
+  a 7 to 9 µs handshake, so 32 jobs per layer add a quarter of a millisecond per layer of pure
   protocol.
 
 ## Alternatives considered
@@ -59,7 +59,7 @@ Neutral:
 * One copy of the whole slot: rejected, about 65 µs for a mostly empty buffer at the measured link rate.
 * Let the card read the parent's memory directly: not available cross-vendor on this box, and it is the named
   open item of ADR-0025.
-* Compress the payload: rejected as unnecessary, since 5 KiB per layer per token already hides entirely.
+* Compress the payload: rejected as unnecessary, because 5 KiB per layer per token already hides entirely.
 
 ## Links
 

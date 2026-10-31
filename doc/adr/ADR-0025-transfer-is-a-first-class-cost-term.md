@@ -26,9 +26,13 @@ bounds it in both directions.
 
 We will carry an explicit copy term, per homed expert and per phase, in every prefill and offload projection.
 We will price the card's activation path before we quote its expert rate. Three routes are candidates, and all
-three are open: a host-staged two-hop transfer, at 13.4 GiB/s in and 42.6 GiB/s of host read; a single copy if
-any cross-vendor peer path exists on this root complex; and the existing round trip, batched per layer instead
-of per assignment. This record stays proposed until one of the three is measured on the card.
+three are open:
+
+* A host-staged two-hop transfer, at 13.4 GiB/s in and 42.6 GiB/s of host read.
+* A single copy, if any cross-vendor peer path exists on this root complex.
+* The existing round trip, batched per layer instead of per assignment.
+
+This record stays proposed until one of the three is measured on the card.
 
 ## Consequences
 

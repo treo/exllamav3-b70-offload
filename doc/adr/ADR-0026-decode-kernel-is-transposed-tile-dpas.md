@@ -8,7 +8,7 @@
 ## Context
 
 Six kernel generations were measured before one was selected. The sequence, with its reason, is the content of
-this decision, because each step deleted a mechanism that a reader would otherwise assume was necessary.
+this decision, because each step deleted a mechanism that a reader otherwise assumes was necessary.
 
 The first real trellis GEMV ran the checkpoint bytes bit-exactly and reached 61.4 GB/s at one row, against the
 287 to 292 GB/s that the same bytes sustain with no arithmetic. An instruction-count model predicted the
@@ -66,7 +66,7 @@ Neutral:
 * Keep the integer dot-product GEMV as the main kernel: rejected, 2.2 to 3 times slower above one row, and 48
   percent of its loop instructions were operand re-packing.
 * Materialise expanded byte weights at load so the inner loop is trivial: rejected, measured slower at every row
-  count, and 4 bytes per weight would cut the resident pick share to about 8 percent.
+  count, and 4 bytes per weight cuts the resident pick share to about 8 percent.
 * Feed the matrix unit through the framework matrix abstraction: superseded, because the register-operand route
   removed 48 local-memory stores, 88 synchronisations and 11 spill references per kernel.
 * Convert weights to fp16: rejected for decode, because the integer accumulation is exact, the value range fits in

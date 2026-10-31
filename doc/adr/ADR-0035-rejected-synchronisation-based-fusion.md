@@ -19,7 +19,7 @@ gate and up wrote. The third has a compute kernel watch the host for work instea
 
 We will not fuse across a data dependency, and we will not use atomics to publish a partial result. The combine stays a
 separate launch, and the gate-to-down dependency stays a launch boundary. Work is merged only where it is embarrassingly
-parallel, as in ADR-0030. A dependency may be closed inside one work-group, where the barrier is free, only when the
+parallel, as in ADR-0030. A dependency can be closed inside one work-group, where the barrier is free, only when the
 resulting groups still fill the device.
 
 ## Consequences
@@ -34,7 +34,7 @@ The measured prices, and the mechanism each one exposes:
   µs, and the intermediate activation fits local memory comfortably. That is why the barrier was not the real reason.
   The real reason is fill: the backend caps this kernel family at 64 work-items per group, and one expert's dependency
   closure is 40 gate and up tiles plus 160 down tiles, so a group per expert puts 640 items in flight instead of 1600 at
-  ten experts. The same gate and up work costs 20.8 µs at 1600 items and 33.7 µs at 800, so the design would have traded
+  ten experts. The same gate and up work costs 20.8 µs at 1600 items and 33.7 µs at 800, so the design trades
   about 60 percent of the machine for 6 µs of launches.
 * A kernel polling the host for work: posting a doorbell where a pinned flag works costs 4 to 17 µs per launch, and a
   compute kernel that spins on the host inside a layer adds 24 to 54 ms per layer on top of the traffic.
@@ -48,7 +48,7 @@ all.
 These are the rejected designs, each with the argument that motivated it:
 
 * Fuse the combine into the producer to delete a launch and a round trip: rejected, the protocol costs more than the
-  round trip, and it would also break the determinism rule of ADR-0033.
+  round trip, and it also breaks the determinism rule of ADR-0033.
 * Fuse all three projections in one launch to delete two launches: rejected, and closed rather than deferred. At 16 rows
   the fill penalty falls from 62 to 36 percent and still dwarfs the launches saved, and fill stops binding only past the
   16-row bucket the engine splits on anyway.
@@ -71,5 +71,5 @@ These are the rejected designs, each with the argument that motivated it:
 ## Amendment
 
 D10 was first rejected on the barrier cost. The barrier argument was wrong on its own terms, because a group-scoped
-barrier is free, so the record now leads with the fill cost that measurement actually supports. The rejection stands;
-the reason does not resemble the original.
+barrier is free, so the record now leads with the fill cost that measurement actually supports. The rejection stands,
+but the reason does not resemble the original.

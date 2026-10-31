@@ -53,7 +53,7 @@ Neutral:
 * Port the copy path as well: rejected, because it duplicates the handoff for a configuration the split mode
   already expresses.
 * Make the card refuse whole-layer offload: rejected, because it is a legitimate configuration for a small
-  model whose experts all fit one card, and refusing it would push users onto the CPU worker.
+  model whose experts all fit one card, and refusing it pushes users onto the CPU worker.
 * Rewrite the CPU path onto the fused handoff in the same change: deferred, because it touches a working path
   that is the numeric oracle for the new one.
 

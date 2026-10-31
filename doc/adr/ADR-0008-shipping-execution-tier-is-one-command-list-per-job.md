@@ -60,7 +60,7 @@ Neutral:
 * Ship T0: rejected as the shipping tier, because about 2 to 5 µs per phase across five to eight phases
   is most of the handshake budget, but adopted as the bring-up tier.
 * Ship T2 now: rejected, because 2 to 5 µs per layer is below the resolution of the measurements that
-  would justify a permanently occupied card, a spin barrier and a drain test.
+  justifies a permanently occupied card, a spin barrier and a drain test.
 * Choose the tier at run time per job: rejected, because a per-job tier decision adds a branch to the
   path it is meant to speed up.
 

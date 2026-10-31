@@ -22,8 +22,8 @@ and 16, and about 2.5 times less at M of 32.
 
 ## Decision
 
-We will treat card prefill as in scope, and we will build the verify and MTP batch case first, at M of 4 to 16.
-Chunk-wide big-M GEMM stays behind the row-eligibility bar, computed per layer from live routing at the chunk
+We will treat card prefill as in scope, and we will build the verification and MTP batch case first, at M of 4, 8 and
+16. Chunk-wide big-M GEMM stays behind the row-eligibility bar, computed per layer from live routing at the chunk
 size in use. We will not reuse a Qwen-shaped prefill measurement for a GLM geometry, and we will not charge a
 shared expert the per-bucket traffic law, because it is a dense path.
 
@@ -61,7 +61,7 @@ Neutral:
 ## Alternatives considered
 
 * Keep prefill out of scope: superseded by operator direction and by the corrected eligibility bar.
-* Build a chunk-wide GEMM first: rejected, because both mechanisms that would beat the per-bucket traffic law
+* Build a chunk-wide GEMM first: rejected, because both mechanisms that beat the per-bucket traffic law
   were built and lost. See ADR-0034.
 * Treat the shared expert as another bucketed MoE path: rejected as an error, not a preference. Charging it the
   16-row bucket law produced 256 re-reads of 25 MiB per layer, about 1.5 s per chunk of fiction.

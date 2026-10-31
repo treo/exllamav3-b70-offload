@@ -64,7 +64,7 @@ Neutral:
 * Pass a layout marker into the compute kernel: rejected, because its failure mode is silent and its cost is a
   branch in the hot path for a fact that admit already knows.
 * Permute on the parent while staging: rejected on measurement, below link rate for the same bytes.
-* Rewrite the on-disk format to the permuted order: rejected, because it would break byte-interchangeability with
+* Rewrite the on-disk format to the permuted order: rejected, because it breaks byte-interchangeability with
   every existing kernel for a benefit that admit-time normalisation already provides.
 * Require the parent to stage canonically on every tier and delete the card permute: deferred, and it is the right
   shape if the AVX-512 tiers can be measured. It needs the staged-layout marker the ban above removes, so the

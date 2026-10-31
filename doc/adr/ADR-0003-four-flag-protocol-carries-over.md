@@ -15,9 +15,9 @@ criteria in [`doc/prep/port-acceptance.md`](../prep/port-acceptance.md).
 
 The port is a new consumer of this protocol, and the temptation with a new consumer is to design a
 cleaner one. The cost of that is concrete: the current protocol has a test suite, a watchdog, and a
-history of fixed deadlocks behind it, including the historical "second-prompt freeze". The card adds
+history of fixed deadlocks behind it, of which the best known is the recorded "second-prompt freeze". The card adds
 capabilities, such as kernels that write host memory directly, that make some of those invariants look
-redundant. They are not redundant; two of them exist specifically because a second device can queue a
+redundant. They are not redundant. Two of them exist specifically because a second device can queue a
 write that has not happened yet.
 
 ## Decision
@@ -53,11 +53,11 @@ Neutral:
 
 ## Alternatives considered
 
-* Design a card-specific protocol with doorbells and events: rejected, because it would need its own
-  coherency evidence, its own deadlock history and its own watchdog, and it would break the
+* Design a card-specific protocol with doorbells and events: rejected, because it needs its own
+  coherency evidence, its own deadlock history and its own watchdog, and it breaks the
   three-home semantics of `-mcs`, `-mcl` and `-mcpa`. See ADR-0007.
 * Keep the ring but replace flags with SYCL events: rejected, because an event wait costs 24.8 µs,
-  which is larger than the compute job it would gate. See ADR-0004.
+  which is larger than the compute job it gates. See ADR-0004.
 * Gate slot reuse on `done` instead of `consumed`: rejected. With offloaded layers spread over more
   than one device, `done` lets a worker overwrite an output that another device has queued but not
   written.

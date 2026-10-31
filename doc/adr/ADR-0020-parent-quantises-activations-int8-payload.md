@@ -18,8 +18,8 @@ inputs, which is the only condition under which a numeric comparison separates q
 arithmetic drift.
 
 There is a cost. The quantiser becomes a second implementation of a rule that currently exists once, and
-its rule is not one line: scale is `amax/127`, and a row where more than one sixteenth of the values would
-round to zero instead uses `amax/16256` with a 128-step high plane.
+its rule is not one line: scale is `amax/127`, and a row where more than one sixteenth of the values rounds
+to zero instead uses `amax/16256` with a 128-step high plane.
 
 ## Decision
 
@@ -57,10 +57,10 @@ Neutral:
 * Keep fp16 activations and quantise on the card: rejected as the default, because it doubles the payload for
   no gain, but kept as a mode because the alternate implementation is what proves the first one.
 * Use bf16 or fp8 activations: rejected, because it changes the numeric class that the acceptance level
-  pins, and would need a new measurement rather than a relaxed threshold. See ADR-0033.
+  pins, and needs a new measurement rather than a relaxed threshold. See ADR-0033.
 * Send fp32 activations: rejected, twice the bytes of fp16 for no precision benefit the int8 weights can use.
 * Sum the card's own partials on the card: adopted for large batch as a design item, and it is the larger win
-  of the two there, since topk 10 partials collapse to one per row.
+  of the two there, because topk 10 partials collapse to one per row.
 
 ## Links
 

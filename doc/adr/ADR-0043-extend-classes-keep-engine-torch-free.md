@@ -11,7 +11,7 @@ The card path needs new code in five places: the engine and kernels, a locating 
 the region and the child, changes to the CUDA issue kernel, and changes to the module-level placement and dispatch. Two
 build facts constrain how that code is organised. The CUDA extension build walks `.c`, `.cpp` and `.cu` sources, so a SYCL
 translation unit inside that tree breaks the CUDA build. And there is no torch accelerator backend for this card in this
-environment, which is a consequence rather than an obstacle, since ADR-0001 already rules out a second device.
+environment, which is a consequence rather than an obstacle, because ADR-0001 already rules out a second device.
 
 The alternative to extending the existing classes is to write a card-only sibling module. That is faster for one sprint and
 leaves two copies of a protocol with safety-critical invariants, which is the exact structure that Level D exists to test.
@@ -19,7 +19,7 @@ leaves two copies of a protocol with safety-critical invariants, which is the ex
 ## Decision
 
 We will factor the protocol half of the CPU host object out, rather than fork it, and keep the CPU-specific half in place.
-Until that refactor lands, a card host may subclass and override, and every override is listed in the code-impact table so
+Until that refactor lands, a card host can subclass and override, and every override is listed in the code-impact table so
 the Level-D suite runs against both workers. The engine and kernels build as a shared library with a C ABI and no
 framework dependency, loaded through ctypes, with a build and capability probe that mirrors the existing extension helper.
 The probe decides, at startup, whether the device is present, whether host registration works, whether the command-list
@@ -52,11 +52,11 @@ Neutral:
 
 ## Alternatives considered
 
-* Build the SYCL sources into the main extension: rejected, because the CUDA build's source walker would choke on them and
-  every CUDA user would inherit a oneAPI dependency.
+* Build the SYCL sources into the main extension: rejected, because the CUDA build's source walker chokes on them and
+  every CUDA user inherits a oneAPI dependency.
 * Fork the CPU host into a card-only module: rejected, because two copies of a protocol each need their own coherency and
   liveness evidence, and drift between them is silent.
-* Bind through the framework's tensor layer: rejected, because there is no backend here, and it would put a dispatcher in
+* Bind through the framework's tensor layer: rejected, because there is no backend here, and it puts a dispatcher in
   the hot path that ADR-0004 exists to keep out.
 * Defer the refactor until the card works: rejected, because the first card commit needs the seams, and retrofitting them
   later is the fork by another name.

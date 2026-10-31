@@ -11,7 +11,7 @@ An expert with no device home can be computed where it lies, on the CPU, or admi
 streamed to the parent. Admission costs one transfer before the first useful read: 655 µs for a 9 MiB
 GLM expert at the measured 13.4 GiB/s link, and 2.5 ms when the bytes must come off disk. A CPU
 assignment on the same expert costs about 199 µs per use, and the card about 31 µs. The break-even is
-therefore about four uses, and that ratio is scale-invariant: it moves only from 3.8 to 4.3 uses across
+about four uses, and that ratio is scale-invariant: it moves only from 3.8 to 4.3 uses across
 the whole measured rate range of 132 to 545 GB/s.
 
 An earlier draft charged the upload per pick, which made migration look fifty times more expensive than
@@ -49,8 +49,8 @@ Negative:
   proxies were tried and both are invalid, so gate E11 owns the number.
 * Admission traffic shares the link with activations. Gate E5 is measured with admission active, not with
   it disabled, and the low-priority queue is a Level Zero feature with no SYCL equivalent.
-* A profile-derived resident share is an upper bound, since the stored counts are decayed cumulative
-  statistics written by an already-adaptive run. The gate is therefore that the live figure is not above
+* A profile-derived resident share is an upper bound, because the stored counts are decayed cumulative
+  statistics written by an already-adaptive run. The gate is then that the live figure is not above
   the profile figure.
 
 Neutral:

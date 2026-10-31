@@ -9,7 +9,7 @@
 
 Almost every retraction in this plan was a protocol failure rather than a wrong hypothesis. The device idles at 1200 MHz
 and needs tens of milliseconds of continuous work to leave that state, so the same kernel measures 44.0 µs cold and 19.2
-µs warm. A batch of short separate processes therefore measures whatever clock the card happened to sit at, uniformly,
+µs warm. A batch of short separate processes measures whatever clock the card happened to sit at, uniformly,
 including on binaries nobody touched. Absolute rates move about 2 times with working-set size and non-monotonically. The
 placement profile carries across runs and is worth 12 to 22 percent. Comparison arms drift with warmth, which once made a
 flag look 30 percent harmful when it was neutral. Repeated text in a prefill corpus adds 4.2 percent throughput while
@@ -24,7 +24,7 @@ rules, each with the quantity it protects:
 1. Warm up inside the timing process, with continuous executed work, and hold a fixed anchor kernel in every batch.
 2. Interleave comparison arms inside one process, and report absolute levels only within a window.
 3. State the working-set size next to any rate, and the footprint next to any latency.
-4. Match the measurement condition to the workload's operating point, meaning topk, batch, and resident share, not the
+4. Match the measurement condition to the workload's operating point: topk, batch and resident share, not the
    checkpoint's totals.
 5. Compare designs at matched batch, and over a horizon at least as long as the adaptation the design performs.
 6. Pin or erase the placement profile per run, and print which start was used.
@@ -64,8 +64,8 @@ Neutral:
   chunk size.
 * Compare each design at its best batch: rejected, because that is how a 28 times artifact was produced from a baseline
   that collapsed between batch 1 and 2.
-* Use the profiler to settle performance questions: rejected, profiling costs about 30 percent, and the standing rule is to
-  run the power and profile instruments before changing code, not instead of it.
+* Use the profiler to settle performance questions: rejected, because the profiler costs about 30 percent, and the
+  standing rule is to run the power and profile instruments before changing code, not instead of it.
 
 ## Links
 

@@ -42,7 +42,7 @@ Negative:
   flag anyone can set and it is free at steady state on small-expert models. Baselines have to be re-taken
   with promotion on before any speedup is published. See ADR-0039.
 * The substituted term is smaller than it looked. The 1992 ms intercept is not irreducible model work: 756
-  ms of it, 39 percent, is the offload path's own copy traffic. The multiplier is therefore a projection
+  ms of it, 39 percent, is the offload path's own copy traffic. The multiplier is thus a projection
   until the activation path is priced. See ADR-0025.
 
 Neutral:
@@ -55,7 +55,7 @@ Neutral:
 
 * Multiply the two speedups: rejected by measurement, and rejected on principle, because the same bytes
   cannot be removed twice.
-* Treat the two as complements on capacity grounds: partly true and used elsewhere, since the card's
+* Treat the two as complements on capacity grounds: partly true and used elsewhere, because the card's
   capacity argument in ADR-0015 rests on promotion saturating. It does not change the arithmetic of one
   shared term.
 * Disable promotion in all card benchmarks: rejected, because it hides the competitor an operator can

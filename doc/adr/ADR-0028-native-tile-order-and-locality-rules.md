@@ -35,8 +35,8 @@ Positive:
   protects the home-transfer economics of ADR-0014.
 * No staging interaction and no restore pass, which is what keeps ADR-0021's retirement of streaming clean.
 * The lever that works is free. Contiguous per-layer allocation is a loader choice, and a grid-order choice is one
-  line. The failure mode this prevents is writing the GEMV first, measuring about 200 GB/s, and finding the cause
-  was one line of ordering.
+  line. The failure mode this prevents is a GEMV that measures about 200 GB/s, where the cause turns out to be
+  one line of ordering.
 * The rules are falsifiable. One measurement, the same kernel in both orderings at one footprint, must land in the
   1.08 to 1.99 times band. Landing at the bottom of the scattered band means the rules are not implemented, not that
   the card is slow.
@@ -55,7 +55,7 @@ Negative:
 Neutral:
 
 * Hot-set reuse across consecutive tokens is plausible and unmeasured. A batch-1 job reads about 12 MiB against a 24
-  MiB L2, so the clustered figure may be a floor rather than a ceiling. The rate gate measures first-touch and
+  MiB L2, so the clustered figure can be a floor rather than a ceiling. The rate gate measures first-touch and
   repeated-expert conditions separately.
 * A consistent win inside the real GEMV, large enough to pay for a load-time pass and for losing byte-identity,
   reopens the layout half of this record.

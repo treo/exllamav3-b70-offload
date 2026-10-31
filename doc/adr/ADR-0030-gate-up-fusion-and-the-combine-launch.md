@@ -18,13 +18,13 @@ launches run half idle. Fusing them reaches 1600 and is worth 49 percent in occu
 already fills the machine, fusion buys nothing and leaves only its cost, which is two independent weight streams
 interleaved at about plus 7 percent. The streams also compete for cache: a fused launch's live footprint is the sum
 of both projections, so it stops paying when twice the experts per launch times the byte size overflows a 24 MiB
-cache while a single stream would still fit.
+cache while a single stream still fits.
 
 ## Decision
 
 We will fuse gate and up only when the measured joint dispatch table says so, and the table is consulted once per
 model and rate, at one row, and applied at every row count. When the fused form is selected, split-K drops to the
-value that keeps the launch filled, since fusion and split-K buy the same resource. We will use one combine launch
+value that keeps the launch filled, because fusion and split-K buy the same resource. We will use one combine launch
 for the fused pair, with one work-item producing both projections and a grid sized by output count. We will not
 merge the two combines into one launch with a doubled grid, which measured slower by 1.9 to 3.8 µs.
 
@@ -43,7 +43,7 @@ Negative:
 
 * The byte test cannot predict the sign at the edges of the penalty band. At 2 bpw with 32 experts fusion won by 1.32
   times inside the predicted band, and at 3 bpw with 16 experts the sign flipped between split-K 1 and split-K 2 at
-  identical bytes. The table is therefore the authority and the byte test is a warning.
+  identical bytes. The table is thus the authority and the byte test is a warning.
 * A single global fusion flag is a bug. The GLM geometry, with 128 column tiles, must not fuse, and the worst penalty
   measured inside the band is 1.27 times at 3 bpw and 1.88 times at 6 bpw.
 * The joint table is dense at 3 bpw and sparse at 2, 4 and 6, so cells outside it fall back to the older

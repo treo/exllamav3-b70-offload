@@ -17,7 +17,7 @@ Whether the same machinery pays for itself on the card is arithmetic rather than
 costs its byte size over the link, once if the bytes come from host memory and twice if they come from card
 memory. Computing it on the card costs that expert's share of the rows, in and out, over the same link. The
 two are equal at about 200 rows per expert with int8 in and fp16 out, and at about 120 rows with fp32 out. At
-2048 rows over 512 experts with topk 10, the mean expert sees 40 rows, and the experts that would clear 200
+2048 rows over 512 experts with topk 10, the mean expert sees 40 rows, and the experts that clear clear 200
 are mostly the ones already resident on the parent.
 
 ## Decision
@@ -61,7 +61,7 @@ Neutral:
 * Upload the expert to the card per chunk on demand: rejected, because admission is a home decision taken over
   a window, not a job decision. See ADR-0014.
 * Keep the streaming machinery for uniformity with the CPU path: rejected, because it costs a quarter of
-  prefill device time on the path it would make uniform.
+  prefill device time on the path it makes uniform.
 
 ## Links
 
@@ -74,4 +74,4 @@ Neutral:
 
 The headline "28.6 percent" is the CPU path's measured share, not a card measurement. It is quoted as the
 cost of the machinery being retired, which is what the decision removes, and not as a promised saving on the
-card. The distinction was added after a reader could reasonably have taken the figure as a card forecast.
+card. The distinction is in this sentence because a reader can reasonably take the figure as a card forecast.

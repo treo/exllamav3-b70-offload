@@ -12,7 +12,7 @@ parent memory, card memory, host memory, and disk. An expert has exactly one hom
 its arithmetic.
 
 The original argument for one home was a rate argument: the two accelerators were said to read within
-1.5 times of each other, so a replica on the second card would buy only capacity that neither has.
+1.5 times of each other, so a replica on the second card buys only capacity that neither has.
 That argument was spec-to-spec and did not survive measurement. Footprint-matched, the homes are 3.2
 times apart on Qwen3.8 and 7 times apart on GLM. On the parent the measured rate gap is wider still:
 its expert leg is kernel-bound at about 190 GB/s while it streams non-expert weights at 860 GB/s.
@@ -63,7 +63,7 @@ Neutral:
   more than 5 percent at batch 4 or higher to justify abandoning disjointness.
 * Split one expert across tiers by 128-column band: rejected, because an expert is 1 to 9 MiB against
   tier capacities three orders larger, so granularity is already about a thousand experts per tier, and
-  striping would need a second partial-combine path.
+  striping needs a second partial-combine path.
 * Let the card hold a replica of the parent's hot slice so that routing never spans: rejected, because
   that is replication with the same cost and a worse capacity trade.
 

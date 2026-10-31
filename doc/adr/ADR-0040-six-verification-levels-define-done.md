@@ -14,7 +14,7 @@ history is a list of plausible results produced by the wrong one of the three.
 The CPU offload already has an acceptance document with five levels, thresholds, measured reference values and the tests
 that hold them. The port needs those five, plus one channel that can detect a card that is nominally busy and actually
 idle. It also needs its non-goals stated, because two obvious criteria, bit-exactness against the CUDA path and greedy
-token equality across paths, cannot be met by design and would stall the port if they were required.
+token equality across paths, cannot be met by design, and requiring them stalls the port.
 
 ## Decision
 
@@ -55,7 +55,7 @@ Neutral:
 
 ## Alternatives considered
 
-* Require bit-exactness against the CUDA path: impossible by construction, since int8 activations and fp32 transforms
+* Require bit-exactness against the CUDA path: impossible by construction, because int8 activations and fp32 transforms
   accumulate in a different order. See ADR-0033.
 * Require only whole-model agreement: rejected, because a KL budget of 1e-2 with 14 to 32 times headroom will pass a
   component that is quietly wrong in a way the next model exposes.

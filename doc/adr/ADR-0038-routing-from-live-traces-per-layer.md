@@ -15,9 +15,10 @@ dust entries, down to 1e-27 for experts that were once touched and never again.
 Two errors followed from using it, and neither was about the mathematics. The plan's distinct-expert union was about 2
 times too high by batch 32, measured at 10.35 times topk against a carried 21.91 times, while the closed-form
 independence model itself predicts 32.2 against 32.1 measured at batch 4. The formula was right and the input was wrong.
-Separately, aggregating wrongly inflated concave statistics: using layer 0 as the model's distribution, when layer 0
-touches 289 of 512 experts in 1920 picks, and collapsing 48 per-layer vectors into one, which inflates the union from
-10.6 to 22.8 times and mis-states residence hit rate from 99.3 to 74.5 percent. That single aggregation error is worth a
+Separately, one wrong aggregation inflated concave statistics: layer 0 stood for the model's distribution, when layer
+0 touches 289 of 512 experts in 1920 picks, and one collapsed vector stood for 48 per-layer vectors, which inflates the
+union from 10.6 to 22.8 times and mis-states residence hit rate from 99.3 to 74.5 percent. That single aggregation error
+is worth a
 factor of 6.6 in predicted throughput.
 
 The stakes are not cosmetic. A flat routing profile was the argument against building the prefill path, and live routing
@@ -64,7 +65,7 @@ Neutral:
   because independence is accurate and the marginal distribution is not the checkpoint's.
 * Aggregate one profile per model to simplify the planners: rejected, because collapsing the per-layer vectors inflates
   every concave statistic the plans depend on.
-* Trace only one layer to keep the capture cheap: rejected on measurement, since layers differ by more than the sampling
+* Trace only one layer to keep the capture cheap: rejected on measurement, because layers differ by more than the sampling
   saving.
 
 ## Links

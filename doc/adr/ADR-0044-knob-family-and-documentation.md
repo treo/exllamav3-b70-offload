@@ -14,7 +14,7 @@ makes a knob safe to touch, because a knob that changes a shape changes the mean
 The same study found the failure modes of the existing set. Nine variables were live and undocumented. One document
 described a streaming threshold base of 16 while the code used 8. A module docstring described a worker start at first
 layer registration while the loader starts it before any module loads, deliberately. None of those three changed
-behaviour, and all three were text a porter would otherwise trust. One variable, `EXL3_MOE_CPU_SLOT_ROWS`, turned out to
+behaviour, and all three are text a porter otherwise trusts. One variable, `EXL3_MOE_CPU_SLOT_ROWS`, turned out to
 be a shape knob disguised as a chunk size, because the fused decode path refuses a row count above the slot capacity and
 silently falls back to a slower path.
 
@@ -69,4 +69,4 @@ Neutral:
 
 `EXL3_MOE_B70_SLOTS` and `..._SLOT_ROWS` are classified as shape knobs, and their proposed values of 4 and 256 are
 provisional. The CPU-path lesson that a row capacity can select a different data path applies to the card too, so the
-interaction between slot capacity, verify width and fused eligibility needs an explicit assertion rather than a default.
+interaction between slot capacity, verification width and fused eligibility needs an explicit assertion rather than a default.

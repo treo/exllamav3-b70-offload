@@ -12,8 +12,8 @@ is busy for the whole time its device work takes. On one of the two reference mo
 
 At batch 1 on GLM, the measured step costs 1392.2 µs per layer of wall time and 406.7 µs of device time, so 71 percent
 of the step is exposed waiting, and the wait is on the CPU worker. Qwen3.8 stalls far less, which is why a device-only
-model passed every test thrown at it on that model. The same gap explains a dispute that could not be settled inside the
-device view: a bottom-up floor and a window-calibrated estimate differed by 2.1 times and both were defensible, because
+model passed every test thrown at it on that model. The same gap explains a dispute that the device view never
+settled: a bottom-up floor and a window-calibrated estimate differed by 2.1 times and both were defensible, because
 one measured a floor and the other absorbed waits and per-token overheads.
 
 ## Decision
@@ -31,7 +31,7 @@ Positive:
 * The direction of the model's error is known, so the card's value on a stalling model is understated rather than
   overstated. GLM is the strongest case in the plan partly because of this term.
 * One run, the vertical slice, either closes the term or tells us the balance is structurally wrong.
-* Reporting the pair retires the argument between the two earlier parent estimates, since they measured different
+* Reporting the pair retires the argument between the two earlier parent estimates, because they measured different
   quantities and the labels now say which.
 
 Negative:
@@ -53,8 +53,8 @@ Neutral:
   and what the split rule of ADR-0011 is computed against.
 * Model the stall as a queue from first principles: deferred, not rejected. It becomes mandatory if the measured gap is
   batch-dependent, and it cannot be fitted from fewer than one joint run.
-* Fold stall into the parent's device term by inflating it: rejected, because it would hide a structural finding inside a
-  constant and would mis-price every configuration that removes the wait.
+* Fold stall into the parent's device term by inflating it: rejected, because it hides a structural finding inside a
+  constant and mis-prices every configuration that removes the wait.
 
 ## Links
 

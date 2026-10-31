@@ -45,7 +45,7 @@ Positive:
 
 Negative:
 
-* fp32 or bf16 accumulation is off the table even where it would be faster, and the split-operand routes that would
+* fp32 or bf16 accumulation is off the table even where it is faster, and the split-operand routes that
   need it are excluded from decode by this record rather than by measurement.
 * Two defences must both be maintained: the contraction-safe expression form and the compile flag. A reviewer who does
   not know why the flag is set will remove it as noise.
@@ -56,7 +56,7 @@ Neutral:
 
 * Bit-exactness between the card, the CPU and the parent paths is a stated non-goal, because they differ by
   construction in accumulation order. What is graded is the distribution of the difference. See ADR-0040.
-* Repeatability holds for a fixed shape. Changing the per-slot row capacity changes chunking and therefore changes
+* Repeatability holds for a fixed shape. A change to the per-slot row capacity changes chunking, and it then changes
   results, which is expected and is not a determinism failure.
 
 ## Alternatives considered

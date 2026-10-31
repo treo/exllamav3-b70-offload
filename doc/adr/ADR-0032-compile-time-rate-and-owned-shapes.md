@@ -12,8 +12,8 @@ group, and the matrix geometry. Passing them at run time is the natural design a
 
 With the trellis rate as a run-time value, every window shift inside the unpacker is a variable shift and the
 straddle select cannot fold away. The intra-dword bit offset of a lane's window group turns out to be lane-invariant,
-a function of the lane index and the rate only, which was verified for every shipped rate. Compiling the rate in
-therefore makes every shift a constant, and measured 1.90 times on gate and 1.89 times on down at one row, with output
+a function of the lane index and the rate only, which was measured for every shipped rate. Compiling the rate in
+makes every shift a constant, and it measured 1.90 times on gate and 1.89 times on down at one row, with output
 bit-identical to the run-time build. The same mechanism produced a false alarm earlier in the same chapter: a kernel
 read its band stride from a struct field, reported 19 percent slower, and the deficit vanished when the band became a
 template parameter. The vendor's kernels show the same effect, where a 1.19 times banding tax disappeared once the
@@ -21,9 +21,10 @@ divisor became a shift.
 
 ## Decision
 
-We will instantiate the decode and prefill kernels per trellis rate, per band group, and per matrix geometry, using
-values read at admit where they are already known. We will keep a measured dispatch table keyed on geometry, experts
-per launch, rows and rate, and we will not interpolate on experts per launch. A launch that cannot find its cell must
+We will instantiate the decode and prefill kernels per trellis rate, per band group and per matrix geometry. The
+values come from the admit path, where they are already known. We will keep a measured dispatch table keyed on
+geometry, experts per launch, rows and rate, and we will not interpolate on experts per launch. A launch that cannot
+find its cell must
 print which fallback rung it used, and every instantiation carries its own exactness and spill evidence.
 
 ## Consequences
@@ -60,7 +61,7 @@ Neutral:
 * One generic kernel with a heuristic for split-K and fusion: rejected at the band edges, where heuristics got the
   sign wrong on identical byte counts.
 * Instantiate per batch size as well: rejected, because the fusion and split-K bands do not move with rows, so the
-  extra instantiations would buy nothing measurable.
+  extra instantiations buy nothing measurable.
 
 ## Links
 

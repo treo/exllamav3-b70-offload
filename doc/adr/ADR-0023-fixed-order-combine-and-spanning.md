@@ -46,7 +46,7 @@ Positive:
 
 Negative:
 
-* At prefill, spanning is not secondary. The same doubling applies to thousands of rows on a link-bound path,
+* At prefill the cost of spanning is not secondary. The same doubling applies to thousands of rows on a link-bound path,
   so the activation byte model must use rows times one plus `sigma`, which is roughly double the single-home
   figure whenever a residue exists.
 * The three-way combine is a permanent path rather than a corner, so it needs its own fixture and its own
@@ -66,9 +66,8 @@ Neutral:
   residue, for locality, which is worth microseconds at decode. Gate E20 can revisit it. See ADR-0009.
 * Assign whole rows to one home: rejected, because a row's picks are distributed across homes by
   construction unless one home holds every expert.
-* Estimate `sigma` from an independence model only: rejected as the sole source, because the same class of
-  shortcut, collapsing a distribution before taking an order statistic, has produced three separate errors in
-  this plan. See ADR-0038.
+* Estimate `sigma` from an independence model only: rejected as the sole source, because three separate errors in this
+  plan came from taking an order statistic after a collapsed distribution. See ADR-0038.
 
 ## Links
 

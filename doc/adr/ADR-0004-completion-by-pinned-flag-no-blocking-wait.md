@@ -8,14 +8,14 @@
 ## Context
 
 A decode job on the card is small. The measured decode layer costs 43.6 µs at batch 1, and a single
-projection is 14.0 µs. A handshake round trip is therefore a first-order term, not overhead. Three
+projection is 14.0 µs. A handshake round trip is thus a first-order term, not overhead. Three
 completion mechanisms are available on this box, and their measured costs differ by a factor of eight.
 
 A SYCL event or queue wait costs 24.8 µs for a job that does nothing else. Polling a flag that the
 device wrote in pinned memory costs 5.0 to 6.3 µs. A resident kernel that watches a doorbell costs a
 3.2 µs round trip, at the price of holding the device. The CPU path today costs about 20 µs per layer
 for an empty job, and the parent's own non-expert work per layer is 141.9 µs on Qwen3.8 at 2.05 bpw
-and 195.6 µs at 2.68. A 25 µs tax per layer would consume the whole hiding margin that justifies the
+and 195.6 µs at 2.68. A 25 µs tax per layer consumes the whole hiding margin that justifies the
 port.
 
 The failure mode matters as much as the number: a blocking wait that sneaks into a job path is silent.
@@ -49,7 +49,7 @@ Negative:
 Neutral:
 
 * The resident engine, at 3.2 µs, saves about 2 to 5 µs per layer over the flag path. That is inside
-  the noise of the measurements that would justify it, so it stays behind a gate. See ADR-0008.
+  the noise of the measurements that justify it, so it stays behind a gate. See ADR-0008.
 
 ## Alternatives considered
 

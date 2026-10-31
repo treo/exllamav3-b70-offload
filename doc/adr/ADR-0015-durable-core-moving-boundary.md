@@ -60,7 +60,7 @@ Neutral:
 
 * Use the card as a faster promotion target: rejected, because ranking relief is bounded by the window the
   parent can spare, while capacity relief scales.
-* Dynamic placement with a short interval, mirroring the parent's swap policy: rejected, 4.9 points of
+* Dynamic placement on a short interval, the parent's swap-policy shape: rejected, 4.9 points of
   gain for the transfer cost, and the parent's own promote hook already costs 2 to 3 ms per token.
 * Freeze the tier with no boundary motion at all: kept as a test configuration, not as the default,
   because boundary survival is 55 percent rather than 94 percent.

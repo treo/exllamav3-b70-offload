@@ -22,11 +22,16 @@ kernel-bound at about 190 GB/s, flat from batch 1 to 16, while it streams other 
 ## Decision
 
 We will price every tier with a measured primitive that names its regime, and we will use a byte rate only inside the
-regime where it was measured. The current primitives are: 5.70 µs per expert-bucket for engine-integrated prefill on
-Qwen geometry; 32.6 to 37.3 µs per bucket on GLM geometry; 10.23 ms per CPU-homed expert per 4096-token chunk for the
-host tier at prefill rows; 42.6 GiB/s read, 24.1 copy and about 485 GiB/s from last-level cache as host ceilings; an
-engine-measured parent non-expert table keyed on batch and context, with a shape anchored on measured levels; and 13.4
-GiB/s for the pinned link. The planner does a nearest-cell lookup, refuses to extrapolate past its measured range, and
+regime where it was measured. These are the current primitives:
+
+* 5.70 µs per expert-bucket for engine-integrated prefill on Qwen geometry.
+* 32.6 to 37.3 µs per bucket on GLM geometry.
+* 10.23 ms per CPU-homed expert per 4096-token chunk for the host tier at prefill rows.
+* 42.6 GiB/s read, 24.1 copy and about 485 GiB/s from last-level cache as host ceilings.
+* An engine-measured parent non-expert table keyed on batch and context, with a shape anchored on measured levels.
+* 13.4 GiB/s for the pinned link.
+
+The planner does a nearest-cell lookup, refuses to extrapolate past its measured range, and
 carries a units self-test, because a 1000 times slip in one conversion once made every placement policy tie.
 
 ## Consequences
@@ -34,10 +39,11 @@ carries a units self-test, because a 1000 times slip in one conversion once made
 Positive:
 
 * A missing primitive surfaces as a refusal, where a wrong rate surfaced as a plausible number.
-* The primitives explain a result the rate model could not: a bucket costs 4.8 plus 1.19 µs per bit of rate, so about 67
+* The primitives explain a result the rate model did not explain: a bucket costs 4.8 plus 1.19 µs per bit of rate, so
+  about 67
   percent of a 2 bpw bucket is fixed overhead. That is the quantitative reason the mechanisms of ADR-0034 lost, and the
   reason a byte rate misprices low rates most.
-* Comparisons across recipes now use weights per second rather than bytes per second, since the two differ by the rate
+* Comparisons across recipes now use weights per second rather than bytes per second, because the two differ by the rate
   factor.
 
 Negative:
@@ -45,15 +51,15 @@ Negative:
 * Each new geometry owes a measurement. Three cheap ones are deliberately unfinished: the 3 bpw bucket cost in the probe,
   a GLM-geometry bucket cost so GLM rows stop borrowing Qwen rates, and per-cell coverage outside 3 bpw.
 * Two families of the same quantity must not be averaged. The 5.70 µs engine figure and the 7.2 to 11.95 µs probe
-  ladder measure different things, and fitting one line across both would be wrong in a way that looks precise.
+  ladder measure different things, and fitting one line across both is wrong in a way that looks precise.
 * Absolute levels move 2.4 percent between processes while within-process slopes fit to under 2 ms, so primitives must be
   re-fit inside one process and cross-process absolute comparisons are not admissible.
 
 Neutral:
 
 * The three-point rate ladder is provisional, and the 4 bpw point sits 5 percent off its own fit.
-* A prefill kernel whose rows per expert crosses the eligibility bar would make a byte rate the right primitive again,
-  because arithmetic rather than memory would bind. That is the reopening condition for the prefill primitive.
+* A prefill kernel whose rows per expert crosses the eligibility bar makes a byte rate the right primitive again,
+  because arithmetic rather than memory binds. That is the reopening condition for the prefill primitive.
 
 ## Alternatives considered
 

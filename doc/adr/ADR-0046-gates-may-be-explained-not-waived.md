@@ -1,4 +1,4 @@
-# ADR-0046: A gate may be explained by measurement, never waived
+# ADR-0046: A gate is explained by measurement, never waived
 
 - Status: Accepted
 - Date: 2026-10-31
@@ -8,8 +8,9 @@
 ## Context
 
 The work is divided into phases, and each phase ends at a commit that is known good, with a harness report and a set of
-gates. Phase 0 and phase 0b are complete: the probes answered the transport, sharing, store-discipline, bandwidth, layout and
-arithmetic questions, and the placement planners answered the placement questions from real routing counts. What remains,
+gates. Phase 0 and phase 0b are complete: the probes answered the transport questions, the cross-vendor sharing
+questions, store discipline, bandwidth, layout and arithmetic, and the placement planners answered the placement
+questions from real routing counts. What remains,
 phases 1 through 5, is the engine, the decode kernel in the engine, prefill, the three-home partition, oversized models, and
 then the optional items.
 
@@ -46,7 +47,7 @@ Negative:
 
 Neutral:
 
-* Phases are ordered by which unknown would hurt most if it went the wrong way, not by ease. The activation path of
+* Phases are ordered by which unknown hurts most when it goes the wrong way, not by ease. The activation path of
   ADR-0025 sits ahead of remaining kernel work for that reason.
 
 ## Alternatives considered

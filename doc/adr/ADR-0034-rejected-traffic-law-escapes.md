@@ -21,7 +21,7 @@ register file and device fill, not bytes.
 We will not implement staged local-memory reads of weight tiles, we will not implement items that carry more than 16
 rows, and we will not implement a shared weight stream across row buckets inside one item. 16-row launches, with
 split-K for fill and co-resident slabs at scale, remain the schedule. Reopening any of the three requires a kernel that
-bends the additive law itself, not a new argument for why the law should bend.
+bends the additive law itself, not a new argument about why the law is weak.
 
 ## Consequences
 
