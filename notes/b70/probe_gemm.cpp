@@ -217,9 +217,10 @@ struct Launch
 
 // K = trellis bits per weight, MR = token rows per DPAS (repeat count), NF = DPAS per byte-block (1, or 2
 // for 9-16 rows). One ESIMD thread = one (column tile, k-slice, expert) - one expert per thread (D4).
-template <int K, int MR, int NF, int Band>
+template <int K, int MR, int NF, int Band, int SL>
 static void submit(const Launch &L)
 {
+    constexpr int RPADT_C = MR * NF * SL;    // PART's rows dimension (RPAD = MR*NF, set below)
     constexpr int NW = 8 * K;                 // dwords per trellis tile
     constexpr int XW = NW + 16;               // ring slot: [8 unused][row -1][rows 0..K-1], tile GRF-aligned
     constexpr int RPAD = MR * NF;             // padded token rows
@@ -241,7 +242,7 @@ static void submit(const Launch &L)
     const int per_sg = tps / 2;               // tiles per thread and expert (main() enforces even halves)
     const int NEG = E;                        // one expert per thread (D4): the grid is (tile, k-slice, expert)
     const int TN = tn + L.tn2;                // fused grid spans both projections' column tiles
-    const size_t threads = (size_t)TN * KS * 2 * NEG * (size_t)L.NSLAB;
+    const size_t threads = (size_t)TN * KS * 2 * NEG * (size_t)SL;
     const uint32_t *W = L.W;
     const uint32_t *W2 = L.W2;          // E25a second projection (null when not fused)
     const uint32_t *XA = L.XA;
@@ -262,10 +263,13 @@ static void submit(const Launch &L)
         {
             const int gid = (int)it.get_global_id(0);
             // Slab index FASTEST-varying: items that differ only in row-slab are adjacent, hence co-resident.
-            // That adjacency is the entire mechanism under test, so it must be visible in the id math (and in
-            // the grid order the hardware walks), not assumed from a comment.
-            const int slab = L.NSLAB > 1 ? gid % L.NSLAB : 0;
-            const int g0 = L.NSLAB > 1 ? gid / L.NSLAB : gid;
+            // SL is a TEMPLATE parameter (the user's point, and it is the same lesson as the band as a
+            // template parameter and KS as a template parameter): as a runtime field this decomposition cost a
+            // 64-bit division and multiplication per item on the hot path of every launch, including variant A
+            // where the answer is always zero. With SL=1 the whole thing folds away at compile time.
+            int g0 = gid;
+            int slab = 0;
+            if constexpr (SL > 1) { slab = gid % SL; g0 = gid / SL; }
             const int sub = g0 & 1;
             int rest = g0 >> 1;
             const int ntx = rest % TN; rest /= TN;
@@ -375,7 +379,7 @@ static void submit(const Launch &L)
             auto store_part = [&](int e) SYCL_ESIMD_FUNCTION
             {
                 constexpr esimd::properties props{esimd::alignment<16>};
-                int32_t *P = Ps + ((((size_t)ks * 2 + sub) * E + e) * (size_t)(L.RPADT ? L.RPADT : RPAD)
+                int32_t *P = Ps + ((((size_t)ks * 2 + sub) * E + e) * (size_t)RPADT_C
                                    + (size_t)(L.prow + slab * RPAD)) * (size_t)n + (size_t)nt * NCOL;
 #pragma unroll
                 for (int f = 0; f < NF; ++f)
@@ -434,24 +438,24 @@ static void submit(const Launch &L)
     });
 }
 
-template <int K, int Band>
+template <int K, int Band, int SL>
 static void submit_kb(int mr, int nf, const Launch &L)
 {
-    if (nf == 2) { submit<K, 8, 2, Band>(L); return; }   // 9-16 rows: two M=8 fragments
+    if (nf == 2) { submit<K, 8, 2, Band, SL>(L); return; }   // 9-16 rows: two M=8 fragments
     switch (mr)
     {
-    case 1: submit<K, 1, 1, Band>(L); break;
-    case 2: submit<K, 2, 1, Band>(L); break;
-    case 4: submit<K, 4, 1, Band>(L); break;
-    default: submit<K, 8, 1, Band>(L); break;
+    case 1: submit<K, 1, 1, Band, SL>(L); break;
+    case 2: submit<K, 2, 1, Band, SL>(L); break;
+    case 4: submit<K, 4, 1, Band, SL>(L); break;
+    default: submit<K, 8, 1, Band, SL>(L); break;
     }
 }
 
 // The staged forms this device will actually be handed: none, AVX2's group 2, the AVX-512 tiers' group 8.
-template <int K, int... B>
+template <int K, int SL, int... B>
 static void dispatch_band(int band, int mr, int nf, const Launch &L, std::integer_sequence<int, B...>)
 {
-    const bool hit = ((band == B ? (submit_kb<K, B>(mr, nf, L), true) : false) || ...);
+    const bool hit = ((band == B ? (submit_kb<K, B, SL>(mr, nf, L), true) : false) || ...);
     if (!hit)
     {
         fprintf(stderr, "no kernel for band %d (specialized: %s)\n", band, "0, 2, 8");
@@ -459,11 +463,11 @@ static void dispatch_band(int band, int mr, int nf, const Launch &L, std::intege
     }
 }
 
-template <int... I>
+template <int SL, int... I>
 static void dispatch_k(int K, int mr, int nf, const Launch &L, std::integer_sequence<int, I...>)
 {
     const bool hit = ((K == K_MIN + I
-        ? (dispatch_band<K_MIN + I>(L.band, mr, nf, L, std::integer_sequence<int, 0, 2, 8>{}), true)
+        ? (dispatch_band<K_MIN + I, SL>(L.band, mr, nf, L, std::integer_sequence<int, 0, 2, 8>{}), true)
         : false) || ...);
     if (!hit) { fprintf(stderr, "no kernel for K %d\n", K); exit(2); }
 }
@@ -634,7 +638,10 @@ int main(int argc, char **argv)
     const int MR = RLAUNCH <= 1 ? 1 : RLAUNCH <= 2 ? 2 : RLAUNCH <= 4 ? 4 : 8;
     const int NF = RLAUNCH <= 8 ? 1 : 2;
     const int RPAD = MR * NF;
-    const int NSLAB = (m.R + RPAD - 1) / RPAD;      // 16-row slabs needed to cover the chunk's rows
+    int NSLAB = (m.R + RPAD - 1) / RPAD;      // 16-row slabs needed to cover the chunk's rows,
+    if (NSLAB > 4) NSLAB = 8; else if (NSLAB > 2) NSLAB = 4; else if (NSLAB > 1) NSLAB = 2;
+    // rounded up to an INSTANTIATED value, because SL is a template parameter: the extra slabs compute rows
+    // beyond the chunk from x8's clamped last row, which costs a little work and changes no valid output.
     const int RPADT = NSLAB * RPAD;                 // PART's rows dimension
     const char *mode_env = getenv("GEMM_MODE");
     const int VARIANT_B = !(mode_env && strcmp(mode_env, "A") == 0);   // default B (concurrent slabs)
@@ -776,19 +783,28 @@ int main(int argc, char **argv)
 
     // gemm + a SEPARATE combine kernel. Fusing the combine with per-expert atomics was measured 4.5x more
     // expensive than the partial round trip it removes (D2), so the two-launch structure is the main path.
+    // SL is chosen here, once, from the launch geometry the admit path already knows - never inside the kernel.
+#define RUN_K(SLV) dispatch_k<SLV>(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{})
     auto gemm = [&]
     {
         if (VARIANT_B)
         {
             L.xa_off = 0; L.prow = 0;
-            dispatch_k(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
+            switch (NSLAB)
+            {
+            case 1:  RUN_K(1); break;
+            case 2:  RUN_K(2); break;
+            case 4:  RUN_K(4); break;
+            case 8:  RUN_K(8); break;
+            default: fprintf(stderr, "NSLAB %d not instantiated (need 1/2/4/8)\n", NSLAB); return;
+            }
         }
         else
             for (int sb = 0; sb < NSLAB; ++sb)      // buckets at DIFFERENT times: E29's additive-law shape
             {
                 L.xa_off = (size_t)sb * (xab / 4);   // dwords
                 L.prow = sb * RPAD;
-                dispatch_k(K, MR, NF, L, std::make_integer_sequence<int, K_MAX - K_MIN + 1>{});
+                RUN_K(1);                            // one slab per launch, SL=1 compiled in
             }
     };
     auto combines = [&]

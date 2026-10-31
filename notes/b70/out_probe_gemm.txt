@@ -17,6 +17,66 @@ rather than a bug), E=16, tn=40, k=4096, layer 12, KS=1, WARM_S=0.5, 800 reps.
     32     2        47.7 us             54.8 us            1.15x     49.4   <- B is WORSE than buckets
     64     4        94.6 us             90.6 us            0.96x     98.8   <- B within noise of additive
 
+## Follow-up, because the 1.15x demanded a mechanism (and my first story was wrong)
+
+The ISA question settled first, by construction rather than by hope: both arms execute the SAME compiled
+instance (`submit<2,8,2,0>` - same source, same template args, the arms differ only in the runtime values
+NSLAB / xa_off / prow), so codegen difference is excluded outright and the `%`-id-math caveat in my earlier
+version is void. That forced a runtime explanation, so I measured one that separates *bytes* from *items*: run
+E=32 at rows=16 (2560 items, every item a distinct expert, so ZERO re-use and 2x the distinct bytes) against
+E=16 at rows=32 (2560 items, half the bytes, shared by slab pairs).
+
+   case          items total   A us      B us     B/A     distinct weight bytes
+   E=8  R=32        1280       38.7      24.3     0.63x   3.3 MiB shared by 2 slabs
+   E=16 R=16        1280       24.5      24.5     1.00x   6.6 MiB, no sharing
+   E=16 R=32        2560       47.6      54.5     1.15x   6.6 MiB shared by 2 slabs
+   E=32 R=16        2560       53.5      53.8     1.01x   13.2 MiB, no sharing
+   E=16 R=64        5120       94.6      91.4     0.97x   6.6 MiB shared by 4 slabs
+
+THREE CONCLUSIONS, all of them replacing what I wrote before
+1. **This kernel is not memory-bound at these sizes.** E=32/R=16 and E=16/R=32 have identical item counts and
+   2x different weight volumes, and differ by 1.3 % (53.5 vs 54.5 us, both arms). So the `ceil(rows/16)` traffic
+   amplification is NOT costing bytes here - which means my "re-use needs lockstep" story was answering the
+   wrong question, and I retract it. It also means the traffic budget in b70-prefill.md 3 is a prediction about
+   a regime (large R, many experts resident) that this probe does not reach, not a measured prefill cost.
+2. **The A/B difference is device fill, not memory.** A's buckets are separate launches, so each pays the
+   tile-walk critical path again; when a launch under-fills the device that latency is exposed. At E=8, one
+   640-item launch takes about as long as a 1280-item one (E=16/R=16 = 24.5 us ~ E=8/R=32-B = 24.3 us), so
+   A's two launches cost 38.7 us while B's single 1280-item launch costs 24.3 - **B is 1.59x FASTER**. At
+   E=16 the buckets already fill the machine (1280 of 2048 slots), so B has nothing to gain, and at 2560 items
+   it crosses the capacity edge (1.25 waves) and pays 15 % for the tail wave.
+3. **Therefore the rule is a FILL rule, not a traffic rule - and it is D8's logic applied to row slabs.**
+   Co-schedule slabs as a grid axis when one bucket alone cannot fill the device, i.e. when
+   `TN * KS * 2 * E < ~2048` (at tn=40, KS=1: E <= 12); keep separate bucketed launches above that. The
+   measured crossover is between E=8 (0.63x, big win) and E=16 (1.15x, small loss), with E=16/R=64 back at
+   0.97x - consistent with the capacity-edge explanation and NOT with any monotone traffic law.
+   This is the regime where the engine actually lives at small E: verify/MTP batches and cold-expert tails sit
+   at low experts-per-launch, exactly where B wins 1.6x. Prefill's hot experts (E >> 12) should stay on A.
+
+SL AS A COMPILE-TIME PARAMETER (the user's suggestion) — adopted, and it changes nothing here, for a reason
+worth recording. `SL` is now a template argument threaded through submit/submit_kb/dispatch_band/dispatch_k,
+so `gid % SL` folds to a shift and vanishes entirely at SL=1; NSLAB rounds up to an instantiated 1/2/4/8.
+Fresh binary (verified by timestamp and by the mangled name gaining the extra `Li1E`/`Li2E` argument),
+WARM_S=1, 1500 reps, same four cases as above:
+       case        runtime-SL B/A     compile-time-SL B/A
+     E=8  R=32         0.63x              0.61x
+     E=16 R=32         1.15x              1.11x
+     E=32 R=16         1.01x              1.02x
+     E=16 R=64         0.97x              0.93x
+So the band-style win did not replicate, and the distinction is *where the value is consumed*: the band divisor
+lived inside the per-dword inner loop (1.19x when runtime), while the slab decomposition executes once per item,
+amortized over a ~128-tile walk. Template-parameterize anything the admit path knows — but expect payoffs only
+on the path where it is actually read. NOTE ON METHOD: my first post-change sweep printed numbers from a STALE
+binary (the background build had not finished; source 06:40, binary 06:18) and looked identical to the old
+result, which would have been recorded as "no effect" for the wrong reason. Caught by checking the mangled
+kernel name for the new template argument, not by looking at the timings. Build in the foreground, check rc.
+
+Still owed before this is a shipping rule: the fill crossover is located between E=8 and E=16, not measured
+(E = 10/12/14 with rows 32/64); KS=1 only, and KS changes items-per-launch so the rule must be evaluated on
+items, not on E; no large-R point where weight volume could actually exceed what 2560 items can hide (this
+probe's whole set fits in L2, which is conclusion 1's scope limit); and the tail-wave penalty's size at
+exactly 1.0/1.5/2.0 waves is inference from three points, not a sweep.
+
 WHAT IT ESTABLISHES
 1. **The control holds, so the numbers mean something.** A at rows=16 equals B at NSLAB=1 within 3 %, and A
    scales additively: 24.7 -> 47.7 -> 94.6 us for 1 -> 2 -> 4 slabs (predicted 24.7 / 49.4 / 98.8; measured
@@ -33,14 +93,9 @@ WHAT IT ESTABLISHES
    by weight traffic after all — which is the opposite of the optimism that re-scoped prefill into scope, and
    needs to be reflected there before any prefill build decision.
 
-MECHANISM, as far as the evidence goes (stated as inference, not measurement): the duplicate reads are NOT
-absorbed even when adjacent. The likely reason is that this kernel's items stream the whole trellis tile
-sequentially (rev L's prefetch ring, `PF_DIST` tiles deep), so at any instant two adjacent items are dozens of
-dwords apart in the tile and their footprints do not coincide in time — unlike `probe_slm`'s lockstep loop,
-where 32 items addressed the identical dword in the same instruction. So the precondition for re-use is not
-"co-resident" but "in lockstep on the same address", which a software-pipelined streaming kernel does not
-provide for free. Testing that distinction (a slab variant with a shared, explicitly synchronized tile index)
-is the next experiment if prefill stays in scope.
+MECHANISM: see the follow-up section above - device fill, not memory. The earlier "re-use needs lockstep"
+inference is RETRACTED; it was a story about the prefetch ring that the E=32-vs-E=16 volume test falsifies in
+one comparison.
 
 NOT YET DONE (all cleared for the correctness claim; still open for the mechanism claim)
   * **Bit-exactness: VERIFIED, both arms, rows=64.** Comparing the probe's dumped `y_dev_ks1_r64.bin` against
