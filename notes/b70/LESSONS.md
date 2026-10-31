@@ -1335,6 +1335,23 @@ nothing that is the sole instance of a measurement.
     and make a mismatched/absent oracle print `check: FAILED ...` rather than nothing — rev L prints no check
     line at rows>16, which is the same silence that nearly validated a stale binary last session.
 
+74. **The sign of a scheduling comparison is a function of E. Measuring it at the convenient size can report the
+    exact opposite of the truth.** Slab co-scheduling lost at E=16 — B/A = 0.97x / 1.15x / 1.02x at 1/2/4 slabs,
+    bit-exact, protocol-clean — and I wrote "co-scheduling does not buy re-use" as a general statement. At E=512
+    (251 MiB of weights per projection, 10.5x L2) the same two arms measure **1.05x / 0.91x / 0.85x**: it wins
+    9-16 %, and the win grows with slab count. Nothing about the mechanism changed; what changed is which
+    constraint binds. At E=16 both arms sit near the 2048-slot capacity, so B's extra wave costs more than the
+    re-use saves; at E=512 both arms are deep in many-wave territory, capacity is irrelevant, and the only
+    surviving difference is fetching 251 MiB four times sequentially versus concurrently.
+    Two rules extracted. (1) A "does X help" probe must run at the operating point's *resource occupancy*, not
+    merely its shape: E, and hence items-per-launch, moves this family between two regimes, and any conclusion
+    drawn in one is void in the other — the same reason D8 takes the fusion decision on grid fill rather than on
+    model identity. (2) When a negative result is cheap to scale, scaling it is a better use of an hour than
+    adding a variant: the E=16 conclusion had already propagated into three documents before the E=512 run
+    reversed it, and the correction cost less than the original sweep. Corollary for reporting: qualify
+    scale-dependent negatives in the headline, not just in the caveats — "at E=16" belongs where a reader will
+    hit it, because "co-scheduling does not buy re-use" was defensible and wrong in the same breath.
+
 63. **Recompute the statistic per unit; never collapse the distribution first.** The planners took `counts_for()`
     = *layer 0's* expert-selection array and treated it as "the routing distribution" for every batch-scaling
     number. A live trace showed how bad that proxy was (layer 0 of Qwen3.8@2.68 touched 289 of 512 experts in

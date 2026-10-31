@@ -1,0 +1,98 @@
+Prefill at realistic chunk sizes (1024 / 2048 / 4096 tokens), all four mechanisms, against the shipped kernel
+=============================================================================================================
+The question this answers: at the chunk sizes a real prefill pass actually uses, what does the B70's MoE expert
+leg cost, and which of the mechanisms tried today is fastest? Everything below is MEASURED on the card in one
+window (WARM_S=3 continuous executed work, min-of-N, anchor restored to **19.1 us** — `DPAS_X=1 ./probe_dpas6
+/tmp/gemv_dpE10 6000 1 2`, in the 19.0-19.4 protocol window; the anchor case dir had been lost with /tmp and was
+regenerated, so for the first time today the whole series is anchored).
+
+SHAPE. Qwen3.8@2.05 (K=2, integer K as the ring requires), E=512, gate/up k=4096 n=640 tn=40, down_proj
+measured separately (not scaled), 48 MoE layers, topk 10, layer 12 geometry. Weights per projection at E=512 =
+**251 MiB = 10.5x the 24 MiB L2** — the first series in this chapter where the working set genuinely exceeds
+the cache, which is the regime the earlier E<=32 results could not speak to.
+
+## 1. The four mechanisms at one point in shape space (E=512, KS=1, us per launch of ALL experts)
+
+                rows/expert=16        32              64          scaling 16->64
+  rev L (gate)      791.6              —               —         (rows<=16 cap; this is the shipped kernel)
+  bucket A          788.4           1580.6          3198.4       4.06x  (exactly additive)
+  slab co-sched B   827.0           1444.6          2701.8       3.43x  (sub-additive)
+  rows-deep xmx     810.9           2457.3          8538.9      10.53x  (disqualified)
+  down, bucket A   1335.2              —           5362.9        4.02x
+  down, slab B     1333.4              —           4883.3        3.66x
+
+FINDINGS, each with its control:
+1. **Variant A IS the shipped kernel.** probe_gemm's bucket path measures 788.4 us against rev L's own 791.6 us
+   on identical work — 0.4 % apart. So the A/B comparison below is a comparison against the fastest DPAS kernel
+   in the tree, not against a weakened stand-in. (Down: A 1335.2 vs B 1333.4 at 1 slab, i.e. the two paths agree
+   to 0.1 % when there is nothing to schedule, which is the sanity check that the 5 % gate gap at rows=16 was
+   noise.)
+2. **Co-scheduled slabs beat sequential buckets once the weights exceed L2, by 9-16 %.** B/A = 1.05 / 0.91 /
+   0.85 at 1 / 2 / 4 slabs on gate, and 1.00 / — / 0.91 on down. This is the SIGN FLIP from the E=16 series
+   (where B lost 15 % at 2 slabs): at E=16 both arms were near the 2048-slot capacity so B paid for crossing it,
+   while at E=512 both arms are deep in many-wave territory and the only surviving difference is that A fetches
+   the same 251 MiB four times in sequence and B fetches it four times concurrently. **The traffic law is
+   therefore real and softening it is worth ~8-15 %, but only at scale** — measured at E=64 too (B/A = 0.82 at
+   rows=64, 25 MiB = 1.05x L2, the crossover region).
+3. **Rows-deep stays disqualified at every scale tested, and gets worse with scale**: at E=512 it is **2.67x
+   worse** than bucket A at rows=64 (8538.9 vs 3198.4 us), having been 2.01x worse at E=16, and it scales 10.53x
+   for 4x the rows. Note it does *tie* the shipped kernel where the register law is not yet binding — rows=16:
+   810.9 vs rev L's 791.6 us, 2.4 % apart — which is what makes the divergence at rows>=32 a register story and
+   not a general quality defect. Mechanism from the ISA is unchanged (`.spill size` 3392 B streamed at NF=8) but
+   its cost *multiplies with the tile loop*, so it worsens as E grows: the spill is per-item-per-tile, and E=512
+   runs 8x the tiles of E=16. An E=16-only measurement understated the penalty by ~4x — the reason this series
+   exists.
+4. **Fusion is not a lever at prefill scale** (as the fill rule predicted, now measured at E=512): rev L fused
+   gate+up = 1621.7 us vs 2 separate launches = 1583.2 us, i.e. fused is 2.4 % WORSE. At decode's small E the
+   fused schedule won because it filled idle slots; with 20480 items per launch there are no idle slots, so only
+   its register cost remains. `best_launch` has no measured rung past E=96, so this point extends the fusion
+   table's valid range downward in benefit, not upward.
+
+## 2. Integrated over live routing: the expert leg per prefill chunk
+
+Bucket counts come from the live per-layer profiles (`profiles/live/live_205.json`), cost per bucket from the
+measurements above (gate/up 1.546 us, down 2.608 us per expert-16-row-bucket at E=512). **Expert leg only** —
+attention, dense MLP, hyper-connections, norms and the 3090->B70 activation transfer are NOT in these numbers.
+
+     R      touched/layer   rows/exp mean   max    buckets/layer   ms/chunk (48L)   tok/s
+  1024          208            51.1         513        770.8         210.9          4856
+  2048          208           102.2        1026       1396.5         382.1          5360
+  4096          208           204.4        2052       2683.1         734.1          5580
+
+Weight-traffic amplification implied by the bucket counts: **3.71x / 6.72x / 12.90x** over one read per touched
+expert, at R = 1024 / 2048 / 4096. That matches b70-prefill.md §3's analytic 2.24 / 7.01 / 26.29 closely at
+R=2048 and is lower at R=4096 because the live trace's support caps the tail (see caveats).
+
+THE CROSS-CHECK THAT MAKES ME TRUST THE CHAIN: b70-prefill.md §3 predicted, purely from bytes, that reading
+weights once would give 36.6k tok/s at R=2048 and that the 16-row bucket law would cost it ⌈rows/16⌉ times. The
+measured amplification at R=2048 is 6.72x, and 36.6k / 6.72 = **5.45k tok/s** against the 5.36k measured here —
+1.6 % apart. Byte model, probe measurement and routing integration agree.
+
+SCALE-INVARIANCE WORTH KNOWING: buckets/layer ~= R*topk/16 + O(touched/2), i.e. dominated by total picks and
+nearly independent of how the picks spread. At R=4096 that law says 2560 (measured 2683, the excess being
+16-row rounding). So the expert leg's cost is LINEAR in R with slope (topk/16) x 5.70 us per token-layer
+(= 3.7 us/token/layer measured), which means the tok/s figure is essentially flat above R~1024 — prefill on the
+B70 does not get much better by batching harder, it gets better only if the amplification drops.
+
+## 3. WHAT THIS DOES AND DOES NOT SAY
+
+  * **Against today's stack**: measured parent prefill is 655 tok/s (2.05) / 479 tok/s (2.68) for the WHOLE
+    step (`run_prefill_baseline.sh`). The B70 expert leg alone would run 2048 tokens in 382 ms -> 5360 tok/s of
+    expert work. So the expert leg is not the obstacle and B70 prefill is worth ~8x — **but that comparison is
+    asymmetric**: 655 tok/s includes attention/dense/transfer, and the non-expert part of a prefill step has
+    never been measured (owed: `bench_engine_step.py` at prefill sizes). If the parent's non-expert prefill cost
+    is ~1 ms/layer, end-to-end lands near 1.5-2k tok/s, not 5.4k. This is the single number needed to turn the
+    table above into a plan statement.
+  * Support caveat: "touched/layer = 208" is capped by the 192-token live trace, so at R=4096 real touched is
+    closer to 450-512 and the max rows/expert (2052) understates the hot tail. Effect on the table is small
+    (bucket totals are pick-dominated) and on the amplification figure it is favourable to the current numbers.
+  * Not measured: rows/expert beyond 64 per single launch (probes cap at 64 rows, engine buckets beyond),
+    KS at large E (20480 items make split-K pointless for fill; assumed, not shown), attention/dense/transfer,
+    GLM at any of this (its 2.53 GiB/layer cannot be resident, so prefill there is a residency question first),
+    and anything at bf16/fp8 accumulation.
+  * The upside that got away, quantified: if registers allowed one read per chunk, R=2048 would be ~36.6k tok/s
+    instead of 5.4k. Six times the prefill throughput is sitting behind the 128-GRF accumulator bound, and the
+    two ways around it that this tree can see (rows-deep items; SLM-staged A) both measured worse. A third
+    possibility, untested, is a narrower unpack pipeline that frees the ~25 GRF of temporaries so rows=32 fits
+    spill-free — that is an ALU-structure change, not a scheduling one, and it is the only remaining route to
+    the 6x.

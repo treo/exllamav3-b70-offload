@@ -34,6 +34,13 @@ E=16 at rows=32 (2560 items, half the bytes, shared by slab pairs).
    E=16 R=64        5120       94.6      91.4     0.97x   6.6 MiB shared by 4 slabs
 
 THREE CONCLUSIONS, all of them replacing what I wrote before
+
+> **SCALE WARNING, added after `out_prefill_scale.txt`.** Everything in this file was measured at E<=32, where
+> the 2048-slot capacity constraint dominates. At **E=512 (251 MiB of weights per projection, 10.5x L2) the
+> sign of the headline comparison reverses**: B/A = 1.05x / **0.91x / 0.85x** at 1/2/4 slabs on gate and
+> 1.00x / — / **0.91x** on down, i.e. co-scheduling is worth 9-16 % at prefill's operating scale. Conclusion 2
+> below ("co-scheduling does not buy re-use") is therefore true **at E=16 only** and must not be quoted as
+> general; LESSONS 74 records how the same two arms produce opposite answers in different occupancy regimes.
 1. **This kernel is not memory-bound at these sizes.** E=32/R=16 and E=16/R=32 have identical item counts and
    2x different weight volumes, and differ by 1.3 % (53.5 vs 54.5 us, both arms). So the `ceil(rows/16)` traffic
    amplification is NOT costing bytes here - which means my "re-use needs lockstep" story was answering the

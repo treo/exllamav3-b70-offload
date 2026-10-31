@@ -77,6 +77,22 @@ rows per launch, and everything larger is row-bucketing, which E29 measured as *
    its rows/expert at R=2048 is ~2048×8/288 ≈ 57 mean, ≈ 4 buckets today. GLM has no live trace, so unlike
    Qwen3.8 its hot-tail share (§2's 94%-of-picks number) is unmeasured, not small.
 
+**3a. MEASURED AT REAL CHUNK SIZES** (`out_prefill_scale.txt`; E=512 so weights per projection = 251 MiB =
+10.5× L2, WARM_S=3, anchor 19.1 µs, down_proj measured rather than scaled, expert leg only):
+
+       R      buckets/layer   ms/chunk (48 layers)   tok/s (expert leg)   traffic amplification
+    1024         770.8             210.9                   4856                3.71x
+    2048        1396.5             382.1                   5360                6.72x
+    4096        2683.1             734.1                   5580               12.90x
+
+The byte model and the measurement agree: §3's one-read roofline of 36.6k tok/s divided by the measured 6.72×
+amplification gives 5.45k against 5.36k measured at R=2048 (1.6 %). Cost is **linear in R** — buckets ≈
+R·topk/16 — so larger chunks do not help much; only lowering the amplification does, and the two mechanisms that
+could (rows-deep items, SLM staging) both measured worse, leaving **co-scheduled slabs at 9–16 %** as the only
+demonstrated softening. Against the parent's measured 655 tok/s (whole step), the B70's expert leg alone is
+~8×, but the honest end-to-end number needs the parent's non-expert prefill cost, which has never been
+measured (§5's owed item 1 is now the blocking one).
+
 4. THE DESIGN THAT AVOIDS THE SPILL — SUPERSEDED BELOW by `probe_slm` measurements; read §4a as the design
    Register pressure is what caps M at 16, so do not raise M per thread. Keep **an expert's B tile resident in
    SLM and loop its row-slabs inside the kernel**: each work-item still computes a 16-row slab (the shape that

@@ -589,6 +589,18 @@ B/A = 0.97x / 1.15x / 1.02x at 1 / 2 / 4 slabs under the 3 s warm-up protocol (a
 0.96x in co-scheduling's favour — that flip is why the protocol matters), and A tracks the additive law to
 3.5 % (24.7 -> 47.7 -> 94.6 µs for NSLAB 1/2/4). So the `ceil(rows/16)` law is a real cost of this kernel
 family, not an artifact of temporal separation.
+
+**SCALE CORRECTION — that E=16 verdict was local, and the sign reverses where prefill actually lives
+(`notes/b70/out_prefill_scale.txt`).** At E=512 (251 MiB of weights per projection = 10.5× L2) the same two arms
+measure B/A = 1.05x / **0.91x / 0.85x** at 1 / 2 / 4 slabs on gate, and 1.00x / — / **0.91x** on down: co-
+scheduling is worth **9–16 % at prefill scale**, having looked 15 % harmful at E=16 where both arms sit near the
+2048-slot capacity and B paid for crossing it. Validation that the comparison is honest: variant A measures
+788.4 µs against **rev L's own 791.6 µs** on identical work (0.4 %), so “A” is the shipped kernel, and A/B agree
+to 0.1 % when there is one slab to schedule. Cross-check with the byte model: measured amplification 6.72× at
+R=2048 against §3's prediction, giving 36.6k/6.72 = 5.45k tok/s predicted vs **5.36k measured**, 1.6 % apart.
+Rule that survives both series: **the sign of a schedule comparison at small E is not the sign at operating E**
+— fill-bound at E≤32, traffic-softening at E≥64 — so the dispatch decision for row slabs must be taken at the
+experts-per-launch the launch will actually have, exactly as D8 already requires for fusion.
 The fill law that experiment *did* establish: at E=8, where one bucket under-fills the device, co-scheduling
 is **1.59× faster** (24.3 vs 38.5 µs) — one launch of 1280 items beats two of 640 — while at E=16 the buckets
 already fill 1280/2048 slots, so there is nothing left to gain and crossing capacity costs the tail wave. That
@@ -611,7 +623,9 @@ fragment removes the NF=4 spill and costs **29 %** (DPAS wants A in a register; 
 load→dpas), so the probe now selects on NF via `if constexpr` — mild spill beats serialised operands, and only
 past ~4 KB does streaming win back.
 
-**Consequence: keep 16-row launches + split-K-for-fill above 16 rows, in prefill as in decode.** The byte
+**Consequence: keep 16-row launches + split-K-for-fill above 16 rows, in prefill as in decode — and above
+roughly E=64 per launch, issue those 16-row buckets as co-resident slabs of one launch rather than as sequential
+launches (9–16 % at E=512, nothing at E≤32).** The byte
 amplification is real arithmetic but buys nothing measurable, because bytes are not the binding resource at
 these shapes; `b70-prefill.md` §3's traffic table should be read as a capacity/energy statement, not a time
 statement. Where this could invert: if weights per launch greatly exceed L2 (prefill's real resident footprint
