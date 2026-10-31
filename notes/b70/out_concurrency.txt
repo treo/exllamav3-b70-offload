@@ -31,49 +31,49 @@ Qwen3.8 2.68 bpw: eb 1.563 MiB, h 100.0 %, parent bill (h 100.0% per-layer; a mi
     256   189.4     1721     1262        0 parent^    82.59    3100   29.1x      13.5
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 2, 4, 8, 16, 32, 64, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
-   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (n/a us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 820.9 us/layer = 25.4 tok/s with -mcs 448
+   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (190.8 us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 820.9 us/layer = 25.4 tok/s with -mcs 448
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 259 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.12x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 4.05 bpw: eb 2.411 MiB, h 100.0 %, parent bill (h 100.0% per-layer; a mixture-based estimate would read 94.7%, and that deficit is the pessimism this avoids) 86 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 146 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1     9.3      259       39        0 parent=    12.44      80    1.0x       1.1
-      2    17.2      267       63        0 parent=    12.82     156    1.9x       1.2
-      4    30.3      283      113        0 parent=    13.58     295    3.7x       1.3
-      8    49.9      315      207        0 parent=    15.10     530    6.6x       1.6
-     16    75.7      378      344        0 parent=    18.15     882   11.0x       2.1
-     32   106.0      505      482        0 parent=    24.23    1320   16.4x       3.0
-     64   137.8      758      743        0 parent=    36.41    1758   21.9x       4.6
-    128   166.9     1266      900        0 parent=    60.75    2107   26.2x       7.7
-    256   189.1     2280     1286        0 parent=   109.45    2339   29.1x      13.5
+      1     9.3      191       39        0  parent     9.16     109    1.0x       1.1
+      2    17.2      197       63        0 parent^     9.44     212    1.9x       1.2
+      4    30.3      208      113        0 parent^    10.00     400    3.7x       1.3
+      8    49.9      232      207        0 parent^    11.12     720    6.6x       1.6
+     16    75.7      278      344        0   B70:J    16.52     968    8.9x       2.1
+     32   106.0      372      482        0   B70:J    23.14    1383   12.7x       3.0
+     64   137.8      558      743        0   B70:J    35.68    1794   16.4x       4.6
+    128   166.9      932      900        0 parent^    44.72    2862   26.2x       7.7
+    256   189.1     1679     1286        0 parent^    80.57    3177   29.1x      13.5
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 2, 4, 8, 16, 32, 64, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
-   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (n/a us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 962.1 us/layer = 21.7 tok/s with -mcs 448
+   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (207.3 us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 962.1 us/layer = 21.7 tok/s with -mcs 448
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 260 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.13x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 5.05 bpw: eb 3.009 MiB, h 100.0 %, parent bill (h 100.0% per-layer; a mixture-based estimate would read 83.6%, and that deficit is the pessimism this avoids) 94 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 138 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1     9.3      260       39        0 parent=    12.48      80    1.0x       1.1
-      2    17.2      268       63        0 parent=    12.86     156    1.9x       1.2
-      4    30.2      284      113        0 parent=    13.62     294    3.7x       1.3
-      8    49.6      315      206        0 parent=    15.14     528    6.6x       1.6
-     16    75.1      379      342        0 parent=    18.18     880   11.0x       2.1
-     32   105.2      506      479        0 parent=    24.27    1319   16.5x       3.0
-     64   136.7      759      738        0 parent=    36.44    1756   21.9x       4.7
-    128   165.5     1266      893        0 parent=    60.79    2106   26.3x       7.7
-    256   187.6     2281     1277        0 parent=   109.48    2338   29.2x      13.6
+      1     9.3      207       39        0  parent     9.95     100    1.0x       1.1
+      2    17.2      214       63        0 parent^    10.25     195    1.9x       1.2
+      4    30.2      226      113        0 parent^    10.86     368    3.7x       1.3
+      8    49.6      252      206        0 parent^    12.07     663    6.6x       1.6
+     16    75.1      302      342        0   B70:J    16.43     974    9.7x       2.1
+     32   105.2      403      479        0   B70:J    22.98    1393   13.9x       3.0
+     64   136.7      606      738        0   B70:J    35.41    1807   18.0x       4.7
+    128   165.5     1010      893        0 parent^    48.48    2640   26.3x       7.7
+    256   187.6     1819     1277        0 parent^    87.32    2932   29.2x      13.6
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 2, 4, 8, 16, 32, 64, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
-   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (n/a us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 1109.6 us/layer = 18.8 tok/s with -mcs 448
+   PARENT MODEL = engine: level measured inside the engine at b=1/ctx 4096 (207.5 us/layer of parent device work, out_engine_step.txt); scaled by the calibrated curve's shape elsewhere (^). Today's shipping path (3090 + CPU split, real text, converged) measured 1109.6 us/layer = 18.8 tok/s with -mcs 448
 parent model cross-check at b=1/ctx=4096: this planner's non-expert figure 261 us vs the measured floor 122 us (out_parent_leg.txt) -> 2.14x. The gap is NOT a contradiction: the measured number is a FLOOR (attention + streamed weights + state traffic only), while `fixed` here was calibrated so the parent bill reproduces the inherited ~250 us window, so the difference is the overhead that window absorbs - sampler, lm_head, CUDA-graph and the rest of the network - which this bench does not model. Use the floor for 'what could offloading save' and the calibrated figure for 'what the box actually costs'. Streamed reads charged at 860 GB/s (measured), not the 936 spec figure.
 Qwen3.8 6.05 bpw: eb 3.608 MiB, h 100.0 %, parent bill (h 100.0% per-layer; a mixture-based estimate would read 74.3%, and that deficit is the pessimism this avoids) 101 MiB/layer weights + 4.5 state + 2.0 KV per sequence-layer; fixed overhead 129 us
    rows   union   parent      B70      CPU   binds  ms/step   tok/s  vs b=1  rows/exp
-      1     9.3      261       39        0 parent=    12.51      80    1.0x       1.1
-      2    17.2      269       63        0 parent=    12.89     155    1.9x       1.2
-      4    30.3      284      113        0 parent=    13.65     293    3.7x       1.3
-      8    49.6      316      206        1 parent=    15.17     527    6.6x       1.6
-     16    75.2      380      342        1 parent=    18.22     878   11.0x       2.1
-     32   105.3      506      479        1 parent=    24.30    1317   16.5x       3.0
-     64   136.8      760      739        2 parent=    36.48    1754   22.0x       4.7
-    128   165.6     1267      895        2 parent=    60.82    2104   26.3x       7.7
-    256   187.8     2282     1279        3 parent=   109.52    2338   29.2x      13.6
+      1     9.3      208       39        0  parent     9.96     100    1.0x       1.1
+      2    17.2      214       63        0 parent^    10.26     195    1.9x       1.2
+      4    30.3      226      113        0 parent^    10.87     368    3.7x       1.3
+      8    49.6      252      206        1 parent^    12.08     662    6.6x       1.6
+     16    75.2      302      342        1   B70:J    16.44     973    9.7x       2.1
+     32   105.3      403      479        1   B70:J    23.00    1391   13.9x       3.0
+     64   136.8      605      739        2   B70:J    35.46    1805   18.0x       4.7
+    128   165.6     1009      895        2 parent^    48.42    2644   26.3x       7.7
+    256   187.8     1816     1279        3 parent^    87.18    2936   29.2x      13.6
   B70 pricing: E25a fused gate+up (KS=1) applied at rows 1, 2, 4, 8, 16, 32, 64, 128, 256; elsewhere three separate projections. tiles_n=40 from plan_decode_cost.GATE_TILES_N (absent for a model means fusion was not evaluated there).
 
 Prefill: a chunk of R tokens touches many experts per layer, so the B70's byte cost per LAYER is

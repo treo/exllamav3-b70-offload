@@ -157,7 +157,12 @@ PARENT_FLOOR_US = {
 # (it had no term for hyper-connections and over-priced attention 3x) and the window-calibrated figure said 259
 # (it folds in stalls and per-token overheads the parent does not have to pay). See LESSONS 61 for why the two
 # differed at all, and out_engine_step.txt section 3 for the reconciliation.
-PARENT_ENGINE_US = {"2.05bpw": 141.9, "2.68bpw": 195.6}
+PARENT_ENGINE_US = {"2.05bpw": 141.9, "2.68bpw": 195.6,
+                    # added 2025-11 by notes/b70/run_parent_ladder.sh (out_engine_step.txt 10). Every value is
+                    # device-time minus the expert bucket at ctx 4096 / b=1 / -mct 15, and each was taken at the
+                    # SMALLEST -mcs that loads for that recipe (448 for the four largest), so the -mcs differs
+                    # between entries: that is a property of the shipping stack, not a free variable.
+                    "4.05bpw": 190.8, "4.18bpw": 207.9, "5.05bpw": 207.3, "6.05bpw": 207.5}
 PARENT_ENGINE_HEAD_US_PER_LAYER = 14.0    # Qwen3.5 control: generator 196.9 vs forward-only 182.6 us/layer
 
 

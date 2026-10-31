@@ -131,10 +131,12 @@ non-expert term, so the card has ~1.25 s of free shadow and the parent has none:
 (2.68: 37.5 GiB), and then the leftover belongs on its *hot* end, not spread evenly.
 
 Three things this arithmetic is **not**, stated because they are the parts that could move the numbers:
-  * † **GLM's `T_parent` (595 µs/layer) is an assumption, not a measurement** — the GLM parent leg is on the owed
-    list, and `rate_b = 132 GB/s` is a plan constant measured on decode-shaped GEMVs. The GLM rows are therefore
-    *illustrative*: they establish that a slow-card/fast-parent geometry flips the answer toward equality, not the
-    exact split.
+  * † **GLM's `T_parent` (595 µs/layer) is an assumption, not a measurement** — `rate_b = 132 GB/s` is a
+    decode-shaped constant, and the measurement attempt just failed twice for identified harness reasons
+    (`out_engine_step.txt` §9: `-mcs` cannot exceed 287 so VRAM cannot be shed far enough, and the CPU-arena
+    sizing then refuses at `-cs 4096`). D11 says charge the parent engine-measured or not at all, so **the GLM
+    rows in §5 are a direction, not a result** — and they are the rows where the answer flips to ~50/50, which
+    is precisely why the harness needs a GLM-specific arm before this table is used for a build decision.
   * The parent non-expert growth with rows (×1.15 / ×1.5 / ×1.95 at b=4/8/16) borrows the `PARENT_FLOOR_US`
     *shape* and applies it to the engine-measured b=1 *level*. The b>1 device-bucket split is a known open
     measurement, so the crossover batch (`rows ≈ 5-6` on 2.68, where splitting starts to pay) is ±one row.
