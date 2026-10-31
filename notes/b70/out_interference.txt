@@ -17,3 +17,26 @@ revL ks 4 rows 16 1-proj     layout native:    148.5 us    706.2 G-w/s   176.6 G
   pair 2 engine+card  :   model.forward, b=1:  16558.4 us/token  =  345.0 us/layer  (  60.4 tok/s of parent step time)
   pair 2 card-under-load: gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
 revL ks 4 rows 16 1-proj     layout native:    148.7 us    705.1 G-w/s   176.3 GB/s(trellis)   [single-launch   150.8 us]  [M 8x2, 40 tiles x 64 experts]
+  pair 3 engine-alone :   model.forward, b=1:  16284.0 us/token  =  339.2 us/layer  (  61.4 tok/s of parent step time)
+  pair 3 engine+card  :   model.forward, b=1:  16312.7 us/token  =  339.8 us/layer  (  61.3 tok/s of parent step time)
+  pair 3 card-under-load: gemm B (concurrent slabs, one launch): rows 16 = NSLAB 1 x 16 rows/launch, RPAD 16, PART rows 16, threads 320 x 64 x NSLAB
+revL ks 4 rows 16 1-proj     layout native:    148.6 us    705.6 G-w/s   176.4 GB/s(trellis)   [single-launch   151.4 us]  [M 8x2, 40 tiles x 64 experts]
+
+=== READOUT ==================================================================================
+Engine, Qwen3.8@2.05, ctx 4096, b=1, -mcs 256 -mct 15:
+    alone      61.2 / 63.5 / 61.4 tok/s      median 61.4
+    with card  63.0 / 60.4 / 61.3 tok/s      median 61.3     -> parent slowdown 0.2 %, i.e. NIL
+    (the spread BETWEEN the alone runs, 61.2-63.5 = 3.7 %, is larger than the effect being sought, which is
+     exactly why the single-run comparison produced "+30 %" the first time)
+Card, probe_gemm E=64 rows=16 ks=4 (one launch, 25.0 MiB trellis resident, 176 GB/s):
+    alone        148.0 / 149.0 / 148.6 us    median 148.6
+    under engine 148.5 / 148.7 / 148.6 us    median 148.6    -> 0.0 %, i.e. NIL
+Conclusion, stated with its scope: a saturated B70 doing device-local work neither slows the parent nor is slowed
+by it. This is the first measurement supporting the zero-interference assumption that the max(device terms)
+balance in D14/D18 has made all week - and the assumption is still UNTESTED where it is most likely to fail:
+the card moving activations over the link while the parent streams expert weights from host DRAM (measured
+42.6 GiB/s host read, 13.4 GiB/s pinned link, and `out_prefill_decomp.txt` shows copy already at 39 % of the
+prefill floor). That pairing contends for the host memory controller and the root complex; this experiment did
+not touch either. Until it is measured, "no interference" applies only to resident-weight, device-local work.
+Method note for future A/B work on this box: interleave, never block. Blocking A-then-B measures warm state.
+</content>

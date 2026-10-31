@@ -33,3 +33,18 @@ gemm B (concurrent slabs, one launch): rows 32 = NSLAB 2 x 16 rows/launch, RPAD 
 case /home/treo/.cache/b70cases/midE_e128_r32: E 128 R 32 k 2560 n 640 K 2  trellis 50.00 MiB  KS 2  layout native
 rev L: dpas 8 x 2 per byte-block (rows padded to 16), 1 expert/thread, 160 x 128 threads (2048 HW)
 revL ks 2 rows 32 1-proj     layout native:    439.2 us    477.5 G-w/s   119.4 GB/s(trellis)   [single-launch   437.2 us]  [M 8x2, 40 tiles x 128 experts]
+
+=== READOUT ==============================================================
+B/A (one-launch co-resident slabs vs sequential bucket launches), Qwen3.8@2.05 layer 12, ks=2:
+   E=128 rows=64   A 928.3 us   B 875.5 us   ->  B/A 0.943   (co-scheduling wins 6.0 pct)
+   E=256 rows=64   A 1826.9 us  B 1741.1 us  ->  B/A 0.953   (wins 4.9 pct)
+   E=128 rows=32   A 468.2 us   B 439.2 us   ->  B/A 0.938   (wins 6.6 pct)
+D17 MISSING RUNG, FILLED. Live routing at R=2048 puts ~124 eligible experts in one launch, which sat between
+the only two measured points (E=16: B loses, 0.97-1.15; E=512: B wins 9-16 pct). It now has a rung at the
+operating point: co-scheduling is worth 5-6 pct there, i.e. real but smaller than at E=512. Gain is
+monotone-ish in E (16: <1 no, 128: 0.94, 256: 0.95, 512: 0.85-0.91) and flat in rows (32 and 64 agree).
+The bracketing constant in slab_advice (2*E*bytes > 10x L2) can now be relaxed to about 4x L2: E=128 with
+0.38 MiB per projection is 96 MiB = 4.0x L2 and B already wins. Replace the constant with these rungs at
+the next planner touch (do not leave a made-up threshold in code once a measurement exists).
+Variant A also confirms the per-bucket primitive (D18): 928.3/128 = 7.25 and 1826.9/256 = 7.14 us per
+expert-projection bucket at K=2 rows=64 -- linear in experts to 1.5 pct, so cost is per bucket.

@@ -38,3 +38,4 @@ probe_gemm
 probe_xmx
 probe_mem
 logs/
+profiles/live/dwell_*.json

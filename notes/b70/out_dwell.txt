@@ -1,42 +1,127 @@
-== dwell_q205
-dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4  256 steps x 48 layers  window 32 tokens  k=[8, 32, 64, 84, 128, 256]  mcpa=False
-  k=   8 (48 layers): jaccard(adj) 0.383   dwell half-life >= 256 tok (45/48 layers halved)   frozen-tier misses 83.8 % of picks   lag-1-refresh misses 79.6 %  -> adapting is worth 4.2 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  32 (48 layers): jaccard(adj) 0.426   dwell half-life >= 256 tok (43/48 layers halved)   frozen-tier misses 57.8 % of picks   lag-1-refresh misses 54.6 %  -> adapting is worth 3.2 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  64 (48 layers): jaccard(adj) 0.447   dwell half-life >= 256 tok (37/48 layers halved)   frozen-tier misses 38.9 % of picks   lag-1-refresh misses 35.8 %  -> adapting is worth 3.2 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  84 (48 layers): jaccard(adj) 0.465   dwell half-life >= 256 tok (32/48 layers halved)   frozen-tier misses 30.8 % of picks   lag-1-refresh misses 29.4 %  -> adapting is worth 1.4 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k= 128 (48 layers): jaccard(adj) 0.487   dwell half-life >= 256 tok (34/48 layers halved)   frozen-tier misses 19.3 % of picks   lag-1-refresh misses 22.0 %  -> adapting is worth -2.7 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k= 256 (48 layers): jaccard(adj) 0.480   dwell half-life >= 256 tok (45/48 layers halved)   frozen-tier misses 4.8 % of picks   lag-1-refresh misses 21.1 %  -> adapting is worth -16.3 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-== dwell_q268
-dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/Qwen3.8-Flash-Next-exl3-2.68bpw_h6_ng8  256 steps x 48 layers  window 32 tokens  k=[8, 32, 64, 84, 128, 256]  mcpa=False
-  k=   8 (48 layers): jaccard(adj) 0.393   dwell half-life >= 256 tok (46/48 layers halved)   frozen-tier misses 84.7 % of picks   lag-1-refresh misses 79.7 %  -> adapting is worth 5.0 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  32 (48 layers): jaccard(adj) 0.430   dwell half-life >= 256 tok (43/48 layers halved)   frozen-tier misses 58.0 % of picks   lag-1-refresh misses 54.6 %  -> adapting is worth 3.5 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  64 (48 layers): jaccard(adj) 0.452   dwell half-life >= 256 tok (39/48 layers halved)   frozen-tier misses 39.3 % of picks   lag-1-refresh misses 35.7 %  -> adapting is worth 3.6 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  84 (48 layers): jaccard(adj) 0.466   dwell half-life >= 256 tok (34/48 layers halved)   frozen-tier misses 31.7 % of picks   lag-1-refresh misses 28.5 %  -> adapting is worth 3.2 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k= 128 (48 layers): jaccard(adj) 0.487   dwell half-life >= 256 tok (34/48 layers halved)   frozen-tier misses 19.6 % of picks   lag-1-refresh misses 20.9 %  -> adapting is worth -1.3 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k= 256 (48 layers): jaccard(adj) 0.481   dwell half-life >= 256 tok (45/48 layers halved)   frozen-tier misses 4.4 % of picks   lag-1-refresh misses 20.0 %  -> adapting is worth -15.6 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-== dwell_glm
-dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/GLM-5.3-Flash-exl3@3.05bpw  128 steps x 42 layers  window 32 tokens  k=[8, 32, 64, 84, 128, 256]  mcpa=False
-  k=   8 (42 layers): jaccard(adj) 0.354   dwell half-life >= 128 tok (41/42 layers halved)   frozen-tier misses 78.1 % of picks   lag-1-refresh misses 63.2 %  -> adapting is worth 14.8 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  32 (42 layers): jaccard(adj) 0.420   dwell half-life >= 128 tok (23/42 layers halved)   frozen-tier misses 42.7 % of picks   lag-1-refresh misses 32.9 %  -> adapting is worth 9.7 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  64 (42 layers): jaccard(adj) 0.421   dwell half-life >= 128 tok (18/42 layers halved)   frozen-tier misses 24.9 % of picks   lag-1-refresh misses 23.1 %  -> adapting is worth 1.7 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k=  84 (42 layers): jaccard(adj) 0.427   dwell half-life >= 128 tok (22/42 layers halved)   frozen-tier misses 18.7 % of picks   lag-1-refresh misses 20.9 %  -> adapting is worth -2.2 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k= 128 (42 layers): jaccard(adj) 0.424   dwell half-life >= 128 tok (30/42 layers halved)   frozen-tier misses 9.0 % of picks   lag-1-refresh misses 18.2 %  -> adapting is worth -9.2 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
-  k= 256 (42 layers): jaccard(adj) 0.371   dwell half-life >= 128 tok (37/42 layers halved)   frozen-tier misses 0.7 % of picks   lag-1-refresh misses 17.4 %  -> adapting is worth -16.7 pts of picks
-        reading: if 'adapting is worth' is small, freeze the tier (D16 holds); if it is tens of percent, promotion earns its churn and the card should be a MOVING home, not a static tail.
+# Hot-set DWELL: is a static resident tier good enough, or must placement move? (analyze_dwell.py on bench_live_trace --dump-snaps)
+# Question owned by D16 in doc/port/b70-decisions.md: the card as capacity-that-removes-promotion vs -mcpa-style dynamic promotion.
+# Traces: decode-only, b=2 sessions, -mcpa OFF (permutation stability is required for a time axis), -mct 15.
+
+################################################################################ ## q205
+-- q205 window 32 tok
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 32 TOKENS = 32 steps)
+  validity gate: top-28 of the first 32 tok vs the last 32 tok share 7/28 experts (two RANDOM 28-subsets of 512 would share 1.5) -> STABLE, temporal statistics usable
+dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4  512 steps x 48 layers  window 32 tokens  k=[84, 128, 256]  mcpa=False
+  (tracer dropped 48 (layer,step) intervals where the engine rotated its own histogram; those carry no picks rather than wrong ones)
+  k=  84 (48 layers): jaccard(adj) 0.474   dwell half-life median 96 tok among 30/48 layers that halved; 18 never did within 512 tok   frozen-tier misses 39.4 % of picks   lag-1-refresh misses 19.4 %  -> adapting is worth 20.0 pts of picks
+  k= 128 (48 layers): jaccard(adj) 0.493   dwell half-life median 128 tok among 29/48 layers that halved; 19 never did within 512 tok   frozen-tier misses 30.1 % of picks   lag-1-refresh misses 14.9 %  -> adapting is worth 15.2 pts of picks
+  k= 256 (48 layers): jaccard(adj) 0.497   dwell half-life median 128 tok among 28/48 layers that halved; 20 never did within 512 tok   frozen-tier misses 29.4 % of picks   lag-1-refresh misses 14.3 %  -> adapting is worth 15.0 pts of picks
+-- q205 window 64 tok
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 64 TOKENS = 64 steps)
+  validity gate: top-28 of the first 64 tok vs the last 64 tok share 12/28 experts (two RANDOM 28-subsets of 512 would share 1.5) -> STABLE, temporal statistics usable
+dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/Qwen3.8-Flash-Next-exl3-2.05bpw_h4_ng4  512 steps x 48 layers  window 64 tokens  k=[84, 128, 256]  mcpa=False
+  (tracer dropped 48 (layer,step) intervals where the engine rotated its own histogram; those carry no picks rather than wrong ones)
+  k=  84 (48 layers): jaccard(adj) 0.545   dwell half-life median 64 tok among 1/48 layers that halved; 47 never did within 512 tok   frozen-tier misses 25.0 % of picks   lag-1-refresh misses 20.1 %  -> adapting is worth 4.9 pts of picks
+  k= 128 (48 layers): jaccard(adj) 0.547   dwell half-life none of 48 layers halved within 512 tok   frozen-tier misses 16.4 % of picks   lag-1-refresh misses 12.8 %  -> adapting is worth 3.7 pts of picks
+  k= 256 (48 layers): jaccard(adj) 0.561   dwell half-life none of 48 layers halved within 512 tok   frozen-tier misses 12.5 % of picks   lag-1-refresh misses 8.7 %  -> adapting is worth 3.8 pts of picks
+-- q205 rank bands (tier k=84, fitted on first 128 tok, 3 bands of 28)
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 64 TOKENS = 64 steps)
+  validity gate: top-28 of the first 64 tok vs the last 64 tok share 12/28 experts (two RANDOM 28-subsets of 512 would share 1.5) -> STABLE, temporal statistics usable
+  rank-band survival, tier of k=84 fitted on the first 2 windows, 3 bands of ~28 ranks, measured at the longest available lag
+    CORE               survival at lag  6 windows: 94.1 %
+    band 2             survival at lag  6 windows: 77.0 %
+    band 3 (boundary)  survival at lag  6 windows: 55.3 %
+    picks NOT served by the CORE band alone (k=28): 45.9 % - that is what freezing only the core would leak
+-- q205 window sweep at k=84
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 32 TOKENS = 32 steps)
+  window sweep at k=84 (jaccard of adjacent windows; rising = estimator noise, flat = real churn)
+    window   16 tok ( 32 windows): jaccard 0.402 over 48 layers
+    window   32 tok ( 16 windows): jaccard 0.474 over 48 layers
+    window   64 tok (  8 windows): jaccard 0.545 over 48 layers
+
+################################################################################ ## glm
+-- glm window 32 tok
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 32 TOKENS = 32 steps)
+  validity gate: top-28 of the first 32 tok vs the last 32 tok share 12/28 experts (two RANDOM 28-subsets of 288 would share 2.7) -> STABLE, temporal statistics usable
+dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/GLM-5.3-Flash-exl3@3.05bpw  384 steps x 42 layers  window 32 tokens  k=[84, 128, 256]  mcpa=False
+  (tracer dropped 42 (layer,step) intervals where the engine rotated its own histogram; those carry no picks rather than wrong ones)
+  k=  84 (42 layers): jaccard(adj) 0.454   dwell half-life median 32 tok among 38/42 layers that halved; 4 never did within 384 tok   frozen-tier misses 22.8 % of picks   lag-1-refresh misses 18.6 %  -> adapting is worth 4.3 pts of picks
+  k= 128 (42 layers): jaccard(adj) 0.469   dwell half-life median 32 tok among 33/42 layers that halved; 9 never did within 384 tok   frozen-tier misses 19.9 % of picks   lag-1-refresh misses 16.3 %  -> adapting is worth 3.6 pts of picks
+  k= 256 (42 layers): jaccard(adj) 0.476   dwell half-life median 256 tok among 7/42 layers that halved; 35 never did within 384 tok   frozen-tier misses 12.4 % of picks   lag-1-refresh misses 10.6 %  -> adapting is worth 1.8 pts of picks
+-- glm window 64 tok
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 64 TOKENS = 64 steps)
+  validity gate: top-28 of the first 64 tok vs the last 64 tok share 11/28 experts (two RANDOM 28-subsets of 288 would share 2.7) -> STABLE, temporal statistics usable
+dwell analysis: /home/treo/projects/vendor/tabbyAPI/models/GLM-5.3-Flash-exl3@3.05bpw  384 steps x 42 layers  window 64 tokens  k=[84, 128, 256]  mcpa=False
+  (tracer dropped 42 (layer,step) intervals where the engine rotated its own histogram; those carry no picks rather than wrong ones)
+  k=  84 (42 layers): jaccard(adj) 0.484   dwell half-life median 256 tok among 18/42 layers that halved; 24 never did within 384 tok   frozen-tier misses 15.3 % of picks   lag-1-refresh misses 13.8 %  -> adapting is worth 1.5 pts of picks
+  k= 128 (42 layers): jaccard(adj) 0.501   dwell half-life median 256 tok among 15/42 layers that halved; 27 never did within 384 tok   frozen-tier misses 10.7 % of picks   lag-1-refresh misses 10.4 %  -> adapting is worth 0.3 pts of picks
+  k= 256 (42 layers): jaccard(adj) 0.523   dwell half-life median 256 tok among 15/42 layers that halved; 27 never did within 384 tok   frozen-tier misses 7.9 % of picks   lag-1-refresh misses 7.5 %  -> adapting is worth 0.3 pts of picks
+-- glm rank bands (tier k=84, fitted on first 128 tok, 3 bands of 28)
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 64 TOKENS = 64 steps)
+  validity gate: top-28 of the first 64 tok vs the last 64 tok share 11/28 experts (two RANDOM 28-subsets of 288 would share 2.7) -> STABLE, temporal statistics usable
+  rank-band survival, tier of k=84 fitted on the first 2 windows, 3 bands of ~28 ranks, measured at the longest available lag
+    CORE               survival at lag  4 windows: 89.8 %
+    band 2             survival at lag  4 windows: 52.0 %
+    band 3 (boundary)  survival at lag  4 windows: 27.4 %
+    picks NOT served by the CORE band alone (k=28): 29.2 % - that is what freezing only the core would leak
+-- glm window sweep at k=84
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 32 TOKENS = 32 steps)
+  window sweep at k=84 (jaccard of adjacent windows; rising = estimator noise, flat = real churn)
+    window   16 tok ( 24 windows): jaccard 0.425 over 42 layers
+    window   32 tok ( 12 windows): jaccard 0.454 over 42 layers
+    window   64 tok (  6 windows): jaccard 0.484 over 42 layers
+
+################################################################################ ## q268
+-- q268 window 32 tok
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 32 TOKENS = 32 steps)
+  validity gate: top-28 of the first 32 tok vs the last 32 tok share 0/28 experts (two RANDOM 28-subsets of 512 would share 1.5) -> TRACE UNUSABLE: the index basis changed mid-trace, so half-life/survival here measure the engine's histogram rotation, not routing. Re-trace shorter, or with the rotation source disabled. Aggregates (totals per expert) remain valid.
+-- q268 window 64 tok
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 64 TOKENS = 64 steps)
+  validity gate: top-28 of the first 64 tok vs the last 64 tok share 0/28 experts (two RANDOM 28-subsets of 512 would share 1.5) -> TRACE UNUSABLE: the index basis changed mid-trace, so half-life/survival here measure the engine's histogram rotation, not routing. Re-trace shorter, or with the rotation source disabled. Aggregates (totals per expert) remain valid.
+-- q268 rank bands (tier k=84, fitted on first 128 tok, 3 bands of 28)
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 64 TOKENS = 64 steps)
+  validity gate: top-28 of the first 64 tok vs the last 64 tok share 0/28 experts (two RANDOM 28-subsets of 512 would share 1.5) -> TRACE UNUSABLE: the index basis changed mid-trace, so half-life/survival here measure the engine's histogram rotation, not routing. Re-trace shorter, or with the rotation source disabled. Aggregates (totals per expert) remain valid.
+-- q268 window sweep at k=84
+  token axis: modal step = 1 token(s); excluded 0 prefill-contaminated intervals (a window is 32 TOKENS = 32 steps)
+
+== END OF RAW OUTPUT ==
+
+READOUT ==================================================================================
+
+Two of the three traces are usable. q268 FAILED its validity gate (top-28 of its first window shares 0/28 experts
+with its last, against 1.5 expected from two random subsets of 512) — an index-basis change mid-trace, not a
+routing finding, so everything about q268 below and above is excluded from the conclusion (LESSONS 89). Its
+AGGREGATE distribution is identical to q205's (top-28 pick share 0.115 vs 0.112), which is what proved the
+time axis, not the marginal, was broken.
+
+Dwell of the hot set, at 64-token windows (the widest the traces support with >= 3 windows):
+
+  model            tier k   frozen misses   refresh misses   adapting worth   layers halving in 384-512 tok
+  Qwen3.8@2.05       84          25.0 %          20.1 %          4.9 pts        1 of 48
+  GLM@3.05           84          15.3 %          13.8 %          1.5 pts       18 of 42 (trace ends at 384)
+  GLM@3.05          128          10.7 %          10.4 %          0.3 pts       15 of 42
+  GLM@3.05          256           7.9 %           7.5 %          0.3 pts       15 of 42
+
+Rank-band survival of a tier fitted once, measured at the longest lag available:
+
+  model            CORE (top 28)   middle 28   boundary 28   picks leaking if only CORE is frozen
+  Qwen3.8@2.05          94.1 %        77.0 %        55.3 %                       45.9 %
+  GLM@3.05              89.8 %        52.0 %        27.4 %                       29.2 %
+
+And the churn metric that started this investigation is partly an artefact of sample size — adjacency jaccard at
+k=84 rises monotonically with the window: Qwen 0.402 (16 tok) -> 0.474 (32) -> 0.545 (64) -> 0.688 (128);
+GLM 0.425 -> 0.454 -> 0.484. Reading only the 32-token number would have said "half the hot set turns over every
+half minute", which the longer windows do not support.
+
+VERDICT — D16 confirmed, and its reopening condition did not fire. The hot set's core is durable (survival ~90 %
+over 400-500 tokens) and refreshing the tier buys almost nothing: 4.9 points of picks on Qwen at card-like
+capacity, 1.5 points on GLM, 0.3 points at k>=128. Promotion machinery that moves experts every interval would be
+paying transfer (0.09 ms/expert at Qwen sizes, 0.66 ms at GLM sizes — D20) for a gain measured in fractions of a
+percent of picks. The right shape is therefore:
+
+  * a STATIC tier sized by pick mass, not by rank;
+  * rank-dependent hysteresis — freeze the core, let the boundary move, because that is where the measured
+    turnover actually is (55 % vs 94 % survival on Qwen, 27 % vs 90 % on GLM);
+  * and accept the residue: a frozen top-84 still misses 25 % of Qwen picks and a refreshed one only reduces that
+    to 20 %. That 20 % is not a policy failure — top-84-of-512 cannot serve a tail — so it is a CAPACITY
+    shortfall, which is precisely what the card is for and what `-mcpa` structurally cannot fix.
+
+What this does NOT cover: single decode traces of 384-512 tokens. Whether the hot set persists ACROSS sessions,
+topics, or a whole conversation (the horizon a static tier really needs) is unmeasured, and GLM's 18/42 halving
+rate is censored by its short trace. A 4k-token multi-session trace is the cheap follow-up — the instrument now
+supports it, including the validity gate that would have caught this class of error before a conclusion did.

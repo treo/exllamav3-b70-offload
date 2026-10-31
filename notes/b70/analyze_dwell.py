@@ -255,7 +255,8 @@ def main() -> None:
         # Report what actually happened. The first version printed ">= bound" whenever ANY layer failed to halve,
         # which produced absurdities like ">= 256 tok (45/48 layers halved)" - the majority DID halve, and the
         # reader cannot tell churn from a censoring artefact.
-        hws = (f"median {statistics.median(hl):.0f} tok among {len(hl)}/{len(half)} layers that halved"
+        hws = (f"none of {len(half)} layers halved within {bound} tok" if not hl else
+               f"median {statistics.median(hl):.0f} tok among {len(hl)}/{len(half)} layers that halved"
                + (f"; {len(half) - len(hl)} never did within {bound} tok" if len(hl) < len(half) else ""))
         print(f"  k={k:>4} ({usable} layers): jaccard(adj) {statistics.mean(jac):.3f}   "
               f"dwell half-life {hws}   "

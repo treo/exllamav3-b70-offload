@@ -1173,6 +1173,20 @@ Three rules that are not optional, because each was bought with a silent-failure
 
 ## 11. Open questions that could still change this design
 
+**Ranked first, added after the prefill decomposition (`notes/b70/out_prefill_decomp.txt`, D24): what does the
+card's activation path actually cost, and is there any cheaper route than host-staged round trips?** Prefill's
+"non-expert floor" turned out to be 39 % `copy` at the shipped configuration (756 ms of 1922.9 ms per 4096-token
+chunk) and 77 % at 4.05 bpw, because the CPU home pays device-visible transfer for every remote expert it serves.
+The card replaces the CPU's *compute*, not necessarily that *traffic*: if activations still leave the 3090, land
+in pinned host memory, and DMA onward to the Arc, the tax is inherited and much of the revised prefill upside
+evaporates. The three candidates to price are (a) host-staged two-hop (measured links: 13.4 GiB/s pinned H2D,
+42.6 GiB/s host read), (b) a single copy if any cross-vendor P2P path exists on this root complex, and (c)
+keeping the round trip but batching it per layer rather than per assignment. This is now the highest-value
+measurement in the plan — above any further kernel work — because it bounds the headline number in both
+directions. Related, still unmeasured: E36v2 showed zero interference for *device-local* card work
+(`out_interference.txt`), but never tested card DMA concurrent with the CPU home streaming host DRAM, which is
+exactly the pairing this question is about.
+
 Each is answerable by one probe or one benchmark, listed in the order that would hurt most if the
 answer goes the wrong way:
 

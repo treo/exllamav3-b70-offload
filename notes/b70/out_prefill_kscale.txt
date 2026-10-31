@@ -6,3 +6,16 @@ gemm A (sequential bucket launches): rows 64 = NSLAB 4 x 16 rows/launch, RPAD 16
 case /home/treo/.cache/b70cases/gg_q405_E512: E 512 R 64 k 2560 n 640 K 4  trellis 400.00 MiB  KS 2  layout native
 rev L: dpas 8 x 2 per byte-block (rows padded to 16), 1 expert/thread, 160 x 512 threads (2048 HW)
 revL ks 2 rows 64 1-proj     layout native:   4662.2 us    179.9 G-w/s    90.0 GB/s(trellis)   [single-launch  4646.7 us]  [M 8x2, 40 tiles x 512 experts]
+
+=== READOUT ==============================================================
+K=4 (Qwen3.8@4.05, E=512, rows=64, ks=2): 4662.2 us for one projection = 9.11 us per expert-bucket.
+Compare K=2 from out_probe_gemm_midE.txt: 7.14-7.25 us per bucket. Doubling the bytes per bucket costs
++28 pct, not +100 pct, so bucket cost is dominated by FIXED per-bucket overhead at these shapes:
+   cost/bucket ~= 4.6 us + 1.13 us x K   (two points, K=2 and K=4; K=3 unmeasured in THIS instrument)
+PROVISIONAL: two points fit a line, they do not establish one, and the K=3 value used elsewhere (5.70
+us/bucket in D18) came from engine-integrated prefill, not this probe, so the three must not be averaged.
+What it does say, if it holds: moving to a higher quant costs the card sub-proportionally in time, and
+effective trellis bandwidth RISES with K (56-60 GB/s at K=2 vs 90 GB/s at K=4 on the same shape), because
+bytes grow while the fixed bucket cost does not. The card is therefore relatively better at high quants --
+which is where the parent degrades most (out_prefill_decomp.txt: 4.05 prefill is 77 pct copy traffic).
+Missing rungs before this is a law: K=3 in this instrument, and K=6.
