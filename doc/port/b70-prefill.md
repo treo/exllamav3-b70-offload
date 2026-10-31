@@ -187,12 +187,17 @@ measured (§5's owed item 1 is now the blocking one).
          of 4, so job granularity does not re-stream weights the way the estimate assumed (falsified without a
          rebuild);
        * the CPU expert leg **is** in the prefill path and it is the majority of it: sweeping `-mcs` at fixed
-         prompt (4096) and chunk (2048) gives **10.7 ms per CPU-homed expert per chunk**, decomposing the parent's
-         4.72 s into **~2.74 s (58 %) CPU expert work + ~1.98 s everything else** (`out_host_mem.txt` §6). That is
-         why `-mcpa` is worth +30 % — it removes part of a majority term. The B70's own all-expert leg at the same
-         chunk is ~0.73 s, so end-to-end prefill has room to land between **2.7 and 4.0 s (+18 % to +75 %)**; the
-         spread is the unsplit 1.98 s intercept, which still contains the 3090's expert leg for its resident
-         experts — the next measurement, and it is engine-side profiling, not a probe.
+         prompt (4096) and chunk (2048) fits **time = 1992 ms + 10.23 ms × mcs with residuals under 2 ms**, so the
+         parent's 4609 ms decomposes into **~2619 ms (57 %) CPU expert work + 1992 ms everything else**
+         (`out_host_mem.txt` §6, `run_mcs_slope.sh`; two arms below `-mcs 128` fail to load, reproducing the
+         operator's split floor). That is why `-mcpa` is worth +30 % — it removes part of a majority term. The
+         B70's own all-expert leg at the same chunk is ~734 ms, so end-to-end prefill lands between
+         **1.7 and 2.4 s (1.9× to 2.7×)**; the spread is exactly one unknown — how much of the 1992 ms intercept
+         is the **3090's own expert leg**, which also leaves the parent when the card holds the experts. Pinning it
+         is an engine-side prefill profile bucketed by kernel, not a probe.
+         Precision discipline: within one process the arms fit a line to <2 ms, but the same configuration in a
+         different process varies by 2.4 % (115 ms), so slopes are trustworthy and absolute levels are not — which
+         is why every comparison in this chapter is a within-process arm pair.
          (Retracted: this bullet previously reported the bench's "478 ms/layer with one assignment per pick" as a
          possible CPU-side aggregation bug. The column read was `asgn/expert` = `rows × topk / distinct experts`,
          which is *picks* per expert — a derived routing statistic, not an assignment count. The header in

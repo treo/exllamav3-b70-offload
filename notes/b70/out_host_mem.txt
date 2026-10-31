@@ -123,34 +123,47 @@ lead it generated is withdrawn. What survives is smaller but still real:
 
 ## 6. THE -MCS SLOPE: PREFILL IS MAJORITY CPU-EXPERT WORK, AND THE DISCREPANCY DISSOLVES
 
-Prefill at fixed prompt 4096 / chunk 2048, sweeping how many experts are CPU-homed (`-mcs`), 2.05:
+Prefill at fixed prompt 4096 / chunk 2048, sweeping how many experts are CPU-homed (`-mcs`), 2.05,
+`notes/b70/run_mcs_slope.sh`:
 
-       -mcs      experts remote      median prefill      tok/s
-       32              32            FAILED to load      -      ("Insufficient VRAM in split for model and cache",
-                                                                 the operator's low--mcs floor, reproduced)
-       256            256                 4723.9 ms       867     (0.7 % from the 873 measured earlier: reproducible)
-       448            448                 6773.2 ms       605
+       -mcs      experts remote      median prefill      tok/s      fit residual
+       32              32            FAILED to load        -        "Insufficient VRAM in split for model and cache"
+       128            128            FAILED to load        -        same floor, reproduced
+       256            256                4608.9 ms          889         -1.6 ms
+       384            384                5921.8 ms          692         +1.9 ms
+       448            448                6574.3 ms          623         -0.3 ms
 
-**Prefill time scales steeply with the CPU-homed expert count: +192 experts cost +2049 ms, i.e. 10.7 ms per
-remote expert per chunk (0.223 ms per expert per layer).** Fitting time = C + s·mcs: s = 10.7 ms/expert,
-C = 4723.9 - 256 x 10.7 = **1984 ms**. So of a 4096-token prefill on 2.05, **~2.74 s (58 %) is CPU expert work**
-and ~2.0 s is everything else (attention, dense, hyper-connections, the 3090's own expert leg, launch overhead).
-That also explains why `-mcpa` is worth +30 %: it takes a slice of a majority term, not of a minor one.
+**time = 1991.6 ms + 10.23 ms x mcs, with residuals under 2 ms across a 1.4x range of remote-expert counts.**
+Two low arms failing to load is itself a recorded fact (the operator's `-mcs` floor, reproduced independently by
+this slope run rather than by report). The fit gives:
+
+  * **CPU expert work at the shipping `-mcs 256` = 2619 ms of 4609 ms = 57 % of a 4096-token prefill**;
+  * **everything else = 1992 ms** (attention, dense MLP, hyper-connections, norms, the 3090's own expert leg for
+    its 256 resident experts, launch and transfer overhead);
+  * marginal cost of one CPU-homed expert = **10.23 ms per chunk = 0.213 ms per layer**.
+
+A precision note that matters for how much to trust any of this: **within-run differences are far sharper than
+absolute levels.** The three arms in one pass fit a line to under 2 ms, but the same configuration measured in a
+different process gave 4723.9 ms vs 4608.9 ms - a 2.4 % (115 ms) spread. So the slope is trustworthy to ~1 %,
+while the intercept inherits the run-to-run scatter: C = 1992 +/- ~120 ms. Never compare an absolute tok/s across
+processes at better precision than that spread, which is why the chapter's comparisons (chunk size, corpus,
+-mcpa) are all within-process arm pairs.
 
 And it closes the §5 discrepancy without blaming either instrument. The bench's 11.7 us/pick is a *warm-cost per
-pick for an expert receiving 98 rows*; the engine's marginal 0.223 ms/expert/layer implies **<= 19 picks per
-marginal expert per layer**, because the experts added by raising `-mcs` from 256 to 448 are the COLDEST ones -
-real routing puts half the mass in ~24 experts, so marginal experts are thin, while the bench's uniform routing
-gives every loaded expert 98 rows. Two instruments, two different routing distributions, consistent costs. Neither
-is broken and neither lends its absolute number to the other.
+pick for an expert receiving 98 rows*; the engine's marginal 0.213 ms/expert/layer implies **<= 19 picks per
+marginal expert per layer**, because the experts added by raising `-mcs` are the COLDEST ones - real routing puts
+half the mass in ~24 experts, so marginal experts are thin, while the bench's uniform routing gives every loaded
+expert 98 rows. Two instruments, two routing distributions, consistent costs.
 
-What this licenses, and what it does not: the CPU expert leg's share of prefill (58 %) and its marginal cost
-(10.7 ms/expert) are measured, and the B70's all-expert expert leg at the same chunk is ~0.73 s
-(`out_prefill_scale.txt`), so moving prefill experts to the card has room to take prefill from 4.72 s to
-somewhere in **2.7-4.0 s (+18 % to +75 % end-to-end)**. The range is wide because the 1.98 s intercept still
-CONTAINS the 3090's own expert leg for its 256 resident experts, which has never been separated out - that is the
-next measurement, and it is an engine-side profiling job (bucket the prefill forward by kernel name, as
-`bench_engine_step.py` does for decode), not a probe.
+What this licenses, and what it does not: parent prefill on 2.05 is 4609 ms, of which 2619 ms is CPU expert work
+and the B70's measured all-expert leg for the same chunk is ~734 ms (`out_prefill_scale.txt`). Moving prefill
+experts to the card therefore lands at **1.7-2.4 s end-to-end, i.e. 1.9x to 2.7x**, not the loose 18-75 % an
+earlier version of this file guessed. The remaining spread is one specific unknown: how much of the 1992 ms
+intercept is the **3090's own expert leg** (call it E), since that work also leaves the parent when the card holds
+the experts - total = 1992 - E + 734 ms. E is unmeasured; it is bounded below by 0 and above by the non-attention
+share of the intercept, and the measurement that pins it is an engine-side prefill profile bucketed by kernel name
+(`bench_engine_step.py` does exactly this for decode; the prefill forward is the gap). Narrowing E is what turns
+the prefill case from "roughly twice" into a number worth planning against.
 
 ## 7. WHAT TO USE THESE NUMBERS FOR
   * Safe: the host ceiling itself (42.6 GiB/s read, 24.1 GiB/s copy, 484.7 GiB/s L3), the ratio to the pinned
@@ -161,9 +174,9 @@ next measurement, and it is an engine-side profiling job (bucket the prefill for
     pool*, so rows/expert = rows x topk / experts, and two arms with different expert counts are in different
     regimes even at equal `rows`. Hold rows x topk / experts fixed, or the comparison is meaningless (this one
     nearly produced a 28x claim).
-  * Open: whether the prefill forward uses the CPU worker at all the way decode does - **answered in §6: it does,
-    and that leg is 58 % of a 4096-token prefill.** Newly open instead: the split of the 1.98 s intercept between
-    non-expert work and the 3090's own expert leg, which bounds the end-to-end prefill win.
+  * Open: the split of the 1992 ms intercept between non-expert work and the 3090's own expert leg (E). That one
+    unknown is what keeps the B70 prefill estimate a range (1.9x-2.7x) instead of a number, and it is an
+    engine-side profile, not a probe.
 
 Reproduce:
     gcc -O3 -march=native -fopenmp -o probe_mem probe_mem.c

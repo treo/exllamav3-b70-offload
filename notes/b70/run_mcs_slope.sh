@@ -32,5 +32,10 @@ for MCS in 32 128 256 384 448; do
     printf "%-7s %4s   %-30s %-13s %s\n" "mcs" "$MCS" "${med:- -}" "${prom:--}" "$note"
 done
 echo "# fit time = C + s*mcs from the surviving rows; s is the marginal cost of one CPU-homed expert per chunk,"
-echo "# C is everything that is not CPU expert work. Measured (2 arms, 256/448): s = 10.7 ms/expert, C = 1984 ms,"
-echo "# so 2.05 prefill at 4096 tokens is ~2.74 s (58%) CPU expert work and ~1.98 s everything else."
+echo "# C is everything that is not CPU expert work. Measured 2025-11 (3 surviving arms: 256/384/448):"
+echo "#   time = 1991.6 ms + 10.23 ms * mcs, residuals < 2 ms over a 1.4x range of remote-expert counts"
+echo "#   -> 2.05 prefill at 4096 tokens: ~2619 ms (57%) CPU expert work, ~1992 ms everything else"
+echo "#   -> arms at -mcs 32 and 128 fail to load ('Insufficient VRAM in split for model and cache'): the split"
+echo "#      floor the operator reported, reproduced here as a by-product of the slope design"
+echo "# NOTE on precision: within one process the arms fit this line to <2 ms, but the same -mcs value measured"
+echo "# in a different process varied by 2.4% (4608.9 vs 4723.9 ms). Trust the slope, not the absolute level."
