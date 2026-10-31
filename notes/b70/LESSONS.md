@@ -1384,7 +1384,22 @@ nothing that is the sole instance of a measurement.
     means the 948 ms came from somewhere else entirely and the model above is wrong. **Result: tested, and it held
     (10.24 → 5.59 ms/expert, −45 % against −36 % predicted), and the residuals taught two more things — see 83.**
 
+84. **When reconstructing lost content, check that the ID SPACE is free — a grep that matches one rendering
+    proves nothing about the others.** After `b70-kernels.md` lost a passage to a scripted edit (LESSONS 69), I
+    rebuilt it from artifacts using labels 13b–13r. The file already used those labels: the harvested-ideas list
+    is a Markdown **table** (`| 13e | …`), and my verification grep was `^13[a-z])`, which matched only the
+    list-item form. So the original series was alive all along, my reconstruction duplicated 17 of its ids with
+    different content (the real 13e is "do not feed `joint_matrix_load` from SLM", mine was "int8 M ≤ 8"), and
+    every reference to `13e`/`13m`/`13o`/`13p`/`13q`/`13r` in four documents silently became ambiguous — while my
+    "no dangling references" check passed. Fixed by moving the recovered findings to M1–M17 and repointing only
+    the references I had introduced, after checking individually that the pre-existing ones addressed the table.
+    Two rules: (1) before reusing identifiers in a document, enumerate existing ones across **every** rendering
+    (table rows, headings, list items, prose mentions), because a pattern tuned to the form you remember
+    silently certifies absence for the forms you forgot; (2) content reconstructed from artifacts is trustworthy
+    in a way identifiers are not — what was wrong here was not the physics, it was the addresses pointing at it.
+
 83. **A mechanism whose action count does not scale with the problem is a capacity mechanism, not a scaling one:
+    read the counter, not the ratio.**
     read the counter, not the ratio.** `-mcpa` measured +30 % on 2.05 and +50 % on 2.68, which invites the story
     "more remote experts ⇒ promotion helps more, so scale it up." The counter says otherwise: promotions were
     390 / 383 / 384 at `-mcs` 256 / 384 / 448 — a **fixed ~8 experts per layer regardless of how many experts were
