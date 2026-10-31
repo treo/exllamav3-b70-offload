@@ -1280,3 +1280,39 @@ Numbers are **[M]** measured on this box or **[P]** projection, and every `[P]` 
 
 Nothing else in this document is a decision: the remaining prose is rationale, and rationale does not
 need to be final — only the rows above do.
+
+> Rows decided **after** the decode chapter — the two-card split, `-mcpa` as a substitute, the prefill dispatch
+> rule, cost primitives, the stall correction, GLM's measured parent leg, the handoff-reuse decision and the
+> verify-batch pricing — are ledgered as **D14–D23** in [`b70-decisions.md`](b70-decisions.md), with the same
+> discipline: status, evidence, and what reopens each one.
+
+## 13. Integration shape: the seams the engine already provides
+
+The CPU MoE offload is already a heterogeneous worker with a pinned handoff protocol, slot-capped in-flight work,
+double-buffered weight staging and a per-component budget. The card therefore does not need a new subsystem; it
+needs a **second worker behind the same one**. Every row below is a hook read out of source in this planning
+phase, not a design invented for the document.
+
+| engine seam | what it buys the B70 path |
+|---|---|
+| `config.infer_params.moe_cpu_component` (`model.py:605`, "Route CPU-offloaded MoE layers to this component's own worker and budget (an MTP head shares the config but loads after the main model's worker has already started)") | a **keyed** worker registry. A card worker registered the same way gets the draft/MTP path for free and cannot collide with the text component's slots — which is exactly where D22's verify batches live |
+| `EXL3_MOE_CPU_SLOTS` (default 4, hard cap `MOE_MAX_SLOTS` = 8) each holding `EXL3_MOE_CPU_SLOT_ROWS` = 64 rows (`moe_cpu_host.py:46,99-101`) | in-flight work is already **slot-capped with a per-slot row capacity** — the shape the card queue needs, and a precedent that assignments arrive as bounded row batches rather than per-token calls. My `MAX_M` question (falsified as a lever, LESSONS 79) is the same arithmetic the engine already made a knob |
+| `EXL3_MOE_CPU_WSLOTS` = 2 × `EXL3_MOE_CPU_WSLOT_MB` = 32 MiB, cap `MOE_MAX_WSLOTS` = 8 (`moe_cpu_host.py:57,113-115`) | the promotion/upload pipeline's real shape — and a **hard ceiling worth designing around instead of arguing with**: at the measured 13.4 GiB/s link a 32 MiB slot takes ~2.4 ms, so at most 2 experts are in flight per host no matter what the policy wants. That is a code-level mechanism for `-mcpa`'s saturating relief (D16, LESSONS 83) |
+| `MOE_FLAGS_SIZE = 3*64*MOE_MAX_SLOTS + 2*64*MOE_MAX_WSLOTS` pinned flag region (`moe_cpu_host.py:58`) | the doorbell/complete signalling already has an address map. The card's "completion by pinned flag, never `.wait()`" protocol plugs into this layout rather than defining a second one — and if slot counts go up, this constant must be recomputed with them |
+| `EXL3_MOE_HOST_CORES` = 1: pool workers take *physical cores minus one*, and the host is confined to the reserve once the worker starts (`moe_cpu_host.py:104-110`, `moe_cpu_affinity.py`) | the split is **deliberate, not accidental** (operator-confirmed: `host on LPs [15, 31]` is that one core's SMT pair; `-mct 15` on 16 cores is the engine's own default). Consequence for the plan: the card's DMA submission and doorbell servicing land on a **single core**, so nothing synchronous may be added to it — the no-`.wait()` rule is a corollary of this reservation, and my `-mcpa` "`+221 ms` of non-expert overhead" may partly be that core saturating rather than the link |
+| `torch.sort(local_sel, dim = 1)` in the CUDA MoE path (`block_sparse_mlp.py:106`) | picks are **already grouped by expert id on the parent** before any kernel runs. The gather/bucket the card dispatcher wants is partly computed, at module level, where it is cheap to reuse |
+| `EXL3_MOE_FUSED_ROWS` = 128, clamped to [128, 512]: "Row capacity of the fused MoE kernel's per-group temp buffers (experts with more assigned rows take the reconstruct paths)" (`block_sparse_mlp.py:27`, `util/backend.py:49`) | the shipped CUDA kernel **already caps rows per expert-group and switches path above the cap** — production validation of the same `ceil(rows/cap)` arithmetic this plan measured on the card (D17), and independent support for D18: cost is per bucket, not per byte |
+| `n_group` / `topk_group`, "the grouped DS3 router (`n_group` > 1, Ling 3.x)" (`block_sparse_mlp.py:81,171-172,224`) | a router that confines each token to `topk_group` groups **structurally bounds how many placements a token can touch** — potentially a stronger locality lever than any cache policy in this plan. Completely unexamined; the first `n_group > 1` model reopens D14 and D16 |
+
+Two build rules follow, and both are cheap to violate:
+
+1. **Do not create a parallel handoff.** Extending the same host/worker/component abstractions keeps `-mcs`,
+   `-mcl` and `-mcpa` semantics interpretable for a three-home system and keeps slot/flag accounting single-sourced.
+   A second protocol would need its own coherency evidence, and `probe_coherency`'s result (no `sycl::atomic_ref`
+   on the shared region at any scope, `UR_RESULT_ERROR_DEVICE_LOST` repro) is the kind of finding you want to
+   make once.
+2. **Charge the shared core.** Anything the card asks of that one reserved core — descriptor writes, flag polls,
+   gather issuance — competes with promotion and memory movement, which is the mechanism `-mcpa` is already
+   saturating on. Push work to the card's own cores; the parent core's budget is one core, and it is measured
+   (`out_host_mem.txt`: 42.6 GiB/s read, 484.7 GiB/s from L3, pinned link 13.4 GiB/s — the link, not the host,
+   is the binding constraint at 3.2× below DRAM).

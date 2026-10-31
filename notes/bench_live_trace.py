@@ -119,6 +119,13 @@ def main():
                          "(a second domain is the only way to test whether the cross-session "
                          "agreement with independence is a corpus artifact)")
     ap.add_argument("--stats-dir", default="/tmp/live_stats")
+    ap.add_argument("--dump-snaps", default="",
+                    help="write the raw per-token per-layer expert-delta trace (sparse JSON) to this path. The "
+                         "aggregated profiles under profiles/live/ hold per-expert TOTALS, which are invariant "
+                         "under reordering in time, so the questions that need a time axis - how long a hot set "
+                         "stays hot, does a STATIC resident tier beat dynamic promotion (D16's reopening "
+                         "condition) - could not be answered from stored data at all. Analyze with "
+                         "notes/b70/analyze_dwell.py.")
     ap.add_argument("--prefill", type=int, default=0,
                     help="also time a single N-token prefill (0 = skip). Reported as tokens/s of the whole "
                          "prompt, which is the unit the acceptance figures use, and the number "
@@ -327,6 +334,17 @@ def main():
             print(f"  CONCURRENT union({args.jobs}): median distinct experts touched per step, per layer - "
                   f"mean {statistics.mean(per_layer):.1f}, min {min(per_layer):.1f}, max {max(per_layer):.1f} "
                   f"(measured on live parallel streams, not modelled)")
+        if args.dump_snaps:
+            os.makedirs(os.path.dirname(os.path.abspath(args.dump_snaps)), exist_ok=True)
+            with open(args.dump_snaps, "w") as fh:
+                json.dump({"model_dir": str(args.model_dir), "decode_steps": args.decode, "jobs": args.jobs,
+                           "engine_args": list(init_args), "mcpa": bool(getattr(args, "mcpa", False)),
+                           "layers": [getattr(m, "name", f"layer{i}") for i, m in enumerate(mods)],
+                           "steps": [[[ [i, int(v)] for i, v in enumerate(Lv) if v] for Lv in s] for s in snaps]},
+                          fh)
+            nz = sum(len(Lv) for s in snaps for Lv in s)
+            print(f"  raw trace -> {args.dump_snaps}  ({len(snaps)} steps x {len(mods)} layers, {nz} nonzero "
+                  f"(expert,delta) pairs; ~{os.path.getsize(args.dump_snaps)/1e6:.1f} MB)")
         if args.prefill:
             # One N-token prefill, timed with events, pipelined (sync only around the whole call) - the same
             # accounting the decode passes use. Chunking is the engine's business (-cs/--chunk_size); this

@@ -215,6 +215,27 @@ Scripts (all in `notes/b70/`, extending the existing harnesses rather than repla
 | nightly / pre-merge | `b70_run_e2e.sh` across configs × both models × cold and warm placement, `-mba` spill stress, reload/autosplit, T2 residency, `b70_compare.py` against the rolling baseline | hours |
 | on any "it got slower" | re-run the U sampler and `b70_prof.py` *before* changing code: on the CPU path every unexplained slowdown was handshake- or policy-related, never kernel-related | minutes, and always before a code change |
 
+## Acceptance thresholds per flag
+
+One row per knob the build introduces, so "it works" is never the criterion. Every numeric threshold is either
+**[M]** (derived from a measurement in `notes/b70/`, with the file named) or **TBD** (deliberately blank: a
+threshold invented before the measurement is a wish, and the first one that fails gets renegotiated until it
+passes). Bars are set *below* the measured value where a measurement exists, so a regression shows up as a
+failure rather than as a documentation edit.
+
+| flag / gate | acceptance criterion | basis | if it fails |
+|---|---|---|---|
+| master off (`EXL3_MOE_B70=0`) | **bit-identical to the CUDA path**: greedy token equality over the MTP-verify fixture and a 32-token decode, and `e2e.assert_logits_agree` against `e2e.noise_floor` on the 4096-token varied corpus. Zero tolerance on tokens, no epsilon | **[M]** methodology from `tests/testlib/e2e.py`; corpus is `notes/b70/fixtures/prefill_pool.txt` per LESSONS 76 | the flag did not isolate the change; treat as a correctness bug, not a tuning gap |
+| decode GEMV, rows = 1 | per-launch time within **3 %** of `best_launch()` for the exact (geom, E, ks) cell; anchor `DPAS_X=1 ./probe_dpas6 /tmp/gemv_dpE10 6000 1 2` at **19.0–19.4 µs**; ≥ 2000 reps, `WARM_S=3`, min-of-N | **[M]** `out_dpas.txt`, `out_egrid.txt`, `out_ks_grid.txt`; WARM_S=3 because under-warmed cells flipped a conclusion (0.96 → 1.02) | regress the kernel, do not re-measure the anchor: it has held all week |
+| rows > 16 (Gate B3) | within **15 %** of the additive `ceil(rows/16)` law at E ≥ 64, with `items/launch` printed and non-moving when `DPAS_KS` varies | **[M]** E29 law, `out_e29_share.txt`; the `items` guard exists because a silent env-vs-positional mismatch ran six cells at KS=1 (LESSONS 73) | suspect dispatch before suspecting the kernel; the law has survived every attempt to bend it |
+| gate+up fusion | decided **per (model, quant) at rows = 1**, one decision for all rows; GLM geometry (`tiles_n` = 128) **must not fuse** | **[M]** D10, `out_fusion_rows.txt`, `out_glm_geometry.txt` (tiles_n=128) | fusion penalties are rows-dependent; a global flag is the bug |
+| verify / MTP batch, M = 4 / 8 / 16 | ≥ **1.25× / 1.40× / 1.55×** vs M independent decodes, AND observed distinct-experts/picks ≥ 1.8 at M = 16 | **[M]** measured 1.34 / 1.53 / 1.85 and 160 picks → 73 experts (`out_verify_batch.txt`); bar sits under the measurement on purpose | if the ratio bar passes but dedup fails, routing changed (flatter mixture) and D23's precondition is gone, not the kernel |
+| prefill expert leg, rows = 64, E = 512 | within **10 %** of the **5.70 µs / expert-bucket** primitive (not `bytes / 292 GB/s`); co-scheduling sign checked at E ≥ 512 where it is measured to win (B/A 0.85–0.91) | **[M]** `out_prefill_scale.txt`; D18, because `rate_b` is 14–34 % optimistic in this regime | someone used a rate outside its regime again; recompute from primitives (LESSONS 81) |
+| two-card split | measured wall within **15 %** of the D14 crossing point at the operating rows; never validated by equal-share intuition | **[M]** D14; GLM's row now rests on a measured `T_parent` = 101.1 µs/layer, not the assumed 595 | the model omits stall (D19): report wall AND device before blaming the split rule |
+| card ⇄ parent interference | engine slowdown while the card is saturated: **TBD** — to be set from `out_interference_raw.txt` (`run_plan_close.sh` S2) | TBD | do not invent this number; the max(·) model silently assumes it is zero |
+| joint step vs model | one real three-home step within **15 %** of `layer_us_joint`, or the model gains a stall term | TBD (needs the vertical slice) | this is the last gate that can invalidate the headline multiplier, not a detail |
+| power / thermal | sustained anchor duty cycle at **≤ 100 W**, no throttle events over the soak | **[M]** ~87 W sustained, `out_sustained_power.txt` | chassis question, not a kernel question (see `b70-decisions.md` operator questions) |
+
 ## What the harness deliberately does not test
 
 * Bit-exactness between the B70, the CPU and the 3090 paths (different rounding by construction;
