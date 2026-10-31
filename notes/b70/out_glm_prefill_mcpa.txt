@@ -1,0 +1,62 @@
+# GLM prefill, plain vs `-mcpa`, watchdogged and attended — the sign of promotion is per-PHASE, not per-model
+
+Why this arm needed special handling. The unattended version of it hard-hung this box on 2025-11 (LESSONS 87):
+GLM's routed experts are 109.3 GiB against 125 GiB of host RAM and `-mcpa` asks for **pinned** promotion pages on
+top, so `mem_guard.py` now refuses GLM arms outright. This run overrode that deliberately and with a kill switch:
+`notes/b70/run_glm_mcpa_attended.sh` takes the smallest useful footprint (chunk 1024, one timed chunk, cache 2560)
+and polls `MemAvailable` every 3 s, killing the bench below 8 GiB. Observed floor during the run: **19 GiB** — the
+load alone consumed ~100 GiB, which is the margin the earlier queue did not have. The watchdog never fired and the
+machine is fine.
+
+Question, owned by D20 in `doc/port/b70-decisions.md`: `-mcpa` is worth **+30/+50 % on Qwen prefill** but costs
+GLM **decode −29 %** (copy bucket 0.2 → 151.2 µs/layer). Is that a property of the model or of the phase? Nothing
+measured so far could say, and GLM is the model where the card's case is strongest — so its reopening condition
+was written as "if promotion WINS on GLM prefill, the rule becomes per-phase".
+
+## Result (chunk 1024, `-mcs 258` = 30 of 288 experts local, `-mct 15`, 42 MoE layers, paired in one shell)
+
+| arm | tok/s | wall ms/chunk | device ms/chunk | expert | **copy** | other | gemm | rest |
+|---|---|---|---|---|---|---|---|---|
+| plain  | **126** | 9084 | 9534 | 1069 | **7685 (80.6 %)** | 448 | 250 | 81 |
+| `-mcpa`| **167** | 8028 | 9514 | 1064 | **7697 (80.9 %)** | 427 | 246 | 81 |
+
+## What it says
+
+1. **`-mcpa` helps GLM prefill by +33 % (126 → 167 tok/s) while it costs GLM decode 29 %.** D20's reopening
+   condition fired: the sign of promotion is **per-phase, not per-model**. Operationally that is an awkward answer
+   — a flag cannot be on for prefill and off for decode — so the build needs either a phase-aware promotion policy
+   or a per-phase gate, and this is the strongest argument yet that promotion and the card are governed by
+   different rules in the two phases.
+2. **The gain is entirely on the host side.** Device time is unchanged (9534 → 9514 ms) and so is the copy bucket
+   (7685 → 7697 ms); what shrank is the wall, by 1056 ms/chunk. So `-mcpa` removed serialized *host* expert wait,
+   exactly the substitution D15 describes, and did not make the GPU do anything different. Device-work-based
+   reasoning would have predicted no benefit from this arm; wall-clock measurement found it.
+3. **GLM prefill on the parent is 80.6 % copy traffic.** Real model work is ~780 ms of a 9534 ms device total.
+   With 30 local experts carrying ~273 rows each (1024 tokens × topk 8 / 30) against `EXL3_MOE_FUSED_ROWS` = 128,
+   the fused kernel is in its reconstruct regime — `moe_unswizzle_kernel` runs 5285 times per chunk — and the
+   activation round trip for 258 homed experts stacks on top. This is the extreme case of what
+   `out_prefill_decomp.txt` found on Qwen (39 % copy at `-mcs 256`, 77 % at 4.05 bpw), and it is the clearest
+   statement in this plan that the tiering *mechanism*, not the expert arithmetic, is the parent's prefill
+   bottleneck on big models.
+4. Absolute throughput: **126 tok/s plain / 167 tok/s with `-mcpa`** at chunk 1024. Chunk 4096 measured 119 tok/s
+   earlier (`out_prefill_decomp.txt` predecessor, pre-crash transcription), so chunk size barely matters here
+   either — consistent with the flat chunk-size result on Qwen (LESSONS 75).
+
+## Caveats
+
+* Two arms, one process order (plain then `-mcpa`), one prompt. Cross-process levels on this box vary ~2.4 %, so
+  the +33 % is a within-shell paired difference and the absolute tok/s should not be compared against the crashed
+  pass's 119 tok/s as if the two were the same instrument.
+* Decode's −29 % and prefill's +33 % were measured at different contexts (2048 vs 1024-token chunks) and batch
+  (b=1 both), so "per-phase" is established but the crossover point in *time* (how long a prefill must be before
+  promotion pays for its churn) is not.
+* The decode result was strong enough that the honest interim recommendation is: **do not enable `-mcpa` for a
+  GLM deployment that serves interactive decode**, which is nearly all of them, regardless of what it does for
+  batch ingest.
+
+## Reproduce
+
+    source notes/env.sh
+    bash notes/b70/run_glm_mcpa_attended.sh      # attended; watchdog kills the bench below 8 GiB MemAvailable
+    # log: notes/b70/logs/glm_mcpa_prefill.txt   watchdog: notes/b70/logs/watchdog_glm.txt
+</content>

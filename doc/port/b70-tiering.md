@@ -15,7 +15,7 @@ from “big model / big quant” (GLM, 2.68+):
 |---|---|---|---|
 | Qwen3.8@2.05, `-mcs 256` | comfortable | **+30 %** prefill (858 → 1114 tok/s) | **substitute** over one term: combined cap 1.69×, incremental only 1.34× |
 | Qwen3.8@2.68, `-mcs 384` | thin | **+50 %** (490 → 736) | mostly substitute, larger prize because the CPU leg is bigger |
-| GLM@3.05, 109.3 GiB of experts vs 24 GiB — and **87 % of host RAM** (125 GiB box, pinned staging on top), so the CPU home has no reserve either: a GLM `+ -mcpa` chunked-prefill arm hard-hung this machine (LESSONS 87) | essentially none | **−29 % at decode b=1 (16.0 → 11.4 tok/s)**; prefill not measured | **complement and then some**: the parent is 71 % exposed stall, so the card is the only way to lift the step; but promotion must be throttled hard, since a GLM expert upload costs 0.66 ms |
+| GLM@3.05, 109.3 GiB of experts vs 24 GiB — and **87 % of host RAM** (125 GiB box, pinned staging on top), so the CPU home has no reserve either: a GLM `+ -mcpa` chunked-prefill arm hard-hung this machine (LESSONS 87) | essentially none | **−29 % at decode b=1 (16.0 → 11.4 tok/s)**; **+33 % at prefill (126 → 167 tok/s)**, measured in a watchdogged attended run — the sign flips with the phase, not the model | **complement and then some**: the parent is 71 % exposed stall, so the card is the only way to lift the step; but promotion must be throttled hard, since a GLM expert upload costs 0.66 ms |
 
 Derived, and it is the load-bearing arithmetic: on 2.05 prefill the CPU expert leg is **2619 ms of a 4609 ms
 chunk (57 %)**, `-mcpa` removes **948 ms of that term (36 %)**, and moving the whole expert leg to the card costs
@@ -130,6 +130,16 @@ non-expert term, so the card has ~1.25 s of free shadow and the parent has none:
 3090 adds to the critical path monotonically — 1988 → 2248 → 2509 → 3029 ms as the card share falls from 1.00 to
 0.00. Capacity does not force otherwise either: the 3090 must hold experts only when the set exceeds 31.9 GiB
 (2.68: 37.5 GiB), and then the leftover belongs on its *hot* end, not spread evenly.
+
+**Amended by the kernel decomposition (`notes/b70/out_prefill_decomp.txt`, D24) — conclusion stands, reason
+changes.** The 1988 ms parent term is not one thing: measured at `-mcs 256`, it is ~1166 ms of model work and
+~756 ms of `copy` belonging to the offload path itself (and 8886 ms of copy, 77 % of device time, at 4.05 bpw).
+This weakens the *magnitude* of the parent's shadow but not the conclusion, because the irreducible part alone
+(1166 ms) still exceeds the card's whole 734 ms expert leg: prefill still never splits. What does change is the
+priority order — if a card home inherits the same host-staged round trip, the transfer tax comes with it, so the
+card's activation path (two-hop host-staged, cross-vendor P2P if one exists, or per-layer batching) is now the
+highest-value measurement in this plan, ahead of any remaining kernel work. Until it exists, quote the prefill
+upside as bounded by **~1.15 s of real work per 4096-token chunk**, not by 1988 ms of "non-expert".
 
 Three things this arithmetic is **not**, stated because they are the parts that could move the numbers:
   * † **GLM's parent leg is measured** (rows 4/8/16 recomputed from it on 2025-11; the versions of these rows

@@ -25,7 +25,7 @@ mkdir -p $CS
 mkdir -p $LOG
 Q=$LOG
 say() { echo "### $* $(date '+%m-%d %H:%M:%S')" | tee -a $Q/progress.txt; }
-mem()  { echo "  MemAvailable $(awk '/MemAvailable/{printf \"%.0f GiB\", $2/1048576}' /proc/meminfo)" | tee -a $Q/progress.txt; }
+mem()  { awk '/MemAvailable/{printf "  MemAvailable %.0f GiB\n", $2/1048576}' /proc/meminfo | tee -a $Q/progress.txt; }
 
 # Wait for the FIRST queue only -- and the pattern must not match this script's own name. The first version
 # waited on "b70/[r]un_plan_close", which also matches run_plan_close2.sh, i.e. ITSELF, so the queue sat in its
