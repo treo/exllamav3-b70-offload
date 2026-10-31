@@ -1243,7 +1243,42 @@ nothing that is the sole instance of a measurement.
     decision flipped" as a finding; (3) two paths computing the same quantity must agree to the digit or be
     reconciled in the artifact - a mismatch is a cheap, high-signal bug detector that only works if you look.
 
+69. **Never edit a file with a script. `edit`/`write` only — because a scripted edit has no failure mode.**
+    Stated as policy since the first corrupted-source incident (a lost newline → `IndentationError`, an
+    unterminated argparse string, an unbalanced `pprint`). Tonight it produced three defects that a tool call
+    would have refused outright:
+      * **Silent work loss.** `doc/port/b70-kernels.md` gained a 13b–13r item list, grep confirmed it at line
+        351, and the committed file afterwards did not contain it — while §4 of the same file cited `item 13b`,
+        so the tree shipped dangling internal references. git history (`bfa5579b` showing 3 changed lines where
+        ~50 had been written) proves a scripted write clobbered it. There was no error, no partial state, no
+        signal. `edit` cannot do this: a non-matching or ambiguous anchor raises before anything is written.
+      * **Character corruption.** One of my heredoc-inserted lines contained a stray CJK glyph (`dpas殖`),
+        invisible in terminal output, only caught by re-reading the text I had supposedly written.
+      * **Twice more, knowingly.** I reached for `sed -i` on `b70-prefill.md` and appended a section with
+        `open(p,'w').write()` — after writing the commit message describing this exact failure class. Both
+        happened to work, which is the trap: `python3 - <<'PY'` prints nothing on success, so "it worked"
+        carries no information about whether it worked *correctly*, and the two cases where it did not are
+        indistinguishable from the cases where it did.
+    The general form: a heredoc edit is unobservable in the success case, so its safety depends entirely on my
+    noticing the rare visible failure — the same betting structure as skipping a negative control. Tool edits
+    are atomic and loud; that is the whole argument, and it is not about convenience. Corollary now enforced
+    by a gate rather than memory: `check_tables.py` checks table shape, and this file is where the reasoning
+    lives — if a claim's provenance cannot be re-derived from the tree, the claim should be treated as lost
+    work in progress, not as done.
+
+70. **When a probe's conclusion is a mechanism claim, prove which resource bounds it.** `probe_slm` bundled two
+    findings and only one survived: the SLM staging penalty (1.5–6.0x, mechanism verified in the archived dump:
+    +80 `load.slm` +89 `store.slm` over 80 identical global vector loads, spills equal across modes) and the
+    claim that concurrent global re-reads beat unique reads (1690 vs 1349 GB/s). The second died on a second ISA
+    read — both bodies are dominated by scalar address arithmetic (149 `add`, 100 `shl` vs 32 vector loads) and
+    the reuse mode did 32x the loads per iteration for a near-identical time. Matching ALU per element (LESSONS
+    68) is necessary but not sufficient: you also have to show both arms are bound by the thing you are
+    attributing the difference to. Corollary for this repo: bundle claims at your peril, since a retraction that
+    lands correctly has to find *every* file that repeated the strong form — five did here.
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
+    (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
+    unchanged and is what LESSONS 68 refers to.)
     `probe_slm` exists to answer one question: is the reuse prefill needs cheaper via SLM staging or via letting
     a work-group's items read the same global bytes concurrently. I made the three modes do the same ALU chain
     per dword and considered that fair. The ISA said it was not: the baseline's loop lowered to 80
