@@ -32,7 +32,8 @@ instead of inheriting the constant that the CPU path uses on this box.
 
 Positive:
 
-* The 28.6 percent device-time share of expert transfer disappears from card-resident prefill.
+* Expert transfer stops taking a share of card-resident prefill device time. The measured share on the CPU path is
+  28.6 percent, and this record quotes it as the cost of the machinery being retired rather than as a card forecast.
 * No packed-to-native restore is needed for card bytes, so the layout question stays inside one device. See
   ADR-0027.
 * The card prefill path needs no host synchronisation to decide what to stream, because the device decides per
@@ -70,9 +71,3 @@ Neutral:
 * [`doc/prep/measured-costs.md`](../prep/measured-costs.md) §7, §8
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E5, E7′
 * Related: ADR-0014, ADR-0024, ADR-0025, ADR-0027, ADR-0036
-
-## Amendment
-
-The headline "28.6 percent" is the CPU path's measured share, not a card measurement. It is quoted as the
-cost of the machinery being retired, which is what the decision removes, and not as a promised saving on the
-card. The distinction is in this sentence because a reader can reasonably take the figure as a card forecast.

@@ -75,8 +75,3 @@ Neutral:
   [`notes/b70/profiles/live/`](../../notes/b70/profiles/live/)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 63, item 64, item 89
 * Related: ADR-0012, ADR-0013, ADR-0014, ADR-0024, ADR-0039
-
-## Amendment
-
-Three separate findings in this plan each took an order statistic after collapsing a distribution, and each was defended
-at the time. The rule is now written where the input enters rather than only where the error appeared.

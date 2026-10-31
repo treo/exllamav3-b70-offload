@@ -73,12 +73,3 @@ Neutral:
   and [`notes/b70/out_quant_scaling.txt`](../../notes/b70/out_quant_scaling.txt) is the recipe axis
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E19, E20
 * Related: ADR-0010, ADR-0011, ADR-0013, ADR-0038
-
-## Amendment
-
-This record first said "minimises the per-layer maximum, and orders by frequency while a residue
-exists", which read as one rule with an exception. Measurement made it two rules with a selector, and the
-selector is the decision. The change is recorded here rather than edited silently, because the earlier
-form ships the wrong rule for the dense recipes. The percentages quoted here were also re-set against the
-current planner run, because the architecture's table predates the engine-measured parent leg and the live
-routing traces.

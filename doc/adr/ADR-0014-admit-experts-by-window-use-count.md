@@ -14,8 +14,8 @@ assignment on the same expert costs about 199 µs per use, and the card about 31
 about four uses, and that ratio is scale-invariant: it moves only from 3.8 to 4.1 uses across
 the whole measured rate range of 132 to 545 GB/s.
 
-An earlier draft charged the upload per pick, which made migration look fifty times more expensive than
-it is and produced the wrong verdict: "do not migrate, let the CPU serve the residue". The distinction
+Charging the upload per pick instead of per migration makes migration look fifty times more expensive than
+it is, and it yields the wrong verdict: "do not migrate, let the CPU serve the residue". The distinction
 that decides the policy is that CPU cost accrues per pick and never stops, while admission is paid once
 per newly resident expert.
 

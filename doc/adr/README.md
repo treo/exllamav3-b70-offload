@@ -25,10 +25,10 @@ sentence length, banned modals, and banned filler. It exits nonzero, because a c
 decoration. No tool can guarantee full ASD-STE100 compliance, and the standard is a free download at
 asd-ste100.org.
 
-Each record uses the project template, with one addition. A template section named `Amendment` is
-permitted at the end, and it is used only to say what an earlier version of that decision claimed and
-what replaced it. A reopening condition is not a section: it is written as a `Neutral` consequence, so
-that a reader who skims Consequences cannot miss it.
+Each record uses the project template with no added sections. A record is corrected in place, and the commit
+history is the revision log. A reopening condition is not a section: it is written as a `Neutral` consequence, so
+that a reader who skims Consequences cannot miss it. When a decision itself changes, write a new record with a new
+number, mark the old one Superseded, and let the old text stand as what was believed at the time.
 
 Run the checks before commit:
 
@@ -277,8 +277,8 @@ These are the decisions a measurement can still move. Each is a live risk, not a
 
 1. Take the next free number. Never reuse a number, and never renumber an existing record, because
    numbers are cited in commits, artifacts and other records.
-2. Copy the template, and keep the section order. Add an `Amendment` section only when an earlier claim
-   in that same record needs to stay visible.
+2. Copy the template, and keep the section order. Correct a record in place rather than appending a note about
+   what it used to say, because the set has not circulated yet.
 3. Write the status as one of Proposed, Accepted, Rejected, Deprecated, or Superseded by ADR-XXXX. A
    gated decision keeps an Accepted status and names its gate inside Consequences.
 4. Put the reopening condition in Consequences as a Neutral item. A decision with no reopening condition

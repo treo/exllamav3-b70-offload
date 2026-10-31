@@ -66,9 +66,3 @@ Neutral:
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) per-flag acceptance table
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 45
 * Related: ADR-0039, ADR-0040, ADR-0044, ADR-0047
-
-## Amendment
-
-Gate E4 was previously recorded as failing against a single projected number, 420 GB/s or better. It is restated as a
-footprint-matched bracket with named pass conditions, because the projection was not measurable at the shape it named and
-the gate, not the kernel, was the thing that was wrong.

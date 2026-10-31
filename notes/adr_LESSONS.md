@@ -47,8 +47,9 @@ the substantive objections get lost. The same argument is why the harness insist
 
 The project's ledger convention requires every decision to name what would reopen it, and the supplied ADR
 template has no section for that. Left unstated, that gap produces one extra section per author. The policy
-now written into the index is: reopening conditions live in `Neutral` consequences, and one optional
-`Amendment` section carries a prior claim that must stay visible. Nothing else may be added, and the checker
+now written into the index is: reopening conditions live in `Neutral` consequences, and no other section is allowed.
+An optional trailing section was tried and then removed, because a first-time reader does not need to know what an
+earlier draft of a record said. Nothing else may be added, and the checker
 rejects an unknown section name rather than ignoring it.
 
 ## W7. Identifiers are a shared namespace, and titles drift
@@ -139,7 +140,8 @@ faithful to the wrong source.
 
 So: when a record quotes a derived table, open the artifact that printed it, and compare the two dates. Where the
 artifact is newer, the record carries the artifact's numbers and names the document's table as superseded, and the
-document gets a data-currency note pointing at the record, which is what §2.1a now has. A checker cannot catch this
+document gets a data-currency note pointing at the record, which is what §2.1a now has. The record states the current
+numbers and nothing else, because a first reader has no use for the old ones. A checker cannot catch this
 class, because both numbers are real.
 
 ## W17. One of my own checks could not fail
@@ -148,7 +150,7 @@ The record validator reported "sections duplicated or out of template order", bu
 `sections != sorted(set(sections), key=sections.index)`, which compares a list to a re-sort of itself by its own order.
 That is always false. The duplicate half of the message worked, because a separate length test caught it, and the order
 half was decoration with a confident name on it. It survived until I needed the order rule to check a real question,
-whether `Amendment` belongs before or after `Links`.
+whether an optional trailing section belongs before or after `Links`.
 
 The general form: a check earns its keep only when it has been seen to fail on the thing it claims to catch. When I
 wrote this one I tested it by running it on clean files and reading "0 failures", which is the same mistake `LESSONS`
@@ -165,6 +167,20 @@ A topic list is what you remember. A row list is what the source promised, and a
 the promise. So: take each table in the source documents, print its first column, and require a mapping for every
 row. Where a row's status is "open" or "provisional", that is still a row the set must account for, in the open-items
 table if nowhere else.
+
+## W20. Do not narrate a revision that nobody has seen
+
+Thirty-two records grew an `Amendment` section saying what the first draft of that record had claimed. Nobody outside
+this session had read a draft, so every one of those sections was a paragraph of noise attached to a clean decision.
+They also diluted the finding they were meant to protect: a reader who wants the current number has to subtract my
+drafting history from the prose to get it.
+
+The rule now is that a record is corrected in place, and the commit message carries the change. Where an amendment
+held a caution with no other home, that caution moved into Consequences or Alternatives as a present-tense statement,
+which is where a caution belongs anyway. Fourteen such clauses survived that test, and the other eighteen were pure
+history. A decision that genuinely changes later gets a new number and a Superseded status, because then there is a
+reader on both sides of the change. The checker dropped `Amendment` from its allowed sections so the old habit cannot
+creep back.
 
 ## W19. I committed through my own failing check, by piping it into `tail`
 

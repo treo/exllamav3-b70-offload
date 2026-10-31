@@ -8,8 +8,7 @@
 ## Context
 
 Most of this plan's headline numbers are batch-1 numbers, and the phrase that carries them is "the offload
-is hidden behind the parent's own per-layer work". That phrase is true at one point in the batch range, and
-false at both ends of the way out of it.
+is hidden behind the parent's own per-layer work". That phrase holds at small batch, and it stops holding as rows grow.
 
 The parent's per-layer time at batch 1 is dominated by weight reads, which do not grow much with batch, plus a
 per-sequence term that does. The card's per-layer work is the union of the experts the batch's rows touch, which
@@ -51,10 +50,10 @@ Positive:
 
 Negative:
 
-* The concurrency figures published earlier in the plan, and the ones in the harness gate for E21, come from a run
-  of the same planner that predates the fused kernel schedule and the engine-measured parent leg. That run had the
-  card binding from about batch 4 with no return of the parent, and lower aggregate throughput at every point. The
-  current run supersedes it, and every place that quotes the old numbers needs the same treatment this record got.
+* The concurrency figures published in the plan, and the ones in the harness gate for E21, come from a run of the
+  same planner that predates the fused kernel schedule and the engine-measured parent leg. That run had the card binding
+  from about batch 4 with no return of the parent, and lower aggregate throughput at every point. Those places now carry
+  a note that the current run supersedes them.
 * The middle band where the card binds is exactly the band where a locality or fusion gain pays, so the batch at
   which the card tuning matters is a narrow one at this recipe.
 * Aggregate throughput past the crossover is a property of the card's byte rate, so it is bought with cards rather
@@ -88,11 +87,3 @@ Neutral:
   the superseded run
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E9, E10, E21
 * Related: ADR-0011, ADR-0012, ADR-0026, ADR-0028, ADR-0029, ADR-0037
-
-## Amendment
-
-This record was first written against the earlier planner run, which said the card binds from about batch 4 onward
-and never loses that place, with 1739 tokens per second at batch 256. The current run prices the card with the fused
-gate and up schedule and the parent with its engine-measured leg, and it gives about 3100 tokens per second at batch
-256 with the parent binding there instead. The direction of this decision is unchanged, and its boundaries moved by a
-factor of two to four.

@@ -80,9 +80,3 @@ Neutral:
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E4, E4b, E4c, check A9
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 17, item 54
 * Related: ADR-0026, ADR-0027, ADR-0029, ADR-0036, ADR-0039
-
-## Amendment
-
-This record first read "native tile layout, no repack" as closed by measurement. The measurement is a null whose
-variance exceeds its effect, so the status was demoted to a decision made on engineering grounds with a named
-reopening condition. The locality half of the record gained strength in the same period and is now normative.

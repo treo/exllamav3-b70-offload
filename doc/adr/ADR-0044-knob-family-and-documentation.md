@@ -48,6 +48,9 @@ Neutral:
 
 * Card-side thread-count and pinning variables exist for the engine's two host threads only. There is no worker pool to
   size, so the CPU family's pool knobs have no card counterparts, and their absence is documented rather than incidental.
+* `EXL3_MOE_B70_SLOTS` and `EXL3_MOE_B70_SLOT_ROWS` are shape knobs whose proposed values of 4 and 256 are provisional.
+  On the CPU path a row capacity silently selected a different data path. The card must assert the interaction between slot
+  capacity, verification width and fused eligibility instead of relying on a default.
 
 ## Alternatives considered
 
@@ -64,10 +67,3 @@ Neutral:
 * [`doc/port/b70-architecture.md`](../port/b70-architecture.md) §8
 * [`notes/b70/check_tables.py`](../../notes/b70/check_tables.py)
 * Related: ADR-0021, ADR-0039, ADR-0045, ADR-0046
-
-## Amendment
-
-`EXL3_MOE_B70_SLOTS` and `EXL3_MOE_B70_SLOT_ROWS` are classified as shape knobs, and their proposed values of 4 and
-256 are
-provisional. The CPU-path lesson that a row capacity can select a different data path applies to the card too, so the
-interaction between slot capacity, verification width and fused eligibility needs an explicit assertion rather than a default.

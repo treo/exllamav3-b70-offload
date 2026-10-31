@@ -66,9 +66,3 @@ Neutral:
 * [`doc/port/b70-architecture.md`](../port/b70-architecture.md) §3 P1
 * [`doc/prep/moe-cpu-offload-data-paths.md`](../prep/moe-cpu-offload-data-paths.md) §1, §2
 * Related: ADR-0003, ADR-0005, ADR-0020, ADR-0023
-
-## Amendment
-
-This record covered both directions of the payload when it was written. ADR-0005 owns the mechanism, and
-this record owns the message shape. The split is recorded here so that a reader of the older draft does not
-conclude that two competing payload designs exist.

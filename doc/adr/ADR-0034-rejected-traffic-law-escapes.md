@@ -48,7 +48,9 @@ Two measurement lessons travel with these results, and both are why the third ve
 apparent fault was a host-side allocation sized for one bucket while the kernel read several, which produced a
 non-monotonic "compiler edge case" pattern that was pure address-layout noise. Read the kernel log before theorising
 about the driver. The second is that a faulted and reset card is indistinguishable from an un-ramped one, which is what
-the fixed anchor in the harness exists to separate.
+the fixed anchor in the harness exists to separate. A third lesson belongs here. The staging probe's first conclusion was
+that concurrent global re-reads cost less than unique reads. That result is retracted in the source record, because both
+probe bodies were dominated by scalar address arithmetic. The rejection above does not rest on it.
 
 ## Alternatives considered
 
@@ -72,10 +74,3 @@ These are the three rejected mechanisms themselves, each of which had a written 
 * [`doc/port/b70-prefill.md`](../port/b70-prefill.md) §4a, §6
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 48, item 68, item 70, item 72
 * Related: ADR-0026, ADR-0029, ADR-0031, ADR-0035
-
-## Amendment
-
-One number first reported from the staging probe, that concurrent global re-reads were cheaper than unique reads, is
-retracted as a measurement. Both probe bodies turned out to be dominated by scalar address arithmetic, so the result
-said nothing about memory. It survives only as a hypothesis for the co-scheduling test. That test measured a benefit of 5
-to 16 percent, where the retracted figure had implied about 25 percent of cheaper re-reads.

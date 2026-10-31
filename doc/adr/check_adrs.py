@@ -20,7 +20,7 @@ ROOT = HERE.parent.parent
 
 FILENAME_RE = re.compile(r"^ADR-(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
 REQUIRED_SECTIONS = ["Context", "Decision", "Consequences", "Alternatives considered", "Links"]
-OPTIONAL_SECTIONS = ["Amendment"]
+OPTIONAL_SECTIONS: list[str] = []
 ALLOWED_STATUS = {"Proposed", "Accepted", "Rejected", "Deprecated"}
 META_BULLETS = ["Status", "Date", "Deciders", "Tags"]
 

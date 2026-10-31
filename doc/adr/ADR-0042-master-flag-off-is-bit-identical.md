@@ -37,7 +37,8 @@ Negative:
   harmless, so the shared-protocol refactor of ADR-0043 must be gated by the CPU suite as well and not by this test alone.
 * Two configurations must be built and exercised continuously rather than one.
 * Fixtures become load-bearing. The corpus is pinned, and a change to it invalidates the comparison, which is why the
-  corpus is a committed file rather than generated text.
+  corpus is a committed set of twelve distinct documents, each used once, rather than generated text. A repeated-text
+  corpus inflated prefill throughput by 4.2 percent while cutting the distinct experts touched.
 
 Neutral:
 
@@ -59,9 +60,3 @@ Neutral:
 * [`notes/b70/fixtures/prefill_pool.txt`](../../notes/b70/fixtures/prefill_pool.txt)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 76
 * Related: ADR-0040, ADR-0043, ADR-0045, ADR-0047
-
-## Amendment
-
-This gate was written after a repeated-text corpus was found to inflate prefill throughput by 4.2 percent while reducing
-distinct experts touched. The corpus is a committed set of twelve distinct documents, each appearing once, and not
-generated text.

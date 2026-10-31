@@ -69,6 +69,8 @@ Neutral:
   that collapsed between batch 1 and 2.
 * Use the profiler to settle performance questions: rejected, because the profiler costs about 30 percent, and the
   standing rule is to run the power and profile instruments before changing code, not instead of it.
+* Warm up for 15 to 20 seconds: superseded. A warm-up sweep converged at one second, and nothing appeared after it.
+  Three artifacts still quote the longer figure, so read the requirement from this record.
 
 ## Links
 
@@ -76,9 +78,3 @@ Neutral:
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) hygiene rules and cadence
 * [`doc/prep/measured-costs.md`](../prep/measured-costs.md) §8.3
 * Related: ADR-0036, ADR-0037, ADR-0038, ADR-0040, ADR-0041, ADR-0046
-
-## Amendment
-
-The harness previously required a 15 to 20 second warm-up. A warm-up sweep showed convergence at one second and nothing
-after, so the requirement was corrected in duration while keeping its continuity clause, and the correction is recorded
-because the old number is quoted in three artifacts.

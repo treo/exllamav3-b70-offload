@@ -69,8 +69,3 @@ Neutral:
 * [`doc/prep/README.md`](../prep/README.md) uniformity watch-out
 * [`doc/prep/moe-cpu-offload-data-paths.md`](../prep/moe-cpu-offload-data-paths.md) §1
 * Related: ADR-0010, ADR-0013, ADR-0016, ADR-0027, ADR-0042
-
-## Amendment
-
-The memory preflight originally ran inside three benchmark scripts. It now runs in the loader path that all three call, and
-the change is recorded because the guard's location, not its threshold, was the defect.

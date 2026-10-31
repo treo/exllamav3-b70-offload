@@ -66,9 +66,3 @@ Neutral:
 * [`notes/b70/out_sustained_power.txt`](../../notes/b70/out_sustained_power.txt)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 11
 * Related: ADR-0008, ADR-0031, ADR-0039, ADR-0046
-
-## Amendment
-
-An earlier note in the plan warned that all decode rates were warm-window rather than soak measurements. The 150 second
-soak retired that caveat for kernel time and replaced it with a narrower one, which is that hour-scale memory and
-voltage-regulator temperatures remain unmeasured.

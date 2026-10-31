@@ -77,9 +77,3 @@ Neutral:
   [`notes/b70/probe_permute.cpp`](../../notes/b70/probe_permute.cpp)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 24, item 49
 * Related: ADR-0021, ADR-0026, ADR-0028, ADR-0040, ADR-0045
-
-## Amendment
-
-D3 first accepted the device permute at admit as the answer. D3-alt then showed the parent already stages that
-order on this host, and the remaining contractual question was resolved by moving the decision to admit rather than
-into the kernel. Both steps are kept in this one record so that the sequence is visible.

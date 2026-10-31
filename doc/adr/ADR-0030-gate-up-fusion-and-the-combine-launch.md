@@ -54,6 +54,9 @@ Neutral:
 
 * The penalty band's depth increases with rows, from 0.76 times at one row to 0.90 times at 16, while its edges do not
   move. That is why one decision per model and rate is conservative rather than lazy.
+* The table chooses both knobs together because a rule that fixes one and tunes the other was sampled at one expert
+  count. At E of 2 the best fused schedule sits at split-K 4, so a rule that fixes split-K misses the winner at small
+  expert counts.
 
 ## Alternatives considered
 
@@ -75,8 +78,3 @@ Neutral:
   [`notes/b70/out_egrid.txt`](../../notes/b70/out_egrid.txt)
 * [`notes/b70/plan_decode_cost.py`](../../notes/b70/plan_decode_cost.py) `best_launch()`
 * Related: ADR-0026, ADR-0031, ADR-0032, ADR-0035
-
-## Amendment
-
-D8 was first written as "they are substitutes, fuse at split-K 1". Measurement at two experts showed the best schedule
-fused *and* at split-K 4, so the exclusive form was an artifact of one expert count and is replaced by the joint table.

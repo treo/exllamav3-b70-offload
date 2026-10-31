@@ -71,9 +71,3 @@ Neutral:
 * [`doc/port/b70-architecture.md`](../port/b70-architecture.md) §13
 * [`notes/b70/plan_decode_cost.py`](../../notes/b70/plan_decode_cost.py) `layer_us_joint()`
 * Related: ADR-0007, ADR-0026, ADR-0037, ADR-0042, ADR-0046
-
-## Amendment
-
-The slice spec was written after two other first-deliverable candidates, a null-kernel protocol test and a full decode path.
-The null-kernel test survives inside it, as the control configuration, because a protocol test with no arithmetic answers the
-integration question and none of the composition ones.

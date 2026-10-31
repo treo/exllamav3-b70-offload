@@ -76,10 +76,3 @@ Neutral:
   [`notes/b70/out_resident.txt`](../../notes/b70/out_resident.txt),
   [`notes/b70/out_e25c_barrier.txt`](../../notes/b70/out_e25c_barrier.txt)
 * Related: ADR-0004, ADR-0035, ADR-0039
-
-## Amendment
-
-The first version carried the two inherited figures side by side without converting them: a saving of 2 to 5 µs per
-layer, and a gate of 20 µs per token. Converted, the projection exceeds the gate by a factor of 5 to 12, which lets
-an estimate appear to pass a gate that exists to test a measurement. The decision is unchanged, and the gate now
-carries its unit next to it.

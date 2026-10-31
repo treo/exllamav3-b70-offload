@@ -75,9 +75,3 @@ Neutral:
   [`notes/b70/out_kernel_split.txt`](../../notes/b70/out_kernel_split.txt)
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gate E23
 * Related: ADR-0026, ADR-0028, ADR-0031, ADR-0036
-
-## Amendment
-
-The byte floor was previously carried as a modelling assumption with a note that the vendor's kernels did not
-deduplicate. It is now a kernel requirement with a named gate, because the note described someone else's kernel and
-not a constraint on ours.

@@ -55,6 +55,8 @@ These are the rejected designs, each with the argument that motivated it:
 * Fuse the two independent gate and up chains inside one item body: rejected, 42 to 125 percent slower at low rates,
   because the two chains compete for the same scoreboard slots and the fused form needs twice the accumulators. The
   grid-level fusion that won, in ADR-0030, keeps one projection per item for exactly this reason.
+* Reject this fusion on barrier cost: wrong on its own terms, because a group-scoped barrier measured free. The fill
+  penalty is the reason that survives, and the barrier argument was replaced rather than refined.
 * A resident kernel that removes the submission entirely: not rejected on principle, but gated on a measured 20 µs per
   token saving. See ADR-0008.
 
@@ -67,9 +69,3 @@ These are the rejected designs, each with the argument that motivated it:
   [`notes/b70/probe_groupfused.cpp`](../../notes/b70/probe_groupfused.cpp)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 43, item 60
 * Related: ADR-0004, ADR-0006, ADR-0008, ADR-0023, ADR-0030, ADR-0033
-
-## Amendment
-
-D10 was first rejected on the barrier cost. The barrier argument was wrong on its own terms, because a group-scoped
-barrier is free, so the record now leads with the fill cost that measurement actually supports. The rejection stands,
-but the reason does not resemble the original.

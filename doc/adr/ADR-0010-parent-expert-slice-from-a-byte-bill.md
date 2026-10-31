@@ -76,11 +76,3 @@ Neutral:
   [`notes/b70/out_parent_budget.txt`](../../notes/b70/out_parent_budget.txt)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 22
 * Related: ADR-0009, ADR-0011, ADR-0013, ADR-0036
-
-## Amendment
-
-An earlier version of this record carried the design document's traffic figures: 96.8 µs per layer, about 39 percent
-bandwidth duty, and one free-slice number of 16.6 GiB for both models. The planner's current run prints 105.3 µs for
-Qwen3.8 and 157.3 µs for GLM, computed at the measured 860 GB/s rather than at the 936 GB/s spec, and it prints 18.25
-GiB free on Qwen3.8 against 16.61 GiB on GLM. The conclusion is unchanged, because it turns on the ratio rather than on
-either value.

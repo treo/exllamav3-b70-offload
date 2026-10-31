@@ -76,8 +76,3 @@ Neutral:
 * [`doc/port/b70-kernels.md`](../port/b70-kernels.md) §2.4, §3
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 25, item 31, item 44
 * Related: ADR-0020, ADR-0023, ADR-0026, ADR-0040, ADR-0049
-
-## Amendment
-
-Gate D6 of the decode chapter was recorded as a rule about epilogues. The flag is added here as a second, independent
-defence, because the rule alone depends on every future author knowing the reason.

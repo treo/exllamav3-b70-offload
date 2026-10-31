@@ -69,9 +69,3 @@ Neutral:
 * [`doc/prep/moe-cpu-offload-data-paths.md`](../prep/moe-cpu-offload-data-paths.md) §6
 * [`doc/port/b70-kernels.md`](../port/b70-kernels.md) §5
 * Related: ADR-0019, ADR-0025, ADR-0033, ADR-0040
-
-## Amendment
-
-The first version of this record said card-side summation of the card's own partials was optional. The batch sweep
-made it a requirement at the largest batch in that model, 256, where the computed share is 31 percent of the card's
-time, and the sentence was corrected here rather than left as a note in a different document.

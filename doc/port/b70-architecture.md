@@ -113,13 +113,13 @@ home whose resulting term is smallest) against the frequency-ordered cut (`P_ord
 | GLM | 1 | 30 | **571** | 623 | ordered, +9 % |
 | GLM | 4 | 120 | **695** | 865 | ordered, +20 % |
 
-> **Data currency note, added when this table was transferred into [`doc/adr/ADR-0012`](../adr/ADR-0012-placement-minimises-the-per-layer-maximum.md).**
-> These µs/layer figures predate two input corrections: the parent's non-expert leg became engine-measured (D11), and the
-> routing input became a live per-layer trace (D12). The current run of the same comparison is
-> `notes/b70/out_parent_budget.txt`: on Qwen3.8 the balanced rule gains 1.5 % at 30 `S_g` slots and 9.8 % at 120, and on
-> GLM the ordered rule gains 3.2 % at batch 1 and 11.0 % at 120 slots. The direction of every conclusion below this line
-> is unchanged by the new numbers, and the margins are not. The GLM rows in that current run still carry the Qwen
-> microbench parent floor, so they await a re-run on GLM's measured 101.1 µs/layer.
+> **Data currency note.** These µs/layer figures predate two input corrections: the parent's non-expert leg became
+> engine-measured (D11), and the routing input became a live per-layer trace (D12). The current run of the same
+> comparison is `notes/b70/out_parent_budget.txt`: on Qwen3.8 the balanced rule gains 1.5 % at 30 `S_g` slots and 9.8 %
+> at 120, and on GLM the ordered rule gains 3.2 % at batch 1 and 11.0 % at 120 slots. The direction of every conclusion
+> drawn from this table is unchanged by the new numbers, and the margins are not. The GLM rows in that current run still
+> carry the Qwen microbench parent floor, so they await a re-run on GLM's measured 101.1 µs/layer. Record:
+> [`doc/adr/ADR-0012`](../adr/ADR-0012-placement-minimises-the-per-layer-maximum.md).
 
 Which is a genuinely mixed answer, and the reason is visible in the objective: **fair-splitting wins
 when the B70 is the binding worker** (Qwen3.8 at b≥4, where the 3090's spare rate beats it) and **loses
@@ -730,12 +730,12 @@ measured rate curve at the matched footprint:
 | 128 | 1175 | 2737 / 4363 | B70 | 974 | 611 |
 | 256 | 2107 | 3067 / 4919 | B70 | 1739 | 1084 |
 
-> **Data currency note, added when this table was transferred into
-> [`doc/adr/ADR-0048`](../adr/ADR-0048-decode-hiding-is-a-small-batch-claim.md).** This run predates the fused gate and
+> **Data currency note.** This run predates the fused gate and
 > up schedule (D8, E25a) and the engine-measured parent leg (D11). `notes/b70/out_concurrency.txt` is the current run:
 > at 2.68 bpw it gives 195.6 µs parent against 38 µs card at rows 1 (107 tok/s), the card binding from rows 16 to 64, and
 > the **parent binding again** at rows 128 and 256 (1721 µs against 1262 µs, 3100 tok/s). So "B70 binds from b≈4 to 256"
-> and this table's tok/s column are both superseded, and the binding worker changes twice rather than once.
+> and this table's tok/s column are both superseded, and the binding worker changes twice rather than once. Record:
+> [`doc/adr/ADR-0048`](../adr/ADR-0048-decode-hiding-is-a-small-batch-claim.md).
 
   The parent's rows-slope is gentle — fixed overhead ~130–146 µs plus 86–101 MiB of batch-independent
   weights plus only ~6.5 MiB per sequence-layer of state and KV — so it is overtaken by b≈4–8 and never

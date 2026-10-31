@@ -61,6 +61,9 @@ Negative:
 Neutral:
 
 * Above 16 rows the engine issues more 16-row launches. See ADR-0031.
+* The planning scripts still carry a rate-based two-path dispatch, integer at one row and the matrix route above it.
+  Measurement removed that exception, and one family now wins at every row count measured, so the switch in those
+  scripts is a leftover rather than intent.
 
 ## Alternatives considered
 
@@ -81,10 +84,3 @@ Neutral:
   [`notes/b70/out_ks_grid.txt`](../../notes/b70/out_ks_grid.txt),
   [`notes/b70/gate_dpas.py`](../../notes/b70/gate_dpas.py)
 * Related: ADR-0027, ADR-0028, ADR-0029, ADR-0030, ADR-0031, ADR-0032, ADR-0033, ADR-0048, ADR-0049
-
-## Amendment
-
-Earlier drafts of the plan carried a two-kernel dispatch, integer dot-product at one row and the matrix route
-above that. Measurement removed the batch exception: one kernel family now wins at every row count measured, and
-the surviving exception is by layout and rate. The change is recorded because the two-path policy is still
-present in the planning scripts and must not be read as current intent.

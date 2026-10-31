@@ -75,10 +75,3 @@ Neutral:
   [`notes/scan_expert_capacity.py`](../../notes/scan_expert_capacity.py)
 * [`notes/b70/mem_guard.py`](../../notes/b70/mem_guard.py)
 * Related: ADR-0009, ADR-0010, ADR-0013, ADR-0014, ADR-0045
-
-## Amendment
-
-This record first repeated the design document's conclusion that a third card buys nothing for GLM. That conclusion was
-computed against an assumed parent leg of 300 µs per layer, and the parent leg is now measured at 101.1 µs, so
-the sweep's per-worker numbers stand while its verdict does not. The re-derivation of the card-count question at the
-measured parent leg is open work, and it belongs with gates E9 and E10.

@@ -76,8 +76,3 @@ Neutral:
   [`notes/b70/analyze_live_trace.py`](../../notes/b70/analyze_live_trace.py)
 * [`doc/port/b70-harness.md`](../port/b70-harness.md) gate E13
 * Related: ADR-0009, ADR-0011, ADR-0033, ADR-0038
-
-## Amendment
-
-An earlier draft priced a spanning row at decode and generalised the conclusion to prefill. The two phases
-differ by three orders of magnitude in row count, and the prefill case is now stated separately above.

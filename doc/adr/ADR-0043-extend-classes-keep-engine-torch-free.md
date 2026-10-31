@@ -67,9 +67,3 @@ Neutral:
 * [`notes/b70/b70_shim.cpp`](../../notes/b70/b70_shim.cpp),
   [`notes/b70/build.sh`](../../notes/b70/build.sh)
 * Related: ADR-0001, ADR-0002, ADR-0003, ADR-0007, ADR-0042, ADR-0044
-
-## Amendment
-
-The code-impact map originally listed "subclass and override" as the plan. This record promotes the factor-out to the plan
-and demotes subclassing to a transitional step with a published override list, because an undocumented override is the way a
-Level-D invariant quietly stops being tested for one worker.

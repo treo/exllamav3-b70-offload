@@ -73,9 +73,3 @@ Neutral:
 * [`notes/b70/out_verify_batch.txt`](../../notes/b70/out_verify_batch.txt),
   [`notes/b70/out_glm_geometry.txt`](../../notes/b70/out_glm_geometry.txt)
 * Related: ADR-0007, ADR-0021, ADR-0029, ADR-0031, ADR-0034, ADR-0038
-
-## Amendment
-
-This record reversed a prior non-goal. The reversal is kept visible rather than edited to read as though the
-plan always said prefill, because the reason for the reversal, a units error plus a collapsed distribution, is
-the reusable finding.

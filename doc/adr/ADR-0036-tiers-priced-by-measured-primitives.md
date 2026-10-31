@@ -67,7 +67,9 @@ Neutral:
   small-footprint rates are partly cache rather than memory.
 * Byte rates scaled by arithmetic intensity: rejected for the parent, because the largest single component is not a
   weight read at all.
-* The datasheet host memory rate: rejected, 11 percent optimistic as a ceiling and unusable at prefill shapes.
+* The datasheet host memory rate: rejected, 11 percent optimistic as a ceiling and unusable at prefill shapes. The
+  planner constant that carried it is limited to the rows-near-one regime, where it is accurate. The prefill rows of the
+  tiering tables use the per-bucket primitive above rather than a rate.
 * Byte rates plus per-phase correction factors: rejected, because three of the corrections were themselves the source of
   factors-of-two errors.
 
@@ -81,9 +83,3 @@ Neutral:
   [`notes/b70/out_parent_leg.txt`](../../notes/b70/out_parent_leg.txt)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 51, item 54, item 81
 * Related: ADR-0011, ADR-0017, ADR-0025, ADR-0031, ADR-0037, ADR-0039
-
-## Amendment
-
-`CPU_RATE` in the planner was labelled a datasheet figure after measurement contradicted it, and is now quarantined to
-the rows-near-one regime where it is accurate. The rate column in the prefill rows of the tiering tables is superseded by
-the per-bucket primitive named above.

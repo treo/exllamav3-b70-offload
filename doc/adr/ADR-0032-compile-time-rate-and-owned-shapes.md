@@ -51,6 +51,9 @@ Neutral:
 
 * The gain shrinks as rows grow, to 1.09 to 1.13 times at four rows, because fixed cost becomes a smaller share. The
   crossover to the matrix schedule is unaffected by this record.
+* The compiled rate began as a probe flag used to measure a ceiling. It is a shipping requirement now, and some
+  planning text still assumes one instantiation per projection. That assumption is not current, because each rate, band
+  group and geometry is its own build artifact.
 
 ## Alternatives considered
 
@@ -72,8 +75,3 @@ Neutral:
   [`notes/b70/sweep_ks_grid.py`](../../notes/b70/sweep_ks_grid.py)
 * [`notes/b70/LESSONS.md`](../../notes/b70/LESSONS.md) item 34, item 49, item 67
 * Related: ADR-0026, ADR-0030, ADR-0031, ADR-0040
-
-## Amendment
-
-The compile-in rate was first recorded as a probe flag used to measure a ceiling. It is a shipping requirement now, and
-the earlier framing as an experiment is what let the engine plan continue to assume one instantiation per projection.

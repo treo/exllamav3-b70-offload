@@ -15,7 +15,9 @@ and uses an older copy path built from explicit host-to-device and device-to-hos
 The copy path costs about 26 µs per layer of parent-side device work against the fused path's 20 µs, and the
 gap is pure protocol overhead. It was tolerated because the copy path was the only one that existed before the
 fused handoff, and because the compute behind it was 200 µs or more. On a card the compute behind it is 43.6
-µs at batch 1, so a 6 µs protocol penalty is a seventh of the job.
+µs at batch 1, so a 6 µs protocol penalty is a seventh of the job. Both protocol figures are parent-side
+CPU-path measurements. They price the handoff, which is the same mechanism on either worker, and neither is a
+card-side prediction.
 
 The two modes are also not independent features: a layer with all of its experts offloaded is the split with
 the cut point at zero.
@@ -64,8 +66,3 @@ Neutral:
 * [`doc/prep/moe-cpu-offload-data-paths.md`](../prep/moe-cpu-offload-data-paths.md) §3
 * [`doc/prep/measured-costs.md`](../prep/measured-costs.md) §4
 * Related: ADR-0019, ADR-0009, ADR-0040
-
-## Amendment
-
-The measurement that motivated this record, 26 µs against 20 µs, is a CPU-path measurement. It is used here as
-a relative protocol cost, which is the only claim it supports, and not as a card-side prediction.

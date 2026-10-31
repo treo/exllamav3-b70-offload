@@ -76,9 +76,3 @@ Neutral:
   [`notes/b70/out_prefill_scale.txt`](../../notes/b70/out_prefill_scale.txt)
 * [`doc/port/b70-prefill.md`](../port/b70-prefill.md) §3, §3a
 * Related: ADR-0024, ADR-0029, ADR-0030, ADR-0034, ADR-0036
-
-## Amendment
-
-This record first read "co-scheduling does not buy re-use", from a measurement at 16 experts. The verdict reversed at
-512 experts and was narrowed at the operating point, so the rule is now conditional on experts per launch. The
-invented threshold of ten times the cache was replaced by a measured flip near four times.

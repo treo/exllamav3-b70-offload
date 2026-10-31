@@ -20,7 +20,8 @@ token equality across paths, cannot be met by design, and requiring them stalls 
 
 We will accept the port against six levels, and a change is done when each of the first five holds and the sixth is
 reported. Level A is bit-exact format fidelity, extended with an upload comparison against the source bytes and one
-layout function as the single source of truth. Level B′ is the kernel's numeric class, graded against an exact-arithmetic
+layout function as the single source of truth, which covers an expert that routing never selects and a format check alone
+cannot see. Level B′ is the kernel's numeric class, graded against an exact-arithmetic
 oracle, against the CPU worker at identical quantised inputs, for repeatability, for quantiser agreement bit for bit, for
 the codebook vectors on the device, and for zero register spills per shipped kernel and rate. Level C is whole-model
 agreement under the project's own tolerance policy, at every placement, from both cold and warm starts, through three
@@ -71,9 +72,3 @@ Neutral:
 * [`notes/b70/gate_dpas.py`](../../notes/b70/gate_dpas.py),
   [`notes/b70/check_gemv_oracle.py`](../../notes/b70/check_gemv_oracle.py)
 * Related: ADR-0003, ADR-0020, ADR-0026, ADR-0033, ADR-0039, ADR-0041, ADR-0042
-
-## Amendment
-
-Level A was described as unchanged from the CPU port until the layout decision of ADR-0027 made card bytes differ from
-checkpoint bytes. The upload-fidelity and layout-agreement checks were added to close the gap that a bit-exact format
-gate cannot see: an expert that routing never selects.
