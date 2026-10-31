@@ -77,5 +77,5 @@ These are the three rejected mechanisms themselves, each of which had a written 
 
 One number first reported from the staging probe, that concurrent global re-reads were cheaper than unique reads, is
 retracted as a measurement. Both probe bodies turned out to be dominated by scalar address arithmetic, so the result
-said nothing about memory. It survives only as a hypothesis for the co-scheduling test, which then measured the effect
-at 5 to 16 percent rather than the 25 percent that hypothesis implied.
+said nothing about memory. It survives only as a hypothesis for the co-scheduling test. That test measured a benefit of 5
+to 16 percent, where the retracted figure had implied about 25 percent of cheaper re-reads.

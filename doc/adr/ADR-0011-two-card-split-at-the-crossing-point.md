@@ -38,7 +38,7 @@ Positive:
   [`doc/port/b70-tiering.md`](../port/b70-tiering.md) §5.
 * It explains why GLM's answer differs instead of contradicting itself. GLM's geometry gives the card
   84 to 97 GB/s on prefill shapes against the parent's 190, so the crossing point sits near a half
-  share, and splitting is mandatory: 296 µs per layer against 574 µs all-card.
+  share, and splitting is mandatory: 296 µs per layer against 574 µs all-card, both computed from the measured legs.
 * Prefill never splits. The card's measured 734 ms expert leg hides under a parent non-expert term of
   1166 ms of real work even after the transfer correction, and every byte moved back to the parent adds
   to the critical path monotonically.

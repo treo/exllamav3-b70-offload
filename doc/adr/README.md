@@ -150,7 +150,7 @@ The design documents carry two decision ledgers. Every row of both maps to a rec
 | D22 | verification batches are buildable | ADR-0024 |
 | D23 | prefill is in scope | ADR-0024 |
 | D24 | transfer is a first-class cost term | ADR-0025 |
-| D25 | parent and card do not measurably interfere, in that scope | ADR-0025, ADR-0039 |
+| D25 | parent and card do not measurably interfere, in that scope | ADR-0025, ADR-0037, ADR-0039 |
 
 Selected rows from the architecture's finality table, which had no D number:
 
@@ -184,14 +184,15 @@ owned.
 | D protocol and liveness invariants | ADR-0003, ADR-0006 |
 | E1 to E3 handshake and payload floors | ADR-0004, ADR-0005, ADR-0019 |
 | E4, E4b, E4c rate, locality, banding | ADR-0026, ADR-0028 |
-| E5, E7 link efficiency and the streaming choice | ADR-0021, ADR-0025 |
+| E5, E7′ link efficiency and the streaming choice | ADR-0021, ADR-0025 |
 | E8 host cost on the reserved core | ADR-0007 |
 | E9, E10 capacity curve and the parent window | ADR-0011, ADR-0012, ADR-0037 |
 | E11, E12 churn and admission cost | ADR-0014, ADR-0015 |
 | E13, E14 spanning and realised homes | ADR-0023, ADR-0038 |
 | E18, E19, E20 parent spare bandwidth, balance rule, replication | ADR-0010, ADR-0012, ADR-0009 |
 | E21 to E23 concurrency, eligibility, batched schedule | ADR-0011, ADR-0024, ADR-0029 |
-| E24 to E29 decode kernel, fusion, launch tax, dispatch, rows | ADR-0026, ADR-0030, ADR-0031, ADR-0032 |
+| E24, E26, E27 decode kernel, launch tax through the real path, dispatch fit | ADR-0026, ADR-0030, ADR-0032 |
+| E28, E29 repack and the row-bucket schedule | ADR-0028, ADR-0031, ADR-0034 |
 | U utilisation and power | ADR-0041 |
 
 ## What is still open

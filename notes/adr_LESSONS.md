@@ -105,6 +105,29 @@ each column holds, and re-derive a ratio from its numerator and denominator rath
 that summarised it. A percentage in a decision record is a claim about two specific quantities, and the
 record has to name them.
 
+## W14. Verify a count and a sign, not only a magnitude
+
+The numeric sweep found two transfers that a magnitude check passes and a source check fails. One record said
+"twenty-two protocol and liveness invariants", where the two tables hold fifteen inherited rows and eleven new
+ones. Another said a single-shot comparison "made a flag look 30 percent harmful", where the recorded result is
+that the engine looked 30 percent **faster** while the card was saturated. Both are the same defect class as
+`LESSONS` 80: a summary that keeps the number and loses what it counted, or the direction it pointed.
+
+A count in prose is a computed value, so compute it, by counting the table rows rather than by remembering the
+sentence about them. A percentage without a direction is not a claim at all, so the record has to carry the word
+that says which way the difference went.
+
+## W15. Say how each number is known
+
+The design documents carry a discipline that prose loses on the way into a summary: **[M]** means a command printed
+it on this box, and **[P]** means it was computed from measured rates. Four records said "measured" for figures the
+plan marks as projections: the activation path at 31 percent of card time at batch 256, the two GLM split costs, the
+placement-rule percentages, and the multi-card residue curve. Each is arithmetic on real measurements, which makes it
+useful and makes it not a measurement.
+
+The fix is one word in the sentence, "computed", "modelled", or "from the measured legs". That word is load-bearing
+for a builder, because it says whether a gate owes a measurement or a re-computation.
+
 ## W13. I broke the no-scripted-edit rule once, in this very session
 
 One-line changes feel too small for the edit tool, so I updated a count in `notes/README.md` with a Python

@@ -26,7 +26,7 @@ We will ship the rows for experts homed on the card, and we will retire the stre
 the weight-staging rings, the stager thread, the batch and reconstruct tiers, and the unswizzle restore pass
 are dead code for a card-resident layer. We keep all of it for host-resident experts, where the same argument
 still favours streaming, and we recalibrate the streaming threshold for that tier against the measured link
-instead of inheriting the inherited constant.
+instead of inheriting the constant that the CPU path uses on this box.
 
 ## Consequences
 
@@ -43,7 +43,8 @@ Negative:
 * Two regimes coexist inside one phase. A layer with a host residue still streams, so path selection must
   consult the expert's home and not only the row count.
 * The streaming threshold for the host tier has never been calibrated against a card-era configuration. The
-  inherited value stays provisional until gate E7 measures the comparison directly.
+  inherited value stays provisional until gate E7′ measures the comparison directly. That gate is the successor of the
+  CPU path's E7.
 * Retiring code paths is a test burden rather than a saving in this phase: each retired path must be shown
   unreachable for card-resident layers and still live for host-resident ones.
 
@@ -67,7 +68,7 @@ Neutral:
 
 * [`doc/port/b70-architecture.md`](../port/b70-architecture.md) §3 P2, §3 P3
 * [`doc/prep/measured-costs.md`](../prep/measured-costs.md) §7, §8
-* [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E5, E7
+* [`doc/port/b70-harness.md`](../port/b70-harness.md) gates E5, E7′
 * Related: ADR-0014, ADR-0024, ADR-0025, ADR-0027, ADR-0036
 
 ## Amendment

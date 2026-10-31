@@ -67,6 +67,7 @@ Neutral:
 
 ## Amendment
 
-`EXL3_MOE_B70_SLOTS` and `..._SLOT_ROWS` are classified as shape knobs, and their proposed values of 4 and 256 are
+`EXL3_MOE_B70_SLOTS` and `EXL3_MOE_B70_SLOT_ROWS` are classified as shape knobs, and their proposed values of 4 and
+256 are
 provisional. The CPU-path lesson that a row capacity can select a different data path applies to the card too, so the
 interaction between slot capacity, verification width and fused eligibility needs an explicit assertion rather than a default.

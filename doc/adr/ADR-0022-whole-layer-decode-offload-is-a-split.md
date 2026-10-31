@@ -22,9 +22,10 @@ the cut point at zero.
 
 ## Decision
 
-We will not carry the whole-layer copy path over to the card. We will express whole-layer offload as a split
-size of zero local experts on the fused path, which already handles an arbitrary cut point, and we will let
-the parent's own shared-expert and resident work provide the overlap exactly as the split mode does today.
+We will not carry the whole-layer copy path over to the card. We will express whole-layer offload as a split that
+leaves the parent zero local experts, which is `-mb E` in the knob family of ADR-0044, on the fused path, and that
+path already handles an arbitrary cut point. The parent's own shared-expert and resident work provides the overlap
+exactly as the split mode does today.
 
 ## Consequences
 

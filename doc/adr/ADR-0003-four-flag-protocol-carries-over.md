@@ -9,8 +9,9 @@
 
 The CPU offload orders all work between parent and worker with monotonic flags in pinned memory, not
 with locks and not with framework synchronisation. A slot carries `data_ready`, `done` and `consumed`,
-and the weight-staging path adds `stage_done` and `pinned_free`. Twenty-two protocol and liveness
-invariants sit on top of that, each with a test in the tree. The list is Level D of the acceptance
+and the weight-staging path adds `stage_done` and `pinned_free`. Fifteen protocol and liveness
+invariants sit on top of that, each with a test in the tree, and the card harness adds eleven of its own.
+The inherited list is Level D of the acceptance
 criteria in [`doc/prep/port-acceptance.md`](../prep/port-acceptance.md).
 
 The port is a new consumer of this protocol, and the temptation with a new consumer is to design a

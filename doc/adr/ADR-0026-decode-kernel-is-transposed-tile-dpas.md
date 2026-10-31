@@ -35,7 +35,8 @@ count.
 
 Positive:
 
-* A batch-1 MoE layer costs 43.6 µs on the card against a measured parent non-expert leg of 195.6 µs, so decode
+* A batch-1 MoE layer costs 43.6 µs on the card in three launches, or 40.9 µs with the fused pair of
+  ADR-0030, against a measured parent non-expert leg of 195.6 µs, so decode
   work hides with margin.
 * The streaming path is at the wall, so remaining gains are bytes, locality and fixed cost rather than
   instructions. The kernel is balanced rather than dominated: its own floor modes put fetch and arithmetic at

@@ -30,7 +30,8 @@ collapsed distribution.
 
 Positive:
 
-* The objective predicts the measured winners. On Qwen3.8 at batch 8 the balanced rule gains 13 percent,
+* The objective separates the two rules in the direction the balance implies, on modelled costs from measured rates.
+  On Qwen3.8 at batch 8 the balanced rule gains 13 percent,
   but on GLM at batch 1 and 4 the frequency rule gains 9 and 20 percent, and in both cases the loser is the
   rule that ignores the CPU residue.
 * The rule predicts its own crossover across five recipes: balanced wins by 3 to 9 percent at 2.05, 2.68,

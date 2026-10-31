@@ -33,7 +33,8 @@ merge the two combines into one launch with a doubled grid, which measured slowe
 Positive:
 
 * Where the table selects fusion the gain is real and grows with rows: 1.04, 1.13 and 1.17 times at rows 1, 8 and 16,
-  bit-exact against each projection's own reference, and the layer loses one gemm launch per projection pair.
+  bit-exact against each projection's own reference. The layer goes from 42.6 to 40.9 µs at one row, and from 72.6 to
+  64.8 µs at 16, in two gemm launches per layer instead of three.
 * The grid-shape lesson is reusable: the naive merge lost, four explanations were tested and refuted, and the cause
   was isolated by per-stage attribution rather than by theory.
 * Fusing the activation function into the combine costs under 0.2 µs of its own time and removes an elementwise

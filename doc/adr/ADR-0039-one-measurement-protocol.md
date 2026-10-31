@@ -11,8 +11,9 @@ Almost every retraction in this plan was a protocol failure rather than a wrong 
 and needs tens of milliseconds of continuous work to leave that state, so the same kernel measures 44.0 µs cold and 19.2
 µs warm. A batch of short separate processes measures whatever clock the card happened to sit at, uniformly,
 including on binaries nobody touched. Absolute rates move about 2 times with working-set size and non-monotonically. The
-placement profile carries across runs and is worth 12 to 22 percent. Comparison arms drift with warmth, which once made a
-flag look 30 percent harmful when it was neutral. Repeated text in a prefill corpus adds 4.2 percent throughput while
+placement profile carries across runs and is worth 12 to 22 percent. A single-shot interference comparison once said the
+engine ran 30 percent faster while the card was saturated, which was order and warm drift rather than an effect, and the
+interleaved pair measured none. Repeated text in a prefill corpus adds 4.2 percent throughput while
 removing 4.4 percent of distinct experts touched. A missing runtime library once produced a full table of confident zeros,
 because a failed cell printed 0.000 rather than a failure.
 

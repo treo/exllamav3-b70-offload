@@ -12,7 +12,7 @@ group, and the matrix geometry. Passing them at run time is the natural design a
 
 With the trellis rate as a run-time value, every window shift inside the unpacker is a variable shift and the
 straddle select cannot fold away. The intra-dword bit offset of a lane's window group turns out to be lane-invariant,
-a function of the lane index and the rate only, which was measured for every shipped rate. Compiling the rate in
+a function of the lane index and the rate only, which holds for every shipped rate. Compiling the rate in
 makes every shift a constant, and it measured 1.90 times on gate and 1.89 times on down at one row, with output
 bit-identical to the run-time build. The same mechanism produced a false alarm earlier in the same chapter: a kernel
 read its band stride from a struct field, reported 19 percent slower, and the deficit vanished when the band became a

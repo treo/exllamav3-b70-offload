@@ -46,7 +46,8 @@ Negative:
 
 Neutral:
 
-* Scaling out is the intended fix for this class, and the curve is measured rather than argued: the
+* Scaling out is the intended fix for this class, and the curve is computed from real selection counts rather than
+  argued: the
   CPU-served residue for GLM falls 19.6, 6.9 then 0.9 ms per token at one, two and three cards. Combining
   homes as a maximum rather than a sum then says the third card buys nothing until the parent's leg drops
   below about 135 µs per layer. See ADR-0037.

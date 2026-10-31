@@ -44,7 +44,7 @@ Positive:
 * The plan's priority order changes in a useful way: the highest-value measurement is above any remaining kernel
   work, and it is an instrument question rather than a tuning question.
 * The card's own activation path, fp16 output and card-side partial summation move from options to requirements
-  at large batch, where activation traffic is 31 percent of the card's time.
+  at large batch, where the computed activation share is 31 percent of the card's time.
 
 Negative:
 

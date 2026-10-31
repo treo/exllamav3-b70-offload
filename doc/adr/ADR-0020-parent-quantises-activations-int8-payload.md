@@ -44,7 +44,8 @@ Negative:
   must match exactly or the numeric gate becomes unachievable and every later difference is ambiguous.
 * fp16 output halves the uplink but changes the accumulation the model sees, so it must be re-scored rather
   than folded into the default numbers.
-* At batch 256 the activation path is 31 percent of the card's own time, which is where fp16 output and
+* At batch 256 the activation path is a computed 31 percent of the card's own time, from measured byte volumes and
+  measured link rate, which is where fp16 output and
   card-side summation of the partials the card owns stop being optional and start being requirements.
 
 Neutral:
@@ -71,6 +72,6 @@ Neutral:
 
 ## Amendment
 
-The first version of this record said "sum on the card" was optional. The batch sweep made it a requirement
-above about batch 128, and the sentence was corrected here rather than left as a note in a different
-document.
+The first version of this record said card-side summation of the card's own partials was optional. The batch sweep
+made it a requirement at the largest batch in that model, 256, where the computed share is 31 percent of the card's
+time, and the sentence was corrected here rather than left as a note in a different document.
