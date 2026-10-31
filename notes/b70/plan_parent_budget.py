@@ -379,7 +379,11 @@ def policy(lpt, counts, E, eb, cap_g, cap_b, rate_g, rate_b, tparent, topk, scal
         else:
             opts = []
             if cg + eb <= cap_g:
-                opts.append((term(bg + pick, rg), 0))
+                # D14: the parent's expert bytes ADD to its non-expert leg, while the card's leg runs IN PARALLEL
+                # with that leg. Balancing ug against ub (what this used to do) equalises byte-times, which is the
+                # equal-share answer D14 measured against; the quantity to balance is tparent + ug against ub.
+                # Without tparent here, a small T_parent under-fills the card and a large one over-fills it.
+                opts.append((tparent + term(bg + pick, rg), 0))
             if cb + eb <= cap_b:
                 opts.append((term(bb + pick, rate_b), 1))
             opts.append((leg_c(term(bc + pick, CPU_RATE), ac + asgn), 2))

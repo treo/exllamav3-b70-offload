@@ -283,6 +283,23 @@ numbers support; a single chunk-wide GEMM is not.
             print(f"   R={R}: hot expert {mx:6.0f} rows/expert, {n26:5.1f} of E >=26 carrying {s26*100:3.0f}% "
                   f"| {n59:5.1f} >=59 carrying {s59*100:3.0f}%", end="  |")
         print()
+        # D17 dispatch advice for the shape this model would actually run. Co-scheduled row slabs pay only where
+        # the per-launch expert set is far beyond L2: measured B/A 0.91-0.85 at E=512, 0.97-1.15 at E=16, i.e. the
+        # sign flips with occupancy (LESSONS 74). The eligible-expert count at R=2048 is the experts-per-launch
+        # figure, since the matrix path only takes experts above the 26-row bar.
+        _GEOM = {512: "qwen38", 288: "glm"}        # the two geometries this plan has measured; keyed by E
+        # MiB per expert (all three projections), from the checkpoint census in doc/port/b70-tiering.md 2. Kept
+        # local and labelled because a wrong expert size silently rescales every capacity and re-use test here.
+        _EB = {"2.05": 1.13, "2.68": 1.47, "3.05": 9.03, "4.05": 2.25,
+               "4.18": 2.28, "5.05": 2.81, "6.05": 3.37}
+        elig = int(round(stats[2048][1]))
+        _k = str(lab).replace("bpw", "").strip()
+        rec, fac, note = pdc.slab_advice(elig, 32, geom=_GEOM.get(E, "qwen38"),
+                                         bytes_per_proj_mib=(_EB[_k] / 3.0 if _k in _EB else None))
+        print(f"     dispatch at R=2048: {elig} eligible experts/launch, rows/expert up to "
+              f"{stats[2048][0]:.0f} -> " + ("CO-SCHEDULE (variant B)" if rec else
+                                            ("sequential buckets (variant A, shipped)" if rec is False else
+                                             "UNDECIDED between measured rungs")) + f" [{note}]")
 
 
 if __name__ == "__main__":

@@ -704,5 +704,85 @@ def main():
     print("costs 61.8 us, while 16+8 as two buckets costs ~38 us (b70-decode-closeout.md, E29 RESULT).")
 
 
+SLAB_MEASURED = {
+    # B/A from notes/b70/out_prefill_scale.txt (E=512, 251 MiB/projection = 10.5x L2, rev L as the benchmark)
+    # and notes/b70/out_probe_gemm.txt (E=16). <1.0 means co-resident slabs of ONE launch (variant B) are faster.
+    "flip": {"gate": {16: 1.05, 32: 0.91, 64: 0.85}, "down": {16: 1.00, 32: None, 64: 0.91}},
+    "noflip": {"gate": {16: 0.97, 32: 1.15, 64: 1.02}, "down": {}},
+}
+
+
+def slab_advice(E, rows, proj="gate", geom="qwen38", tn=40, ks=1, bytes_per_proj_mib=None):
+    """D17: should this launch's per-expert buckets go as CO-RESIDENT SLABS OF ONE LAUNCH (variant B) or as
+    SEQUENTIAL bucket launches (variant A, the shipped kernel)?
+
+    Measured, at the two ends of E, with opposite signs - which is the whole point of the function:
+        E=512 (weights 10.5x L2)   B/A = 1.05 / 0.91 / 0.85 at rows 16 / 32 / 64 on gate, 1.00 / - / 0.91 on down
+        E=16  (weights inside L2)  B/A = 0.97 / 1.15 / 1.02                 -> co-scheduling LOSES
+    The sign of a schedule comparison is a function of occupancy (LESSONS 74), so a rule that returns one answer
+    for all E is wrong somewhere. Below ~E=32 there is nothing to re-use: the set is already L2-resident, and B
+    only adds scheduling overhead.
+
+    Returns (recommend, factor, note) where recommend is True/False/None (None = outside the measured grid, do not
+    guess) and factor is the expected B/A time ratio when recommend is not None.
+    """
+    if geom != "qwen38":
+        return None, 1.0, (f"{geom}: co-scheduling measured only on qwen38 geometry; GLM (tiles_n=128, K=3) runs "
+                           f"are queued in run_plan_close.sh S3 - do not borrow Qwen's sign for it")
+    if proj not in SLAB_MEASURED["flip"]:
+        return None, 1.0, f"no measured {proj} rungs"
+    if E <= 16:
+        f = SLAB_MEASURED["noflip"][proj].get(rows)
+        if f is None:
+            return False, 1.0, f"E={E} <= 16 measured not to benefit at other rows; rows={rows} unmeasured"
+        return (False, f, f"E={E}: L2-resident, no re-use to harvest (measured B/A {f:.2f})")
+    if E >= 512:
+        f = SLAB_MEASURED["flip"][proj].get(rows)
+        if f is None:
+            return None, 1.0, f"E={E}: rows={rows} not measured for {proj}"
+        return (f < 1.0, f,
+                f"E={E} (>> L2): co-schedule worth {(1 / f - 1) * 100:.0f} % at rows={rows} (measured B/A {f:.2f})")
+    l2 = (f"; weights {2 * E * bytes_per_proj_mib:.0f} MiB = "
+          f"{2 * E * bytes_per_proj_mib / l2_mib_slm():.1f}x L2 -> re-use is physically available"
+          if bytes_per_proj_mib else "")
+    if bytes_per_proj_mib is not None and 2 * E * bytes_per_proj_mib > 10 * l2_mib_slm():
+        # The "10x L2" boundary is NOT a measurement: it brackets the single case where B was observed to win
+        # (E=512, 2 x 251 MiB = 21x L2) from the single case where it lost (E=16, inside L2). run_plan_close3.sh
+        # measures E=128/256 precisely so this constant can be replaced by a rung.
+        return (None, 1.0, 
+                f"E={E} is between the measured rungs (16 says no, 512 says yes) BUT the operative condition "
+                f"holds{': ' + l2.lstrip('; ') if l2 else ''}. Note the fill predictor is NOT the test: at E=512 "
+                f"items/launch = {tn * ks * 2 * E} (device full, ~5x over the ~2048 fill bound) and B still won "
+                f"9-16 %, so 'full device => no gain' is falsified by that measurement. Candidate answer: B. "
+                f"Confirm with run_plan_close3.sh (probe_gemm A vs B at E=128/256), which is the missing rung.")
+    return (None, 1.0,
+            f"E={E} is between the measured rungs (16 says no, 512 says yes){l2 and '; ' + l2.lstrip('; ')}. "
+            f"Refusing to interpolate a sign - the last two times a sign was carried across an unmeasured "
+            f"distance it flipped (LESSONS 74).")
+
+
+def l2_mib_slm():
+    return DEVICE_L2_MIB
+
+
+def _slab_selftest():
+    r, f, n = slab_advice(16, 32)
+    assert r is False and f > 1.0, (r, f, n)
+    r, f, n = slab_advice(512, 64)
+    assert r is True and abs(f - 0.85) < 1e-9, (r, f, n)
+    r, _, n = slab_advice(512, 32, proj="down")
+    assert r is None and "not measured" in n, n                      # down_proj rows=32 has no rung
+    r, _, n = slab_advice(64, 32)
+    assert r is None and "between the measured rungs" in n, n        # refuses to interpolate a sign
+    r, _, n = slab_advice(124, 32, bytes_per_proj_mib=3.0)      # GLM-sized experts at mid E: >> L2
+    assert r is None and "operative condition" in n, n           # names B as candidate, still not a rung
+    r, _, n = slab_advice(124, 32, bytes_per_proj_mib=1.47 / 3)  # Qwen-sized experts at mid E: 5x L2
+    assert r is None and "operative condition" not in n, n       # below the bracket: no candidate offered
+    r, _, n = slab_advice(512, 64, geom="glm")
+    assert r is None and "borrow" in n, n                            # no cross-geometry borrowing (LESSONS 85)
+    print("slab_advice selftest ok")
+
+
 if __name__ == "__main__":
+    _slab_selftest()
     main()

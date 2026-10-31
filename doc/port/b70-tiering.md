@@ -33,7 +33,7 @@ window.
 |---|---|---|---|---|---|
 | Qwen3.8@2.05 | 1.21 | 0.61 | 29.2 GiB | 52 layers' worth | 512 experts/layer (everything) |
 | Qwen3.8@2.68 | 1.56 | 0.78 | 37.5 GiB | 41 layers' worth | 512 experts/layer |
-| GLM@3.05 | 9.25 | 2.60 | 109.3 GiB | 12.3 layers' worth | **84 of 288 experts/layer (29 %)** |
+| GLM@3.05 | 9.03 | 2.54 | 109.3 GiB (43 expert-bearing layers: 42 serving + 1 MTP head) | 12.6 layers' worth | **84 of 288 experts/layer (29 %)** |
 
 Live routing puts half a layer's picks in ~24 experts on Qwen3.8 (`out_live_trace.txt`), so a half-mass tail costs
 **1.4 GiB (2.05)**, **1.8 GiB (2.68)** and, at the same relative concentration, **~5.3 GiB (GLM)** — all of it
@@ -113,9 +113,9 @@ makes the card *slower* per byte than the 3090, which is the whole reason GLM's 
 | Qwen3.8@2.68 | 16 | 0.78 | 666.0 | 1028.2 | 841.7 | **+26.4 %** |
 | Qwen3.8@2.05 | 16 | 0.77 | 505.8 | 774.7 | 648.1 | **+28.1 %** |
 | GLM@3.05 | 1 | **0.51** | **296 µs/layer (measured T_parent)** | 300 | 574 | **+94 %** — splitting is mandatory at b=1 |
-| GLM@3.05 † | 4 | 0.58 | 1351.8 | 1479.0 | 2287.8 | **+69 %** |
-| GLM@3.05 † | 8 | 0.52 | 2418.3 | 2481.9 | 4575.6 | **+89 %** |
-| GLM@3.05 † | 16 | 0.48 | 4466.2 | 4584.7 | 9151.2 | **+105 %** |
+| GLM@3.05 | 4 | **0.44** | 1000.8 | 1147.7 | 2295.4 | **+129 %** |
+| GLM@3.05 | 8 | **0.42** | 1941.9 | 2295.4 | 4590.9 | **+136 %** |
+| GLM@3.05 | 16 | **0.42** | 3826.4 | 4590.9 | 9181.7 | **+140 %** |
 
 Read the last three columns together: **equal splitting is between nothing and 54 % worse than the optimum**, and
 it is closest to right exactly where the two homes have similar per-byte rates (GLM, where the card is *slower*
@@ -132,8 +132,8 @@ non-expert term, so the card has ~1.25 s of free shadow and the parent has none:
 (2.68: 37.5 GiB), and then the leftover belongs on its *hot* end, not spread evenly.
 
 Three things this arithmetic is **not**, stated because they are the parts that could move the numbers:
-  * † **GLM's parent leg is now measured** (rows ≥ 4 above still use the pre-measurement `T_parent = 595` and are
-    superseded by the b=1 row): **non-expert = 101.1 µs/layer, device total 406.7, wall 1392.2 µs/layer** at
+  * † **GLM's parent leg is measured** (rows 4/8/16 recomputed from it on 2025-11; the versions of these rows
+    that used the assumed `T_parent = 595` said 0.58/0.52/0.48 and +69/+89/+105 %, and are superseded): **non-expert = 101.1 µs/layer, device total 406.7, wall 1392.2 µs/layer** at
     ctx 2048 / b=1 / `-mcs 258` / `-mct 15` (`out_engine_step.txt` §11). Three things follow, and the first one
     corrected a row of this table that I had written on the assumed value:
     * `T_parent` is **5.9× smaller** than the 595 µs I assumed, so GLM's crossover is not at rows≈5 — **the card
