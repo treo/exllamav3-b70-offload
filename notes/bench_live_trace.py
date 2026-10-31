@@ -108,6 +108,10 @@ def main():
     ap.add_argument("-mcpa", "--moe_cpu_pinned_arena", dest="mcpa", action="store_true",
                     help="back the CPU worker expert arena with pinned shared memory (lets hot experts migrate CPU->GPU)")
     ap.add_argument("-cs", "--cache_size", type=int, default=8192)
+    ap.add_argument("-chunk_size", "--chunk_size", dest="chunk_size", type=int, default=None,
+                    help="forward the engine's prefill chunk size (default: whatever model_init picks). This is "
+                         "the independent variable of a prefill-throughput measurement - the parent pays a "
+                         "fixed cost per chunk - so it must be settable, and it must appear in the header line")
     ap.add_argument("--decode", type=int, default=256)
     ap.add_argument("--reps", type=int, default=CORPUS_REPS)
     ap.add_argument("--prompt-file", default=None,
@@ -119,6 +123,20 @@ def main():
                     help="also time a single N-token prefill (0 = skip). Reported as tokens/s of the whole "
                          "prompt, which is the unit the acceptance figures use, and the number "
                          "doc/port/b70-prefill.md says must exist before any B70-prefill speedup is claimed")
+    ap.add_argument("--prefill-allow-short", action="store_true",
+                    help="let a prefill arm measure fewer tokens than --prefill asked for, loudly. Default is "
+                         "fatal: a 4096-token request answered by 1158 tokens is a different measurement, and "
+                         "the first version of this script printed it as if it were the one requested")
+    ap.add_argument("--corpus", choices=("varied", "repeat"), default="varied",
+                    help="what feeds a prefill arm that needs more tokens than the reference corpus holds: "
+                         "'varied' (default) uses the deterministic pool of DISTINCT in-repo documents; "
+                         "'repeat' re-uses REFERENCE_TEXT periodically and exists only as the control that "
+                         "measures how far periodic text inflates prefill speed by collapsing expert coverage")
+    ap.add_argument("--prefill-reps", type=int, default=1,
+                    help="run the timed prefill forward N times, printing each pass. Necessary for any "
+                         "adaptive-placement question (-mcpa): promotion costs a copy the FIRST time and saves "
+                         "traffic afterwards, so a single pass measures the cost and hides the gain - the same "
+                         "adaptation-horizon trap that made plain-vs-mcpa look like a regression on decode")
     ap.add_argument("--cold-start", action="store_true")
     ap.add_argument("--jobs", type=int, default=1,
                     help="run N CONCURRENT sessions (different prompt slices): the only way to measure "
@@ -143,6 +161,8 @@ def main():
     block_sparse_mlp_cpu.EXPERT_STATS_DIR = args.stats_dir
 
     init_args = []
+    if args.chunk_size:
+        init_args += ["-chunk_size", str(args.chunk_size)]
     if args.mcs:
         init_args += ["-mcs", str(args.mcs), "-mct", str(args.mct)]
     if args.mcl:
@@ -165,6 +185,32 @@ def main():
             body = " ".join([e2e.REFERENCE_TEXT] * reps)
         all_ids = lm.tokenizer.encode(body).to(torch.long).reshape(1, -1)
         total = all_ids.shape[1]
+        # A prefill arm needs >= --prefill tokens, and HOW it gets them changes what it measures. The corpus
+        # used to be exactly REFERENCE_TEXT x --reps, so --reps silently CAPPED any --prefill request (6 reps x
+        # ~193 tokens = 1158) and the arm printed a number anyway. Growing that repetition would fix the length
+        # while wrecking the measurement: repeated text makes every window route like every other window, so a
+        # 4096-token chunk touches far fewer DISTINCT experts than real text would - fewer experts means fewer
+        # weight reads and a prefill number that is too fast. So: the decode/routing sessions keep the reference
+        # corpus exactly as before (out_live_trace.txt stays comparable), and only the PREFILL arm draws on the
+        # varied pool - 12 distinct in-repo documents, each appearing once, nothing repeated. 'repeat' stays
+        # available as the control that measures the size of the bias rather than assuming it.
+        pool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "b70", "fixtures", "prefill_pool.txt")
+        need = int(args.prefill or 0)
+        pf_ids, pf_corpus = all_ids, "reference corpus"
+        if need and total < need:
+            if args.corpus == "repeat":
+                one = max(1, lm.tokenizer.encode(e2e.REFERENCE_TEXT).shape[1])
+                pf_ids = lm.tokenizer.encode(" ".join([e2e.REFERENCE_TEXT] * (need // one + 2))
+                                             ).to(torch.long).reshape(1, -1)
+                pf_corpus = f"REFERENCE_TEXT repeated, period ~{one} (PERIODIC CONTROL)"
+            elif os.path.isfile(pool):
+                pf_ids = lm.tokenizer.encode(open(pool, encoding="utf-8", errors="replace").read()
+                                             ).to(torch.long).reshape(1, -1)
+                pf_corpus = "varied pool (12 distinct docs, each once)"
+            else:
+                raise SystemExit(f"need {need} prefill tokens, the reference corpus holds {total}, and the varied "
+                                 f"pool {pool} is missing; restore it or pass --corpus repeat explicitly")
+            print(f"  prefill corpus: {pf_corpus}; {pf_ids.shape[1]} tokens available")
         n_prompt = min(772, max(64, (total - (args.jobs - 1) * 313) if args.jobs > 1 else total))
         sessions = [all_ids[:, j * 313: j * 313 + n_prompt] for j in range(args.jobs)]
         if any(x.shape[1] < 16 for x in sessions):
@@ -286,24 +332,61 @@ def main():
             # accounting the decode passes use. Chunking is the engine's business (-cs/--chunk_size); this
             # measures what the configured stack actually does with the chunk it is given.
             n = args.prefill
-            body = all_ids[:, :min(n, total)]
+            if pf_ids.shape[1] < n and not args.prefill_allow_short:
+                raise SystemExit(
+                    f"prefill: corpus holds {pf_ids.shape[1]} tokens but {n} were requested. That is a "
+                    f"measurement of a different quantity, not a smaller version of the same one (the parent's "
+                    f"per-chunk fixed cost amortizes differently). Lengthen the pool, raise --reps, or use "
+                    f"--prefill-allow-short to record the short number explicitly.")
+            body = pf_ids[:, :n]
             if body.shape[1] < n:
-                print(f"  prefill: prompt corpus only {body.shape[1]} tokens requested {n}; measuring what exists")
+                print(f"  prefill: MEASURING {body.shape[1]} TOKENS, NOT THE REQUESTED {n} "
+                      f"(--prefill-allow-short). Do not table this as a {n}-token number.")
+            # Membership diagnostic for the chunk: snapshot the routing histograms before the forward and diff
+            # after it. A positive diff means that expert was picked by at least one token of the chunk; decay
+            # wrecks the magnitudes but not membership, and membership is what decides whether a corpus is a
+            # fair proxy (periodic text scores LOW here and prefills FAST, and the two move together).
+            pf_pre = hist_snapshot(mods) if mods else None
+            # Each pass timed separately: for -mcpa the first pass pays a CPU->GPU copy and later passes read the
+            # promoted experts from VRAM, so a single number cannot answer "is it worth it" (LESSONS 66).
+            passes = []
             from exllamav3 import Job
             from exllamav3.generator.sampler import ArgmaxSampler
             gen = lm.generator()
             try:
-                torch.cuda.synchronize()
-                t0 = time.perf_counter()
-                gen.enqueue(Job(input_ids=body, max_new_tokens=1, sampler=ArgmaxSampler(),
-                                stop_conditions=[], return_logits=False))
-                while gen.num_remaining_jobs():
-                    for _ in gen.iterate():
-                        pass
-                torch.cuda.synchronize()
-                dt = time.perf_counter() - t0
-                print(f"  prefill {body.shape[1]} tokens: {dt*1000:8.1f} ms  ->  {body.shape[1]/dt:7.0f} tok/s "
-                      f"({dt*1e6/(nl*body.shape[1]):6.1f} us per MoE layer per token)")
+                for rep in range(max(1, args.prefill_reps)):
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
+                    gen = lm.generator()
+                    gen.enqueue(Job(input_ids=body, max_new_tokens=1, sampler=ArgmaxSampler(),
+                                    stop_conditions=[], return_logits=False))
+                    while gen.num_remaining_jobs():
+                        for _ in gen.iterate():
+                            pass
+                    torch.cuda.synchronize()
+                    dt = time.perf_counter() - t0
+                    passes.append(dt)
+                    if max(1, args.prefill_reps) > 1:
+                        print(f"    pass {rep+1}: {dt*1000:8.1f} ms  ->  {body.shape[1]/dt:7.0f} tok/s")
+                dt = passes[0] if len(passes) == 1 else statistics.median(passes)
+                cov = []
+                if pf_pre is not None:
+                    pf_post = hist_snapshot(mods)
+                    for L in range(len(mods)):
+                        c, p = pf_post[L], pf_pre[L]
+                        cov.append(sum(1 for i in range(len(c))
+                                       if c[i] is not None and p[i] is not None and c[i] - p[i] > 0))
+                tk_cfg = getattr(lm.config, "num_experts_per_tok", None) or getattr(lm.config, "topk", None)
+                tag = f"median of {len(passes)}" if len(passes) > 1 else "single pass"
+                print(f"  prefill {body.shape[1]} tokens [{pf_corpus}] ({tag}): {dt*1000:8.1f} ms  ->  "
+                      f"{body.shape[1]/dt:7.0f} tok/s  "
+                      f"({dt*1e6/(nl*body.shape[1]):6.1f} us per MoE layer per token)"
+                      + (f"  [first pass {body.shape[1]/passes[0]:.0f} tok/s]" if len(passes) > 1 else ""))
+                if cov:
+                    cov_m = statistics.mean(cov)
+                    print(f"  experts touched by this chunk: mean {cov_m:.1f} of {len(pf_pre[0])} per layer "
+                          f"(min {min(cov)}, max {max(cov)})"
+                          + (f"; implied rows/expert {body.shape[1]*float(tk_cfg)/cov_m:.1f}" if tk_cfg else ""))
             except Exception as exc:                                # noqa: BLE001 - report, never hide
                 print(f"  prefill measurement FAILED ({type(exc).__name__}: {str(exc)[:100]})")
 
@@ -330,12 +413,22 @@ def main():
         E = max(len(s[L]) for L in range(len(mods)) for s in snaps)
         topk_emp = statistics.mean(len(sel[L][t]) for L in range(len(mods)) for t in range(len(snaps)))
         unions = {}
+        skipped = []
         for b in (2, 4, 8, 16, 32):
             us = []
             for tl in sel:
                 for s in range(0, len(tl) - b + 1, max(1, b // 2)):
                     us.append(len({e for row in tl[s:s + b] for e in row}))
+            # A window wider than the traced pass has no samples; averaging an empty list used to raise
+            # StatisticsError AFTER the numbers already printed, losing the whole run's JSON (--decode 8 with
+            # union(32) requested). Skip it, say so, and let the caller lengthen --decode instead.
+            if not us:
+                skipped.append(b)
+                continue
             unions[b] = statistics.mean(us)
+        if skipped:
+            print(f"  NOTE: union windows {skipped} skipped - only {len(snaps)} traced tokens (raise --decode "
+                  f"above {max(skipped)}); their rows are absent from the JSON rather than zero")
         # concentration: how many experts cover half the picks, and the effective support
         freqs = []
         for tl in sel:
@@ -362,9 +455,18 @@ def main():
         print(f"  {'rows b':>7} {'union (measured)':>17} {'planned':>9} {'ratio':>7}")
         planned = {2: 1.99, 4: 3.88, 8: 7.27, 16: 13.12, 32: 21.91}   # distinct-expert multipliers x topk
         tk = round(topk_emp)
-        for b, u in unions.items():
-            p = planned.get(b, float("nan")) * tk
-            print(f"  {b:7d} {u:17.1f} {p:9.1f} {u/p if p == p else float('nan'):6.2f}x")
+        # -mcpa re-permutes each module's split histogram when it promotes/demotes, so snapshot diffs attribute
+        # picks to the wrong experts and the modal positive-diff count collapses to 0 (observed: a ZeroDivisionError
+        # in the ratio below, AFTER the prefill timing had already printed). Skip the routing report explicitly
+        # rather than printing numbers that are meaningless - the timings and migration counters stay valid.
+        if tk < 1:
+            print(f"  ROUTING REPORT SKIPPED: measured topk = {topk_emp:.2f} (expected ~10). Under -mcpa the "
+                  f"histogram order is not stable between snapshots, so union/coverage numbers from this run "
+                  f"are not evidence; prefill and decode timings above are unaffected.")
+        else:
+            for b, u in unions.items():
+                p = planned.get(b, float("nan")) * tk
+                print(f"  {b:7d} {u:17.1f} {p:9.1f} {u/p if p == p and p else float('nan'):6.2f}x")
         json.dump({"model": args.model_dir, "layers": len(mods), "E": E, "topk": tk,
                    "union_measured": unions, "half_mass_experts": half_mean,
                    "effective_support": sup_mean, "us_per_token_median": med,

@@ -36,3 +36,4 @@ probe_groupfused
 probe_slm
 probe_gemm
 probe_xmx
+probe_mem

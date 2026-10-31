@@ -1,0 +1,79 @@
+Host memory ceiling, measured: 45.8 GB/s read on 2x DDR4-3200, and what that settles about the CPU home
+=========================================================================================================
+WHY. This box's expert home is CPU RAM, and the plan has been leaning on a datasheet-derived constant:
+`plan_parent_budget.py` / the calibration record `CPU_RATE = 47.4 GiB/s` (= 50.9 GB/s), which is the theoretical
+peak of 2 x DDR4-3200 x 8 B. Nobody measured what the host actually moves, and the -mcpa prefill result
+(+30 % on 2.05, +50 % on 2.68, `out_prefill_mcpa.txt`) cannot be explained without knowing whether the CPU path
+is starved of bytes or of arithmetic. Hardware: Ryzen 9 5950X, 16 cores / 2 CCXs, L2 512 KiB/core,
+L3 64 MiB total (2 x 32 MiB), 2ch DDR4-3200 => 51.2 GB/s theoretical. `dmidecode` needs root here, so the
+channel/speed claim is the operator's and the *achievable* number below is measured instead.
+
+Instrument: `notes/b70/probe_mem.c` (AVX2, OpenMP, min-of-7-inner x 3-outer, aligned, 2 loads/iteration).
+
+## 1. MEASURED (GB/s; copy counted as read+write, so it is total traffic moved)
+
+       buffer    1 thread    4 threads    8 threads   15 threads     residence
+       2 MiB       84.1        392.0        560.7        479.9       L3 (per-core)
+      16 MiB      130.2        451.8        561.5        523.8       L3
+      64 MiB       40.3        160.4        164.4        256.0       L3 capacity edge
+     512 MiB       32.0         41.6         37.9         45.8       DRAM
+
+1. **Achievable DRAM read = 45.8 GB/s (42.6 GiB/s) = 89 % of the 51.2 GB/s datasheet figure.** So the plan's
+   `CPU_RATE = 47.4 GiB/s` is a datasheet number, not a ceiling this host can serve: it is **11 % optimistic as
+   a ceiling**, and ~25 % above the observed copy rate. Use 42.6 GiB/s for read-side transfer budgets and
+   ~24 GiB/s when the operation writes as well as reads (measured copy 25.9 GB/s at 15 threads, i.e. 50 % of
+   peak exactly as a symmetric read+write stream should be).
+2. **L3 is ~11x DRAM (523.8 vs 45.8 GB/s)** and per-core L3 read is ~84 GB/s against ~32 GB/s per-core DRAM
+   read, so a single core's L3 service rate already exceeds what four cores can pull from DRAM. That is the
+   quantitative reason the placement/residency policy (a decode concept) matters more than the link.
+3. **The pinned<->device link (14.4 GB/s, `out_rates_footprint.txt`) sits 3.2x BELOW the host's DRAM ceiling**,
+   which validates the plan's transfer tier as link-bound rather than memory-bound: staging bytes through pinned
+   RAM never contends with the host's own streaming limit. This had been assumed; now it is bracketed by
+   measurements on both ends.
+4. Where the CPU *expert kernel* sits against these ceilings (from `out_cpu_worker_calib.txt`, unchanged, read
+   against the new numbers): best observed 37.9 GiB/s cold at rows=2 is **89 % of the measured 42.6 GiB/s read
+   ceiling**, so at rows=1-4 the expert path essentially *is* bandwidth-bound; while at rows=16 the implied rate
+   falls to 31.7 GiB/s cold and the calibration notes warm L3 buys only 15 % and the rate *drops*, i.e. past a
+   few rows it is bound by arithmetic - this host has AVX2 **without VNNI**, so the integer mul1 path runs
+   128-bit lanes with multiply emulation.
+
+## 2. WHAT THIS SETTLES ABOUT -MCPA ON PREFILL
+
+Prefill sits deep in the compute-bound side of that crossover. A 4096-token chunk touches ~418 of 512 experts
+per layer at ~98 rows/expert; with `-mcs 256` roughly half the picks land on remote experts, so the unique
+remote expert bytes per chunk are about 209 experts x ~2 MiB x 48 layers ~= **20 GiB**, which the measured
+45.8 GB/s ceiling could stream in ~0.46 s - about **10 % of the 4.69 s chunk**. There is therefore no
+bandwidth shortage for promotion to relieve, and the +21 %/+30 %/+50 % gains in `out_prefill_mcpa.txt` (which
+survive at chunk = prompt = 4096, where an expert's bytes are needed exactly once per forward) are moving
+*arithmetic*: rows leave an AVX2-without-VNNI path and enter the 3090's expert kernels. That also predicts the
+right ordering by recipe - 2.68, which is capacity-tight and keeps more experts remote, gains 50 % against
+2.05's 30 % - and it explains why the same flag was worth roughly nothing on decode, where rows/expert ~1-4
+leaves the CPU path at its bandwidth ceiling and promotion changes neither the bytes nor their count.
+
+Consequences to carry:
+  * Review any planner use of `CPU_RATE = 47.4 GiB/s`: as a ceiling it should be ~42.6 GiB/s (read) /
+    ~24 GiB/s (read+write), and it must not be applied to prefill-sized work at all, where the kernel is
+    compute-bound and the correct constant is per-assignment time (39.2 us at rows=1 -> 23.0 us at rows=16,
+    16 threads), not a byte rate. That is the same category error LESSONS records for quoting GB/s across
+    quantizations with different bytes-per-weight.
+  * The B70 worker's claim gets *stronger*, not weaker: if the parent's CPU expert leg is arithmetic-bound on
+    this host, then moving expert work to the card is a compute migration, and the measured 16-row-launch
+    economics in `out_prefill_scale.txt` apply on top of a parent that is not even bandwidth-limited.
+  * One CCX or the other: with `-mct 15` the worker straddles both CCXs (L3 is 2 x 32 MiB), so a hot expert's
+    bytes are re-fetched across the Infinity Fabric when successive jobs of the same expert land on different
+    CCXs. Untested here; the experiment is pinning the worker to one CCX (8 cores) versus 15 threads and
+    comparing prefill tok/s. If affinity matters, that is a free tuning knob the plan does not currently list.
+
+## 3. DISCLOSED MEASUREMENT BUG (found by re-reading my own loop, not by a failed check)
+The first build stepped the read index by 16 uint64 while loading at `j` and `j+4`, so each iteration touched 64
+of the 128 bytes it advanced over: every read number was **2x high** (803 / 809 / 89 GB/s became 480 / 524 /
+45.8). Nothing failed - the figures looked plausible, which is the dangerous kind of wrong. The tell was
+internal consistency, not authority: the fixed copy rate landed at 50 % of the dual-channel peak, which is what
+a symmetric read+write stream must do, whereas the buggy run had reported copy above the datasheet ceiling
+(1622 % in one row) and I had pasted that through without reacting. Rule extracted (LESSONS 78): a bandwidth
+probe must carry an invariant with an expected value - copy <= read, read <= datasheet peak, copy ~ 2x read on
+DRAM - and refuse to print when the invariant breaks.
+
+Reproduce:
+    gcc -O3 -march=native -fopenmp -o probe_mem probe_mem.c
+    ./probe_mem 15 3        # also 1 / 4 / 8 to separate per-core from aggregate

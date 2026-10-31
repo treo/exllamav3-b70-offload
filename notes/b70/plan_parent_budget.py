@@ -48,6 +48,17 @@ MODELS = {
 }
 ROOT = "/home/treo/projects/vendor/tabbyAPI/models"
 VRAM_GIB, CPU_RATE, GIB = 24.0, 47.4, 2**30
+# CPU_RATE is the DATASHEET peak of this host (2 x DDR4-3200 x 8 B = 51.2 GB/s = 47.7 GiB/s), and it is used only
+# by the legacy bytes/rate fallback below. Measured ceilings (notes/b70/probe_mem.c, out_host_mem.txt): 45.8 GB/s
+# read = 42.6 GiB/s (89 % of datasheet) and 25.9 GB/s copy, with L3 at 523.8 GB/s - 11x DRAM. Two consequences.
+# (1) As a ceiling CPU_RATE is 11 % optimistic; as a target for the expert kernel it is unreachable by ~25 %, since
+# the best observed kernel rate is CPU_RATE_MEASURED below. (2) It must NOT be applied to prefill-shaped work at
+# all: at ~98 rows/expert the CPU expert path is compute-bound (AVX2, no VNNI), and a 4096-token chunk's unique
+# remote expert bytes would occupy only ~10 % of the chunk's time at the measured read ceiling, which is why
+# -mcpa buys +30-50 % on prefill and ~nothing on decode (out_prefill_mcpa.txt). Use CPU_ASGN_US there.
+HOST_DRAM_READ_GIBS, HOST_L3_READ_GIBS, HOST_DRAM_COPY_GIBS = 42.6, 484.7, 24.1   # measured, 15 threads
+PINNED_LINK_GIBS = 13.4        # 14.4 GB/s, out_rates_footprint.txt: 3.2x BELOW host DRAM, so transfers are
+                               # link-bound rather than host-memory-bound - the plan's transfer tier is safe
 # Where the per-expert selection profiles come from. Defaults to the engine's own cache; B70_PROFILE_DIR points it
 # at a live trace converted by notes/b70/analyze_live_trace.py --emit-profile, which is how the plan's routing
 # assumptions get tested against measured ones rather than argued about (out_live_trace.txt).

@@ -1276,6 +1276,51 @@ nothing that is the sole instance of a measurement.
     attributing the difference to. Corollary for this repo: bundle claims at your peril, since a retraction that
     lands correctly has to find *every* file that repeated the strong form — five did here.
 
+75. **A throughput number without its input size is not a number.** The prefill baseline published at 2048
+    tokens (655 / 479 tok/s) understates realistic prefill by 25 % because the parent spends ~410 ms per forward
+    plus ~90 ms per chunk boundary regardless of length: at fixed chunk size the same model measures 459 tok/s at
+    1024 tokens, 825 at 4096, 913 at 8192. Two rules: (1) when a quantity is affine in the variable you are
+    sweeping, report slope and intercept rather than one ratio - and note that chunk size (the thing I was
+    tuning) is the weak term at +5.8 % then saturating, while prompt length (the thing the operator pointed at)
+    is the strong one; (2) re-derive every published comparison that consumed the old constant: the roofline gap
+    here moved 75x -> 42x, and the bar a B70 prefill must clear became the `-mcpa` number, not the plain one.
+
+76. **When a broken measurement has a cheap fix that changes what is measured, the cheap fix is the trap.** The
+    prefill arms truncated to 1158 tokens because the corpus was `REFERENCE_TEXT x --reps`; repeating it more
+    fixes the length and silently invalidates the result, because periodic text routes every window to the same
+    experts, so a chunk touches fewer distinct experts, reads fewer bytes and prefills faster. Measured control
+    (same prompt length, same chunk, corpus the only difference): varied 12-document pool 873 tok/s touching 417.7
+    experts/layer vs repeated text 910 tok/s touching 399.4 - **+4.2 % speed for -4.4 % coverage**, the exact
+    direction predicted. General form: before accepting an instrument fix, name a *derived* quantity that would
+    move if the fix changed the phenomenon, and measure it. Here that quantity (chunk expert coverage) already
+    existed in the harness, so the bias cost one arm to catch instead of a chapter of optimistic baselines. The
+    permanent fix: default the corpus to distinct documents, and make a truncated arm a hard error with an
+    explicit opt-in flag.
+
+77. **Build the arm that can kill your explanation, especially when the number came from someone else.** The
+    operator's estimate was "`-mcpa` can easily be worth 2x"; measured, it is +30 % (2.05) and +50 % (2.68) on
+    prefill - right direction, right order, not 2x, and the artifact says the measured thing rather than the
+    suggested thing. Separately, my own mechanism story (hot experts promoted during sub-chunk 1 serve sub-chunk
+    2) predicted the gain should vanish when the prompt fits in one chunk; one arm falsified it - at chunk =
+    prompt = 4096, plain 876 vs `-mcpa` 1064 tok/s (**+21.5 %** with provably zero intra-forward re-touch). The
+    measured answer (`out_host_mem.txt`) is arithmetic migration: the CPU expert path is compute-bound at
+    prefill's ~98 rows/expert on a host with AVX2 but **no VNNI**, and there is no bandwidth shortage to relieve
+    (~10 % of the chunk's time would stream all unique remote expert bytes). Corollary that also fell out: the
+    same flag is worth ~nothing at decode's rows/expert ~1-4, because there the path runs at 89 % of the host's
+    read ceiling and moving it changes neither bytes nor arithmetic per byte. A mechanism that explains both
+    regimes is worth more than a mechanism that explains the one you were looking at.
+
+78. **A bandwidth probe must carry an invariant with a known value, or it will print confident nonsense.** My
+    first `probe_mem` stepped the read index by 16 uint64 while loading at `j` and `j+4`, touching half the bytes
+    it charged for: every read figure was 2x high (89 -> 45.8 GB/s at DRAM), no assertion fired, and the numbers
+    looked respectable. What gave it away was internal consistency rather than authority - the same run reported
+    copy at 1622 % of the datasheet DRAM ceiling, and I had pasted that line into a table without reacting. A
+    symmetric read+write stream cannot exceed the memory ceiling, and `copy <= read <= peak` costs one comparison
+    to enforce. Rules: (1) state the ceiling in the probe's own header and assert against it; (2) treat a
+    super-theoretical number as a bug report against the probe, not as a discovery about the hardware; (3) prefer
+    invariants derivable from the measurement itself (copy vs read ratio) over ones needing external truth, since
+    the external truth (`dmidecode`) may not even be readable on the box.
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
     unchanged and is what LESSONS 68 refers to.)

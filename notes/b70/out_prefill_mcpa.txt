@@ -1,0 +1,63 @@
+-mcpa on prefill: +21 % to +50 %, present on the first pass of a cold process, and it is not the mechanism I guessed
+======================================================================================================================
+The operator's estimate was "-mcpa can easily be worth 2x on this system because it lets hot experts migrate to
+the GPU". Measured on realistic prefill (Qwen3.8, 4096 tokens, varied corpus, `-mct 15`, whole-step tok/s, each
+arm running the identical prefill 4-5 times so the horizon is visible rather than assumed):
+
+       arm (chunk 2048 unless noted)              pass 1     median    promotions   vs plain
+       2.05  plain                                 820         858          0          -
+       2.05  -mcpa                                1071        1114        403        +29.8 %
+       2.05  -mcpa chunk 1024                     1103        1082        564        +26.1 %
+       2.05  -mcpa chunk 4096                     1047        1064        183        +21.5 %
+       2.05  plain  chunk 4096  (discriminator)    876         876          0          -
+       2.05  COLD (-mcpa, empty stats dir)        1098        1119        396        +31.9 % vs cold plain
+       2.05  COLD (plain, empty stats dir)         860         848          0          -
+       2.68  plain                                 505         490          0          -
+       2.68  -mcpa                                 723         736        394        +50.2 %
+
+1. **It is worth +30 % on 2.05 and +50 % on 2.68** (median of 5), so the direction and rough order the operator
+   predicted are confirmed - 2.68 gains more because it is capacity-tight, so a larger share of its experts are
+   remote and therefore promotable. It is not 2x at this shape, and I am not going to write 2x because it was
+   suggested: the honest statement is +21 % to +50 % depending on recipe, config-only, no kernel work.
+2. **The gain does NOT need a horizon.** I predicted (from LESSONS 66, where -mcpa looked like a regression on
+   decode measured over two passes) that pass 1 would pay copies and later passes would profit. Instead pass 1
+   of a COLD process (empty `--stats-dir`, no prior promotions) already beats cold plain by +27.7 % (1098 vs
+   860), and the per-pass trend is flat (1098/1133/1124/1113). So whatever -mcpa buys, it buys it inside the
+   first forward, and the decode-direction conclusion is not a prefill conclusion.
+3. **My explanation was wrong, and the discriminator says so.** I claimed the benefit comes from sub-chunk
+   re-touch: at chunk 2048 a 4096-token prompt is two chunks, so an expert promoted during chunk 1 serves chunk
+   2 free. That predicts the gain should shrink as the chunk approaches the prompt length. It does not: at chunk
+   4096 - ONE sub-chunk, so within a forward every expert's weights are needed exactly once by construction -
+   plain measures 876 tok/s and -mcpa 1064 tok/s, still **+21.5 %**. Repetition across sub-chunks is therefore
+   not the mechanism, and the flat k1024/k2048/k4096 spread (1082/1114/1064) is consistent with that.
+4. **What the mechanism is, now measured rather than hypothesised (`out_host_mem.txt`).** I first wrote this as
+   "the re-reads are L2/L3 hits, so promotion saves cache traffic", which was a story. The host measurements
+   close it: this box (Ryzen 9 5950X, 2x DDR4-3200) achieves **45.8 GB/s DRAM read** and **523.8 GB/s from L3**,
+   while a 4096-token chunk's *unique* remote expert bytes are ~20 GiB - streamable in ~0.46 s against a 4.69 s
+   chunk, i.e. **~10 % bandwidth occupancy**. There is no bandwidth shortage for promotion to relieve, so the
+   gain is **arithmetic migration**: the CPU expert path is compute-bound at prefill rows/expert (~98), on a host
+   with **AVX2 but no VNNI**, and promotion hands those rows to the 3090's expert kernels. Supporting evidence
+   from the existing calibration: at rows=1-4 that path runs at 89 % of the measured read ceiling (bandwidth-bound,
+   so promotion cannot help it - matching -mcpa's near-zero decode value), while at rows=16 its implied rate
+   *falls* and warm L3 buys only 15 % (compute-bound, which is where prefill lives).
+   **Still worth measuring:** rebuild the worker at `MAX_M = 8/16` (`moe_mul1.cpp:71`, currently 4, so a 98-row
+   expert is walked ~25 times) and see whether prefill rises on its own. If it does, part of the +30 % is
+   job-granularity overhead rather than placement, and the CPU worker - not the promotion policy - is the thing
+   to fix.
+5. **Cross-cutting consequence for the plan.** `MAX_M = 4` also explains a decode result that looked coincidental:
+   verify/MTP batches sit at rows/expert ~= 2.2 (`out_verify_batch.txt`), which is *under* MAX_M, so the CPU path
+   serves a verify batch with one job per expert and pays no amplification - that is why the CPU home is
+   competitive at verify shapes and degrades at prefill ones. Amplification, not arithmetic, separates them.
+   And the B70's own comparison base moves: at matched 4096 tokens the parent is 858 tok/s plain / 1114 with
+   -mcpa, so a B70 prefill proposal has to beat the promoted-placement number, not the plain one.
+6. **Instrument caveat, and a bug fixed.** Under -mcpa the snapshot-diff routing trace is invalid (module
+   permutations change mid-session), and `topk_emp` collapsed to 0, which crashed the union-ratio report with a
+   ZeroDivisionError *after* the prefill timing had printed - so the data was salvageable but the arm looked
+   failed. `bench_live_trace.py` now skips the routing report explicitly when topk cannot be measured and says
+   why; timings and migration counters stay valid. All "experts touched" figures in this file's -mcpa arms are
+   therefore NOT evidence and are not used anywhere above.
+
+Reproduce:
+    bash notes/b70/run_prefill_mcpa.sh        # 6 arms, self-validating, ~15 min
+    # cold-start + chunk-4096-plain discriminator: see the loop bodies in this file's arm table
+    grep -E "pass [0-9]+:|median of|placement migration" /tmp/prefill_mcpa/*.log

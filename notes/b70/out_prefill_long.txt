@@ -1,0 +1,78 @@
+Realistic prefill: chunk size, prompt length, the parent's fixed cost, and what repeated text does to the answer
+=================================================================================================================
+Instrument: `notes/b70/run_prefill_long.sh` on the fixed `notes/bench_live_trace.py`. Model Qwen3.8@2.05
+(`-mcs 256 -mct 15`, 256 of 512 experts on the CPU home) and @2.68 (`-mcs 384`), single session, decode pass of
+32 tokens before the timed prefill, whole-step numbers (attention + dense + hyper-connections + expert leg +
+link transfer). This replaces the 2048-token figures in `out_prefill_gemm.txt` / `b70-prefill.md` §5 as the
+headline prefill baseline, for the reason the operator gave: 2048 tokens is too short to amortize what the
+parent spends per forward, so it understates realistic prefill speed.
+
+## 1. MEASURED (4096 tokens unless stated; varied corpus; median where repeated)
+
+       arm                          ms      tok/s   us/MoE layer/token
+       2.05  chunk 1024          4962.3     825         25.2
+       2.05  chunk 2048          4689.8     873         23.9
+       2.05  chunk 4096          4693.3     873         23.9
+       2.05  8192 tok chunk 4096 8973.1     913         22.8
+       2.05  prompt 1024 c1024   2231.7     459         45.4   (3 passes: 446 / 476 / 459)
+       2.68  chunk 2048          8499.5     482         43.2
+       2.68  chunk 4096          7907.2     518         40.2
+
+1. **Chunk size has a small, saturating effect: +5.8 % from 1024 -> 2048, then 0.0 % from 2048 -> 4096.** The
+   operator's 2048-4096 band is confirmed as flat-optimum, and there is nothing to win by tuning it further:
+   the per-chunk-boundary cost is about (4962.3 - 4693.3)/3 ~= **90 ms per extra chunk**.
+2. **Prompt length matters far more than chunk size, and that is a per-FORWARD fixed cost.** Going 4096 -> 8192
+   tokens at chunk 4096 (two chunks in one forward) cost +4280 ms for the marginal chunk against the first
+   chunk's 4693 ms, which puts the per-forward fixed cost at roughly **410 ms** (~9 % of a 4096-token prefill).
+   Consequence for reporting: **prefill tok/s is not comparable across prompt lengths.** The 1024-token arm
+   reads 459 tok/s versus 825 at 4096 tokens with the *same* chunk size - a 1.8x spread produced entirely by
+   amortization, not by the model doing different work. (That arm also ran a shorter decode warm-up, so treat
+   its absolute number as indicative; the 4096 <-> 8192 pair is the clean decomposition.)
+
+## 2. THE BASELINE CORRECTION, with both biases named
+
+| recipe | published (2048 tok, periodic text) | this (4096 tok, varied text) | change |
+|---|---|---|---|
+| 2.05, `-mcs 256` | 655 tok/s | **873 tok/s** | +33 % |
+| 2.68, `-mcs 384` | 479 tok/s | **518 tok/s** | +8 % |
+
+The two effects on the old numbers pull in *opposite* directions, so the net is not a clean statement about
+either: short prompts made it pessimistic, periodic text made it optimistic (below), and 2.68 - which is
+capacity-tight and therefore closer to the streaming limit - moved less than 2.05.
+
+## 3. PERIODIC TEXT IS AN UPWARD BIAS, MEASURED (the operator's objection, tested not assumed)
+
+Requesting 4096 tokens used to be answered with 1158 (`REFERENCE_TEXT x --reps`), and the obvious fix - repeat
+the reference text more - has a problem the operator pointed out: every window then routes like every other,
+so the chunk touches fewer distinct experts, reads fewer weight bytes, and prefills faster than real text would.
+Control arm, same prompt length, same chunk, only the corpus differs:
+
+       corpus                       tok/s   experts touched/layer (mean of 48)   rows/expert
+       varied pool (12 distinct docs)   873          417.7                          98.1
+       REFERENCE_TEXT repeated, period 193   910          399.4                         102.6
+                                    +4.2 %             -4.4 %                          +4.6 %
+
+**So the bias is real, it is about +4 % at 4096 tokens, and it moves exactly as predicted**: throughput up,
+expert coverage down, and coverage explains it. It is bounded at this length because 4096 tokens spans ~21
+periods, so coverage still accumulates; at longer prompts or shorter chunks (fewer distinct n-grams per chunk)
+it would grow. Therefore: the varied pool (`notes/b70/fixtures/prefill_pool.txt`, 12 distinct in-repo documents
+each appearing once, ~72.7k tokens) is the default corpus for prefill arms, `--corpus repeat` exists only as
+this control, and `--prefill N` now FAILS rather than silently measuring fewer tokens.
+
+## 4. WHAT IS STILL NOT KNOWN
+  * The parent's **non-expert** prefill cost per layer. These are whole-step numbers; the ~3.7 us/token/layer of
+    B70 expert work claimed in `out_prefill_scale.txt` cannot be subtracted from them without a bucketed prefill
+    profile, which does not exist yet (`--ctx N --tokens 1` measures decode, which is how the earlier attempt
+    fooled me).
+  * Attention at 4k+ context is inside these totals and grows quadratically; every arm here is <= 8192 tokens, so
+    no claim transfers to 32k prompts.
+  * Whether these numbers hold in a cold process (all arms had a 32-token decode pass first). Being measured
+    now in `out_prefill_mcpa.txt`, since it decides whether an adaptive mechanism's gain is real or borrowed
+    from warm-up.
+  * Expert-coverage numbers have a wide spread (min 10 of 512 in some layer against max 478) that I do not yet
+    explain; the mean is used, the extremes are not, and one layer reporting 10 experts for a 4096-token chunk is
+    more likely instrumentation than routing.
+
+Reproduce:
+    bash notes/b70/run_prefill_long.sh            # ~20 min, 7 arms, each self-validating
+    grep -E "pass [0-9]+:|prefill [0-9]+ tokens|experts touched" /tmp/prefill_long/*.log

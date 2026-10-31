@@ -89,7 +89,8 @@ The byte model and the measurement agree: §3's one-read roofline of 36.6k tok/s
 amplification gives 5.45k against 5.36k measured at R=2048 (1.6 %). Cost is **linear in R** — buckets ≈
 R·topk/16 — so larger chunks do not help much; only lowering the amplification does, and the two mechanisms that
 could (rows-deep items, SLM staging) both measured worse, leaving **co-scheduled slabs at 9–16 %** as the only
-demonstrated softening. Against the parent's measured 655 tok/s (whole step), the B70's expert leg alone is
+demonstrated softening. Against the parent's measured prefill at matched size (873 tok/s plain, **1114 tok/s
+with `-mcpa`**, 4096 tokens, whole step), the B70's expert leg alone is
 ~8×, but the honest end-to-end number needs the parent's non-expert prefill cost, which has never been
 measured (§5's owed item 1 is now the blocking one).
 
@@ -161,18 +162,38 @@ measured (§5's owed item 1 is now the blocking one).
    * Activation traffic, scheduler and the engine's chunking (chunk_size 4096 default) are not modelled here;
      at R=2048 activations are ~5% of the bytes, so the omission is safe for the roofline and not for a
      wall-clock prediction.
-   * The matched prefill baseline now exists (partially). Same instrument as the decode baselines, same model,
-     2048-token chunk, real text, `-mct 15` (`notes/b70/run_prefill_baseline.sh`):
-       Qwen3.8@2.05, `-mcs 256` (256 of 512 experts on the CPU home): 3125.4 ms → **655 tok/s** (31.9 µs/layer)
-       Qwen3.8@2.68, `-mcs 384`:                                     4276.3 ms → **479 tok/s** (43.5 µs/layer)
-     Against decode's 58.3 tok/s at b=1 on 2.68, prefill is only ~8x faster than single-stream decode - which
-     is the point. Prefill touches essentially every expert per layer, so on a capacity-starved split it is
-     dominated by remote work, and the roofline in §3 (56 ms/chunk at 674 GB/s with weights read ONCE, i.e.
-     ~36.6k tok/s) is ~75x above what the shipping stack achieves. Two honest limits on that comparison: the
-     all-GPU control arm failed structurally (this tracer needs the CPU split's counters to trace, so
-     `-mcs 0` exits before measuring - the acceptance-era 5043 tok/s on Qwen3.5 stands as the only no-offload
-     reference, on a different model), and the numbers are cold-placement single passes, not a tuned prefill
-     configuration. Neither caveat closes a 75x gap.
+   * The matched prefill baseline exists and has been **re-measured at realistic size**; the 2048-token figures
+     this section first published are superseded, because the parent pays a fixed cost per forward that 2048
+     tokens cannot amortize (`notes/b70/run_prefill_long.sh`, `out_prefill_long.txt`; varied-document corpus,
+     `-mct 15`, same instrument as the decode baselines):
+       Qwen3.8@2.05, `-mcs 256`:  2048 tok → 655 tok/s (superseded) · **4096 tok → 873 tok/s** (23.9 µs/layer/tok)
+       Qwen3.8@2.68, `-mcs 384`:  2048 tok → 479 tok/s (superseded) · **4096 tok → 518 tok/s** (40.2 µs/layer/tok)
+     Chunk size is a weak lever (+5.8 % from 1024 → 2048, **0.0 %** from 2048 → 4096, i.e. the operator's
+     2048-4096 band is a flat optimum costing ~90 ms per chunk boundary), while prompt length is a strong one
+     (~410 ms fixed per forward: the same chunk size yields 459 tok/s at 1024 tokens and 825 at 4096), so
+     **prefill tok/s must never be quoted without its prompt length**. Repeat text adds a further upward bias of
+     **+4.2 %** measured against a distinct-document corpus, and it moves exactly as predicted - throughput up,
+     distinct experts touched down 4.4 % - which is why the baseline corpus is now non-repeating (`--corpus`) and
+     why a short prompt is a hard error rather than a warning.
+     **`-mcpa` is the largest prefill lever found so far and it is a flag, not a kernel** (`out_prefill_mcpa.txt`):
+     **+30 % on 2.05 (858 → 1114 tok/s) and +50 % on 2.68 (490 → 736)**, present on pass 1 of a cold process, so
+     unlike decode it needs no adaptation horizon. The mechanism is **arithmetic migration, not bandwidth**: the
+     host moves 45.8 GB/s from DRAM (`out_host_mem.txt`) and a 4096-token chunk's unique remote expert bytes
+     (~20 GiB) would occupy only ~10 % of the chunk streaming them, while the CPU expert path is compute-bound at
+     prefill's ~98 rows/expert on a host with **AVX2 but no VNNI**. Promotion hands those rows to the 3090's
+     kernels - which is why the gain survives at chunk = prompt = 4096 (876 → 1064 tok/s, where each expert's
+     bytes are needed exactly once per forward) and why it is larger on the capacity-tight 2.68. Secondary lead:
+     `constexpr int MAX_M = 4` in the CPU worker (`moe_mul1.cpp:71`) walks a 98-row expert ~25 times; rebuilding
+     at `MAX_M = 8/16` would separate job-granularity overhead from placement value.
+     Against decode's 58.3 tok/s at b=1 on 2.68, prefill is ~9x faster than single-stream decode, so the point
+     stands but the magnitude moved: prefill touches essentially every expert per layer (measured: **418 of 512
+     experts per layer at 4096 tokens, ~98 rows/expert**), so on a capacity-starved split it is dominated by
+     remote work, and the roofline in §3 (~36.6k tok/s with weights read ONCE) is ~42x above the plain parent and
+     ~33x above the promoted-placement one - not 75x. Two honest limits remain: the all-GPU control arm failed
+     structurally (this tracer needs the CPU split's counters, so `-mcs 0` exits before measuring; the
+     acceptance-era 5043 tok/s on Qwen3.5 stands as the only no-offload reference, on a different model), and the
+     parent's **non-expert** prefill cost has never been bucketed, so none of these figures decompose into what
+     the B70 could actually remove from them.
    * Residency policy under prefill (which experts to hold while a chunk streams through 48 layers) is the
      same machinery as decode placement, and the live-trace finding that routing is far more concentrated than
      the stored profiles (`out_live_trace.txt`) applies to prefill picks too - unverified, since the traces
