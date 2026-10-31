@@ -39,16 +39,26 @@ Instrument: `notes/b70/probe_mem.c` (AVX2, OpenMP, min-of-7-inner x 3-outer, ali
 
 ## 2. WHAT THIS SETTLES ABOUT -MCPA ON PREFILL
 
-Prefill sits deep in the compute-bound side of that crossover. A 4096-token chunk touches ~418 of 512 experts
-per layer at ~98 rows/expert; with `-mcs 256` roughly half the picks land on remote experts, so the unique
-remote expert bytes per chunk are about 209 experts x ~2 MiB x 48 layers ~= **20 GiB**, which the measured
-45.8 GB/s ceiling could stream in ~0.46 s - about **10 % of the 4.69 s chunk**. There is therefore no
-bandwidth shortage for promotion to relieve, and the +21 %/+30 %/+50 % gains in `out_prefill_mcpa.txt` (which
-survive at chunk = prompt = 4096, where an expert's bytes are needed exactly once per forward) are moving
-*arithmetic*: rows leave an AVX2-without-VNNI path and enter the 3090's expert kernels. That also predicts the
-right ordering by recipe - 2.68, which is capacity-tight and keeps more experts remote, gains 50 % against
-2.05's 30 % - and it explains why the same flag was worth roughly nothing on decode, where rows/expert ~1-4
-leaves the CPU path at its bandwidth ceiling and promotion changes neither the bytes nor their count.
+Prefill sits on the compute-bound side of that crossover at the byte level, but see §5 before treating any of
+this as a cost model. A 4096-token chunk touches ~418 of 512 experts per layer at ~98 rows/expert; with
+`-mcs 256` roughly half the picks land on remote experts, so the unique remote expert bytes per chunk are about
+209 experts x 1.172 MiB x 48 layers = **11.5 GiB** (the 1.172 MiB is the whole expert - gate + up + down at
+2.05 bpw, cross-checked against the shapes: (2560x640x2 + 640x2560) x ~0.24 B = 1.18 MiB), which the measured
+42.6 GiB/s read ceiling streams in **270 ms against a 4693 ms chunk = 5.7 % occupancy**. There is therefore no
+gross bandwidth shortage for promotion to relieve at the unique-byte level, and the promotion gains in
+`out_prefill_mcpa.txt` (which survive at chunk = prompt = 4096, where an expert's bytes are needed exactly once
+per forward: 876 -> 1064 tok/s) are most plausibly moving *arithmetic*: the CPU path runs AVX2 **without VNNI**
+(measured: `isa avx2=True bw=False vnni=False vbmi=False`) while the promoted experts go to the 3090's kernels.
+That predicts the right ordering by recipe - 2.68, which keeps more experts remote, gains 50 % against 2.05's 30 %.
+
+**Two arithmetic errors of my own, in this one paragraph, both caught by checking instead of asserting.** First
+version said "~20 GiB, ~10 % occupancy" using a hand-waved 2.0 MiB/expert. The correction I then wrote used
+1.172 MiB **times three projections**, giving 30 GiB / 15 % - double-counting, because the loader's per-expert
+figure already covers all three tensors. The checked number is 11.5 GiB and 5.7 %. Worth recording because the
+failure mode is instructive: both wrong versions were produced by adjusting the factors of a formula I had not
+verified against the source of the constant, and each revision moved the conclusion in whatever direction the
+argument needed. A quantity that matters gets recomputed from primitives (expert dims x bytes/weight x layers),
+not patched.
 
 Consequences to carry:
   * Review any planner use of `CPU_RATE = 47.4 GiB/s`: as a ceiling it should be ~42.6 GiB/s (read) /
@@ -73,6 +83,47 @@ a symmetric read+write stream must do, whereas the buggy run had reported copy a
 (1622 % in one row) and I had pasted that through without reacting. Rule extracted (LESSONS 78): a bandwidth
 probe must carry an invariant with an expected value - copy <= read, read <= datasheet peak, copy ~ 2x read on
 DRAM - and refuse to print when the invariant breaks.
+
+## 5. THE PREFILL-SHAPE ARM THAT OPENED A REAL QUESTION (`bench_cpu_moe.py`, layer 12, 15 threads)
+
+`MAX_M = 4` in `moe_mul1.cpp:71` looked like a traffic lever: if a job carries 4 rows, a 98-row expert would be
+walked ~25 times. Tested with a cost curve instead of a rebuild - rows swept 1..128, and **there is no stair at
+multiples of 4** (us/token 128.8, 112.3, 109.5, 109.5, 109.9 at rows 4, 8, 16, 24, 32), so that lever is
+dropped; a 15-minute rebuild was not needed to learn it. But the faithful prefill-shape arm then disagreed with
+everything above:
+
+       experts  rows    us/call      us/token   GiB/s(unique)   asgn/expert
+       418     4096     478,643        116.9         1.07          98.0
+       192       96       11,414        118.9        20.6           5.0
+         8      128       14,592        114.0         0.67           8.0
+
+**`asgn/expert = 98.0` at 418 experts and 4096 tokens is exactly rows/expert = 98, i.e. one assignment per
+pick** - no row batching at all in that configuration, while the smaller-pool arms do batch (~8-15 rows per
+assignment). And 478 ms for one layer's CPU work cannot be squared with the parent's *entire* measured prefill of
+4.69 s = 98 ms/layer for all 48 layers including attention, dense and the GPU-resident experts. Candidate
+explanations, none yet tested: the bench's uniform routing is a worst case against real concentrated routing;
+only ~half of picks are CPU-side in the `-mcs 256` configuration; the bench may not reproduce the engine's
+token-to-expert grouping (which is what would create the batching the small arms show); per-call OpenMP overhead
+with `--iters 3`; or the engine's CPU leg really is this expensive and the prefill forward is dominated by
+something the bench does not model.
+**The measurement that settles it:** drive `bench_cpu_moe.py` from the live routing profile instead of uniform
+sampling (`--topk` with the traced per-layer distributions), at `--experts 256` to match `-mcs 256`, and compare
+its per-layer cost against the engine's 98 ms/layer. If the profile-driven bench lands near 98 ms, the
+discrepancy is uniform-routing artefact and this note closes. If it stays at ~480 ms, **the parent's CPU expert
+leg is running one assignment per pick at prefill shapes, and fixing that grouping is a larger and cheaper win
+than anything in the B70 kernel chapter** - it would also mean the amplification law this file has been chasing
+on the GPU is dwarfed by an aggregation bug on the CPU side.
+
+## 6. WHAT TO USE THESE NUMBERS FOR
+  * Safe: the host ceiling itself (42.6 GiB/s read, 24.1 GiB/s copy, 484.7 GiB/s L3), the ratio to the pinned
+    link (3.2x), the unique-byte occupancy at prefill shape (11.5 GiB = 5.7 % of a 4096-token chunk), and the
+    statement that at rows=1-16 with a large pool the expert kernel runs AT that ceiling (42.5-45.7 GiB/s
+    measured) - so decode-side "buy more bandwidth" ideas are dead on this host.
+  * Unsafe: any absolute us/token comparison across bench configurations. `rows` means *tokens over the loaded
+    pool*, so rows/expert = rows x topk / experts, and two arms with different expert counts are in different
+    regimes even at equal `rows`. Hold rows x topk / experts fixed, or the comparison is meaningless (this one
+    nearly produced a 28x claim).
+  * Open: the §5 discrepancy, which is now the highest-value unmeasured item in the prefill chapter.
 
 Reproduce:
     gcc -O3 -march=native -fopenmp -o probe_mem probe_mem.c

@@ -1321,6 +1321,39 @@ nothing that is the sole instance of a measurement.
     invariants derivable from the measurement itself (copy vs read ratio) over ones needing external truth, since
     the external truth (`dmidecode`) may not even be readable on the box.
 
+79. **Falsify a lever with a curve before you buy it with a rebuild.** `constexpr int MAX_M = 4` in the CPU worker
+    implied ~25 weight passes for a 98-row prefill expert, which sounded like a large, fixable inefficiency and
+    pointed at a CUDA extension rebuild to test `MAX_M = 8/16`. Instead I swept rows 1..128 on the existing CPU
+    instrument: us/token 128.8 / 112.3 / 109.5 / 109.5 / 109.9 at rows 4 / 8 / 16 / 24 / 32 — **no stair at
+    multiples of 4**, so the amplification is not happening in the way the estimate assumed. Fifteen minutes of
+    measurement retired both the rebuild and the mechanism. The general shape of the shortcut: if a compile-time
+    constant gates a loop, its cost is a function *with a kink at that constant*, and kinks are far cheaper to
+    look for than builds. Related: the same sweep exposed something more interesting than the lever it was testing
+    (one assignment per pick at prefill shape, `out_host_mem.txt` §5) — killing your own hypothesis is often where
+    the next one comes from.
+
+80. **Know what a benchmark's independent variable actually holds fixed, or its numbers become adjectives.**
+    `bench_cpu_moe.py`'s `rows` is *tokens over the loaded expert pool*, so rows/expert = rows × topk / experts.
+    Reading three arms at face value (8 experts/128 rows at 114 µs/token, 192/96 at 119, 418/4096 at 117) looked
+    like "flat, compute-bound, ~1 GiB/s — the card must be ~28× faster", and that claim was minutes from a
+    document. Holding the real invariant fixed changes the reading entirely: only the 418×4096 arm is prefill's
+    regime, and its `asgn/expert` = 98 = rows/expert reveals one assignment per pick, which the other two arms
+    (8-15 rows per assignment) actively hide. Rules: (1) before comparing two arms of a synthetic benchmark, write
+    down which derived quantity is constant across them, and if none is, the arms are not comparable; (2) prefer a
+    column that exposes the mechanism (`asgn/expert`) over one that summarizes cost (`us/token`); (3) when a
+    cross-check against an independent measured total fails — 478 ms/layer from the bench against 98 ms/layer for
+    the parent's whole forward — the bench is not "noisy", it is *contradicting a measurement*, and that
+    contradiction is the finding worth chasing.
+
+81. **Recompute a load-bearing quantity from primitives; never patch its factors.** The unique-remote-bytes
+    estimate in one paragraph went 20 GiB/10 % → 30 GiB/15 % → 11.5 GiB/5.7 %. The first used a hand-waved
+    2.0 MiB/expert; the "correction" multiplied the loader's per-expert figure by three projections, not knowing
+    it already covered gate+up+down. Both revisions moved the conclusion in whatever direction the argument needed,
+    which is the tell: each was a factor tweak rather than a recomputation from shapes and bytes-per-weight.
+    The checked form is `(2560×640×2 + 640×2560) × 0.24 B ≈ 1.18 MiB/expert` — derived, and it agrees with the
+    loader's 1.172 MiB. Same discipline as `check_tables.py`: a claim that can be derived should be *computed*,
+    and a correction that changes the direction of an argument deserves the extra minute.
+
 68. **Identical ALU is not an identical control - dump the ISA and compare the memory instructions.**
     (Numbering note: this entry sat above 69–70 until a repair edit moved 69/70 in front of it; content is
     unchanged and is what LESSONS 68 refers to.)

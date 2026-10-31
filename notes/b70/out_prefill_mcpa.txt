@@ -40,16 +40,27 @@ arm running the identical prefill 4-5 times so the horizon is visible rather tha
    from the existing calibration: at rows=1-4 that path runs at 89 % of the measured read ceiling (bandwidth-bound,
    so promotion cannot help it - matching -mcpa's near-zero decode value), while at rows=16 its implied rate
    *falls* and warm L3 buys only 15 % (compute-bound, which is where prefill lives).
-   **Still worth measuring:** rebuild the worker at `MAX_M = 8/16` (`moe_mul1.cpp:71`, currently 4, so a 98-row
-   expert is walked ~25 times) and see whether prefill rises on its own. If it does, part of the +30 % is
-   job-granularity overhead rather than placement, and the CPU worker - not the promotion policy - is the thing
-   to fix.
-5. **Cross-cutting consequence for the plan.** `MAX_M = 4` also explains a decode result that looked coincidental:
-   verify/MTP batches sit at rows/expert ~= 2.2 (`out_verify_batch.txt`), which is *under* MAX_M, so the CPU path
-   serves a verify batch with one job per expert and pays no amplification - that is why the CPU home is
-   competitive at verify shapes and degrades at prefill ones. Amplification, not arithmetic, separates them.
-   And the B70's own comparison base moves: at matched 4096 tokens the parent is 858 tok/s plain / 1114 with
-   -mcpa, so a B70 prefill proposal has to beat the promoted-placement number, not the plain one.
+   **MAX_M lever: CLOSED, falsified cheaply.** `constexpr int MAX_M = 4` (`moe_mul1.cpp:71`) looked like 25 weight
+   passes per 98-row expert, so instead of rebuilding the extension I swept rows 1..128 on the existing CPU
+   instrument: there is **no stair at multiples of 4** (us/token 128.8 / 112.3 / 109.5 / 109.5 / 109.9 at rows
+   4 / 8 / 16 / 24 / 32), so job granularity is not costing time that way. A fifteen-minute curve retired a
+   rebuild and a wrong mechanism together.
+   **What is still open, and it matters more than -mcpa does.** The faithful prefill-shape CPU arm (418 experts,
+   4096 tokens - i.e. exactly 98 rows/expert, matching live routing) measures 478 ms for ONE layer with
+   `asgn/expert` = 98.0 = **one assignment per pick**, against 8-15 rows per assignment in smaller-pool
+   configurations, and 478 ms/layer cannot be reconciled with the parent's whole-model 98 ms/layer. So "compute-
+   bound" is the best available explanation for -mcpa's gain rather than a demonstrated one, and the alternative
+   - the CPU leg is **assignment-bound**, re-streaming each expert per pick instead of per row-group - is
+   unresolved. Settling test: run `bench_cpu_moe.py` on the live routing profile at `--experts 256` (matching
+   `-mcs 256`) instead of uniform sampling and compare against 98 ms/layer (`out_host_mem.txt` §5-6).
+5. **Cross-cutting consequence for the plan.** The B70's comparison base has moved: at matched 4096 tokens the
+   parent is 858 tok/s plain and **1114 tok/s with `-mcpa`**, so a B70 prefill proposal must beat the
+   promoted-placement number, not the plain one - and the same is true of any placement-policy claim, since the
+   baseline it competes against is now a configurable flag anyone can set.
+   An earlier version of this bullet claimed `MAX_M = 4` explained why verify batches (rows/expert ~= 2.2,
+   `out_verify_batch.txt`) are cheap on the CPU home while prefill is not. That amplification story is falsified
+   by the flat cost curve above, so the verify-versus-prefill difference on the CPU side is currently
+   **unexplained**, and the one-assignment-per-pick observation in §5 is the surviving candidate.
 6. **Instrument caveat, and a bug fixed.** Under -mcpa the snapshot-diff routing trace is invalid (module
    permutations change mid-session), and `topk_emp` collapsed to 0, which crashed the union-ratio report with a
    ZeroDivisionError *after* the prefill timing had printed - so the data was salvageable but the arm looked

@@ -177,14 +177,19 @@ measured (§5's owed item 1 is now the blocking one).
      why a short prompt is a hard error rather than a warning.
      **`-mcpa` is the largest prefill lever found so far and it is a flag, not a kernel** (`out_prefill_mcpa.txt`):
      **+30 % on 2.05 (858 → 1114 tok/s) and +50 % on 2.68 (490 → 736)**, present on pass 1 of a cold process, so
-     unlike decode it needs no adaptation horizon. The mechanism is **arithmetic migration, not bandwidth**: the
-     host moves 45.8 GB/s from DRAM (`out_host_mem.txt`) and a 4096-token chunk's unique remote expert bytes
-     (~20 GiB) would occupy only ~10 % of the chunk streaming them, while the CPU expert path is compute-bound at
-     prefill's ~98 rows/expert on a host with **AVX2 but no VNNI**. Promotion hands those rows to the 3090's
-     kernels - which is why the gain survives at chunk = prompt = 4096 (876 → 1064 tok/s, where each expert's
-     bytes are needed exactly once per forward) and why it is larger on the capacity-tight 2.68. Secondary lead:
-     `constexpr int MAX_M = 4` in the CPU worker (`moe_mul1.cpp:71`) walks a 98-row expert ~25 times; rebuilding
-     at `MAX_M = 8/16` would separate job-granularity overhead from placement value.
+     unlike decode it needs no adaptation horizon. Leading explanation is **arithmetic migration**, not bandwidth:
+     the host moves 42.6 GiB/s from DRAM (`out_host_mem.txt`) and a 4096-token chunk's *unique* remote expert
+     bytes (11.5 GiB = 209 experts × 1.172 MiB × 48 layers) occupy only **5.7 %** of the chunk's time, while the
+     CPU expert path runs on AVX2 **without VNNI**. It survives the discriminating arm at chunk = prompt = 4096,
+     where each expert's bytes are needed exactly once per forward (876 → 1064 tok/s), and it is larger on the
+     capacity-tight 2.68. Two things this does **not** explain, both open:
+       * `MAX_M = 4` is **not** the lever it looked like — sweeping rows 1..128 shows no cost stair at multiples
+         of 4, so job granularity does not re-stream weights the way the estimate assumed (falsified without a
+         rebuild);
+       * the faithful prefill-shape CPU arm (418 experts × 4096 tokens = 98 rows/expert) measures **478 ms for one
+         layer with one assignment per pick**, which cannot be reconciled with the parent's whole-model
+         98 ms/layer. If that survives a profile-driven reroute of the bench, the parent's CPU expert leg is
+         assignment-bound at prefill shapes and fixing the grouping beats every GPU-side result in this document.
      Against decode's 58.3 tok/s at b=1 on 2.68, prefill is ~9x faster than single-stream decode, so the point
      stands but the magnitude moved: prefill touches essentially every expert per layer (measured: **418 of 512
      experts per layer at 4096 tokens, ~98 rows/expert**), so on a capacity-starved split it is dominated by
