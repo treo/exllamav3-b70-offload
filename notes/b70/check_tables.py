@@ -17,7 +17,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT = sorted(glob.glob(os.path.join(ROOT, "notes/b70/*.md"))) + \
-    sorted(glob.glob(os.path.join(ROOT, "doc/port/b70*.md")))
+    sorted(glob.glob(os.path.join(ROOT, "doc/port/b70*.md"))) + \
+    sorted(glob.glob(os.path.join(ROOT, "doc/adr/*.md")))
 
 
 def cells(line):
