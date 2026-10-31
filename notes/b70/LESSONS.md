@@ -1265,6 +1265,13 @@ nothing that is the sole instance of a measurement.
     by a gate rather than memory: `check_tables.py` checks table shape, and this file is where the reasoning
     lives — if a claim's provenance cannot be re-derived from the tree, the claim should be treated as lost
     work in progress, not as done.
+    **Addendum, same session — the anchor rule bit twice more in a form the wording did not cover.** Both times I
+    inserted a table row by anchoring on the *first cell of the following row* (e.g. `| prefill: SLM staging is the
+    wrong mechanism |`); where that cell's text wrapped, my `newText` did not reproduce the whole consumed run, and
+    the target row silently lost its leading cell — merging two rows into one malformed line. Sharpened rule:
+    **insert relative to something you will reproduce verbatim and completely — prefer the END of the preceding row
+    as the anchor rather than the START of the next one — and run `check_tables.py` immediately after any table
+    insert**, since counting cells per row is exactly the check that catches it.
 
 70. **When a probe's conclusion is a mechanism claim, prove which resource bounds it.** `probe_slm` bundled two
     findings and only one survived: the SLM staging penalty (1.5–6.0x, mechanism verified in the archived dump:

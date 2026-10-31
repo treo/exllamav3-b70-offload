@@ -21,7 +21,7 @@ Derived, and it is the load-bearing arithmetic: on 2.05 prefill the CPU expert l
 chunk (57 %)**, `-mcpa` removes **948 ms of that term (36 %)**, and moving the whole expert leg to the card costs
 **734 ms**. The floor is therefore **2724 ms = 1.69×**, and it is the *same floor* whether `-mcpa` is on or not —
 because the second mechanism cannot remove bytes the first already moved. Claiming 1.69 × 1.26 would be counting
-one term twice (LESSONS 82). §5.1 reports this tested against measurement, including the two things the model did
+one term twice (LESSONS 82). §6.1 reports this tested against measurement, including the two things the model did
 not predict: `-mcpa` costs +221 ms of overhead, and its relief saturates because the promoted set is a fixed-size
 window.
 
@@ -87,7 +87,74 @@ Three consequences for the design:
   free at steady state on decode (LESSONS 66: parity by pass 2), and it is worth +30-50 % on prefill. Quote the
   B70's gain against the promoted baseline and treat the two as competing for the same term.
 
-## 5. OPEN, IN PRIORITY ORDER
+## 5. SHOULD THE TWO CARDS SPLIT THE EXPERT LOAD EQUALLY?
+
+Only by accident. The plan's own objective (`plan_parent_budget.py` line 18, and the planner already passes the
+measured `PARENT_EXPERT_GBPS = 190` for calibrated models, so this is not a stale-rate artefact) is
+
+    wall/layer = max( T_parent + bytes(S_g)/190 ,  bytes(S_b)/rate_b ,  bytes(S_c)/42.6 )
+
+and everything follows from the first two terms being **added differently**: the 3090's expert work sits *on top
+of* its non-expert work, while the card's runs *in parallel with* it. So the target is not equal bytes, not equal
+picks, and not even equal time — it is **equal time after each home absorbs its own overheads**, which yields:
+
+**Rule. Put expert work on the card up to the point where the card's term equals the parent's
+`T_parent + its expert share`. If the card's whole expert leg is already below `T_parent`, load it completely and
+give the 3090 nothing — any byte handed back only lengthens the critical path.**
+
+Solving that on the plan's constants (card 292 GB/s and 3090 190 GB/s for Qwen; GLM card 132 GB/s — its geometry
+makes the card *slower* per byte than the 3090, which is the whole reason GLM's answer differs):
+
+| config | rows | optimal **card** share | optimum µs/layer | 50/50 µs/layer | all-card µs/layer | gain of optimum over all-card |
+|---|---|---|---|---|---|---|
+| Qwen3.8@2.68 | 1 | 1.00 | 195.6 | 236.0 | 195.6 | 0 % (nothing to gain) |
+| Qwen3.8@2.68 | 4 | 1.00 | 224.9 | 386.6 | 224.9 | 0 % |
+| Qwen3.8@2.68 | 8 | 0.88 | 373.2 | 616.8 | 420.9 | **+12.8 %** |
+| Qwen3.8@2.68 | 16 | 0.78 | 666.0 | 1028.2 | 841.7 | **+26.4 %** |
+| Qwen3.8@2.05 | 16 | 0.77 | 505.8 | 774.7 | 648.1 | **+28.1 %** |
+| GLM@3.05 † | 4 | 0.58 | 1351.8 | 1479.0 | 2287.8 | **+69 %** |
+| GLM@3.05 † | 8 | 0.52 | 2418.3 | 2481.9 | 4575.6 | **+89 %** |
+| GLM@3.05 † | 16 | 0.48 | 4466.2 | 4584.7 | 9151.2 | **+105 %** |
+
+Read the last three columns together: **equal splitting is between nothing and 54 % worse than the optimum**, and
+it is closest to right exactly where the two homes have similar per-byte rates (GLM, where the card is *slower*
+per byte on its geometry). For Qwen the optimum is 3–4× more work on the card than on the 3090, because the card
+is 1.5× faster per byte *and* unencumbered — the 3090 is already spending 142–225 µs/layer on non-expert work
+(hyper-connections included, D11). At rows ≤ 4 the answer degenerates: the card's entire expert leg hides under
+that non-expert term, so **the split is irrelevant and a 50/50 policy is pure loss (+21 % at b=1, +72 % at b=4**
+on 2.68**)**.
+
+**Prefill: never split.** Measured card leg for a 4096-token chunk is 734 ms against a measured 1988 ms parent
+non-expert term, so the card has ~1.25 s of free shadow and the parent has none: every expert byte moved to the
+3090 adds to the critical path monotonically — 1988 → 2248 → 2509 → 3029 ms as the card share falls from 1.00 to
+0.00. Capacity does not force otherwise either: the 3090 must hold experts only when the set exceeds 31.9 GiB
+(2.68: 37.5 GiB), and then the leftover belongs on its *hot* end, not spread evenly.
+
+Three things this arithmetic is **not**, stated because they are the parts that could move the numbers:
+  * † **GLM's `T_parent` (595 µs/layer) is an assumption, not a measurement** — the GLM parent leg is on the owed
+    list, and `rate_b = 132 GB/s` is a plan constant measured on decode-shaped GEMVs. The GLM rows are therefore
+    *illustrative*: they establish that a slow-card/fast-parent geometry flips the answer toward equality, not the
+    exact split.
+  * The parent non-expert growth with rows (×1.15 / ×1.5 / ×1.95 at b=4/8/16) borrows the `PARENT_FLOOR_US`
+    *shape* and applies it to the engine-measured b=1 *level*. The b>1 device-bucket split is a known open
+    measurement, so the crossover batch (`rows ≈ 5-6` on 2.68, where splitting starts to pay) is ±one row.
+  * **`rate_b = 292 GB/s is optimistic in the prefill bucket regime, by 14-34 %.** Validated against the probe:
+    the measured 734 ms/chunk implies 5.70 µs per expert-bucket (matching the probe's own 2×1.546 + 2.608 µs),
+    whereas `bytes / 292` predicts 486-631 ms — effective **193-251 GB/s**. Same lesson as the CPU term and D11:
+    a byte rate calibrated in one shape regime must not be carried into another; use the per-bucket primitive.
+
+Also measured while checking whether splitting has a hidden cost: **it does, and it is small.** A token whose
+picks straddle both homes needs its activations at both, so any non-trivial split duplicates one in+out copy per
+token per layer — 140 ms per 4096-token chunk on 2.68 (19 % of the card's own expert leg, 7 % of the parent's
+non-expert term). At topk = 10 essentially *every* token straddles unless one home holds all 10 of its picks, so
+the duplication is a step function, not a fraction — which is a second, independent reason not to split prefill
+and a reason the decode split should be chosen on whole-token affinity where possible.
+
+Reproduce: the tables are computed from `plan_parent_budget.MODELS` constants by the arithmetic in this section;
+`plan_parent_budget.policy(lpt=True, parent_expert_rate=190)` implements the same objective as a greedy cut and
+already beats the frequency-ordered cut in exactly the rows where the table above says splitting pays.
+
+## 6. OPEN, IN PRIORITY ORDER
 
 1. ~~The falsifiable prediction of the substitution story~~ **TESTED, and it held — plus it exposed a sharper
    fact than the prediction itself.** Re-running the `-mcs` slope with `-mcpa` on (same prompt/chunk/reps):
