@@ -15,7 +15,7 @@ across three of those sections.
 For a CPU worker that costs nothing extra, because the worker reads the sections it wants with ordinary
 loads. For a card worker the payload must cross the link as a transfer, so the choices are three separate
 transfers, or one transfer of almost a megabyte of mostly empty space. At the measured link rate a whole
-slot is about 65 µs, which is more than the entire decode layer the job is meant to hide.
+slot is about 70 µs, which is more than the entire decode layer the job is meant to hide.
 
 The return direction has its own asymmetry, resolved in ADR-0005: the result is written by the kernel
 straight into the pinned slot.
@@ -56,7 +56,7 @@ Neutral:
 ## Alternatives considered
 
 * Three contiguous copies, one per section: rejected, because three submissions cost more than the payload.
-* One copy of the whole slot: rejected, about 65 µs for a mostly empty buffer at the measured link rate.
+* One copy of the whole slot: rejected, about 70 µs for a mostly empty buffer at the measured link rate.
 * Let the card read the parent's memory directly: not available cross-vendor on this box, and it is the named
   open item of ADR-0025.
 * Compress the payload: rejected as unnecessary, because 5 KiB per layer per token already hides entirely.

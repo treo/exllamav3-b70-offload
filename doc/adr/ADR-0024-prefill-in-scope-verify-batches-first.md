@@ -1,4 +1,4 @@
-# ADR-0024: Prefill is in scope, and verify batches come first
+# ADR-0024: Prefill is in scope, and verification batches come first
 
 - Status: Accepted
 - Date: 2026-10-31

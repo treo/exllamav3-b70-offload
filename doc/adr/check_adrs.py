@@ -180,6 +180,40 @@ def check_style(path: pathlib.Path, text: str, errs: list[str], warns: list[str]
             errs.append(f"{path.name}: '-ing' clause after a comma ({hit.group(1)}), start a new sentence: {line[:70]}")
 
 
+def check_index(files: list[pathlib.Path], errs: list[str]) -> None:
+    """The index in README.md must agree with the records it lists."""
+    readme = HERE / "README.md"
+    if not readme.exists():
+        errs.append("README.md: missing index")
+        return
+    text = readme.read_text()
+    rows = re.findall(r"^\| (ADR-\d{4}) \| \[([^\]]+)\]\(([^)]+)\) \| ([^|]+) \|$", text, flags=re.M)
+    listed = {r[0] for r in rows}
+    for f in files:
+        fid = "ADR-" + f.name[4:8]
+        if fid not in listed:
+            errs.append(f"README.md: index omits {fid}")
+    for fid, title, href, status in rows:
+        path = (HERE / href).resolve()
+        if not path.exists():
+            errs.append(f"README.md: {fid} links to a missing file {href}")
+            continue
+        head = path.read_text().splitlines()[0]
+        if head != f"# {fid}: {title}":
+            errs.append(f"README.md: {fid} index title differs from the record title")
+        if head[6:10] != fid[4:]:
+            errs.append(f"README.md: {fid} links to a record with a different id ({href})")
+        actual = re.search(r"^- Status: (.+)$", path.read_text(), flags=re.M)
+        if actual and actual.group(1).strip() != status.strip():
+            errs.append(f"README.md: {fid} index status {status.strip()!r} != record {actual.group(1).strip()!r}")
+    for label, target in LINK_RE.findall(text):
+        if target.startswith(("http://", "https://", "#")):
+            continue
+        target = target.split("#")[0]
+        if target and not (HERE / target).resolve().exists():
+            errs.append(f"README.md: broken link {target} (label {label!r})")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
@@ -202,6 +236,8 @@ def main() -> int:
         check_structure(f, text, errs)
         check_references(f, text, ids, errs)
         check_style(f, text, errs, warns, args.verbose)
+
+    check_index(files, errs)
 
     if args.verbose:
         for w in warns:

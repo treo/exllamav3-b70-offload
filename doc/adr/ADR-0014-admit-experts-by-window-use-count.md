@@ -11,7 +11,7 @@ An expert with no device home can be computed where it lies, on the CPU, or admi
 streamed to the parent. Admission costs one transfer before the first useful read: 655 µs for a 9 MiB
 GLM expert at the measured 13.4 GiB/s link, and 2.5 ms when the bytes must come off disk. A CPU
 assignment on the same expert costs about 199 µs per use, and the card about 31 µs. The break-even is
-about four uses, and that ratio is scale-invariant: it moves only from 3.8 to 4.3 uses across
+about four uses, and that ratio is scale-invariant: it moves only from 3.8 to 4.1 uses across
 the whole measured rate range of 132 to 545 GB/s.
 
 An earlier draft charged the upload per pick, which made migration look fifty times more expensive than

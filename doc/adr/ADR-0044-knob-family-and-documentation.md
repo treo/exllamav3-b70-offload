@@ -11,7 +11,7 @@ The CPU offload exposes about forty environment variables and a set of hard-code
 of them classifies each by what it changes: a shape, a decision, or only an implementation. That classification is what
 makes a knob safe to touch, because a knob that changes a shape changes the meaning of every measured number next to it.
 
-The same study found the failure modes of the existing set. Nine variables were live and undocumented. One document
+The same study found the failure modes of the existing set. Fourteen variables were live and undocumented. One document
 described a streaming threshold base of 16 while the code used 8. A module docstring described a worker start at first
 layer registration while the loader starts it before any module loads, deliberately. None of those three changed
 behaviour, and all three are text a porter otherwise trusts. One variable, `EXL3_MOE_CPU_SLOT_ROWS`, turned out to

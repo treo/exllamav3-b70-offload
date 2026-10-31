@@ -1,4 +1,4 @@
-# ADR-0006: SYCL atomics never touch the shared region
+# ADR-0006: Library atomics never touch the shared region
 
 - Status: Accepted
 - Date: 2026-10-31
