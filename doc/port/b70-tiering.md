@@ -105,6 +105,13 @@ give the 3090 nothing — any byte handed back only lengthens the critical path.
 Solving that on the plan's constants (card 292 GB/s and 3090 190 GB/s for Qwen; GLM card 132 GB/s — its geometry
 makes the card *slower* per byte than the 3090, which is the whole reason GLM's answer differs):
 
+> **Rate correction (`out_probe_gemm_glm.txt`).** That 132 GB/s is a *decode-shaped* constant. Measured at the
+> prefill shape GLM actually has (K=3, `tiles_n`=128, rows=64, E=64 of 288), the card sustains **84–97 GB/s** —
+> about 35 % below what these rows assume — and the honest primitive is **32.6–37.3 µs per expert-bucket** (D18)
+> rather than any byte rate. So the GLM optima below are optimistic by roughly that margin on the card's leg;
+> the *direction* of the answer (near-equal split) is unaffected, because both homes get slower in the same
+> comparison. Recompute these rows from the per-bucket primitive before the build uses them.
+
 | config | rows | optimal **card** share | optimum µs/layer | 50/50 µs/layer | all-card µs/layer | gain of optimum over all-card |
 |---|---|---|---|---|---|---|
 | Qwen3.8@2.68 | 1 | 1.00 | 195.6 | 236.0 | 195.6 | 0 % (nothing to gain) |

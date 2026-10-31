@@ -19,3 +19,39 @@ effective trellis bandwidth RISES with K (56-60 GB/s at K=2 vs 90 GB/s at K=4 on
 bytes grow while the fixed bucket cost does not. The card is therefore relatively better at high quants --
 which is where the parent degrades most (out_prefill_decomp.txt: 4.05 prefill is 77 pct copy traffic).
 Missing rungs before this is a law: K=3 in this instrument, and K=6.
+== GEMM_MODE=A /home/treo/.cache/b70cases/gg_q605_E512 rows=64 ks=2  (K=6 rung, added by hand after the queue)
+gemm A (sequential bucket launches): rows 64 = NSLAB 4 x 16 rows/launch, RPAD 16, PART rows 64, threads 160 x 512 x NSLAB
+case /home/treo/.cache/b70cases/gg_q605_E512: E 512 R 64 k 2560 n 640 K 6  trellis 600.00 MiB  KS 2  layout native
+rev L: dpas 8 x 2 per byte-block (rows padded to 16), 1 expert/thread, 160 x 512 threads (2048 HW)
+revL ks 2 rows 64 1-proj     layout native:   6117.7 us    137.1 G-w/s   102.8 GB/s(trellis)   [single-launch  6090.7 us]  [M 8x2, 40 tiles x 512 experts]
+
+=== READOUT v2 (three rungs; supersedes the two-point provisional note above) =================
+per expert-projection bucket, rows=64, ks=2, E=512 (E=256/128 for K=2 from out_probe_gemm_midE.txt):
+
+    K   us/bucket   trellis MiB/expert-proj   GB/s(trellis)   cost vs K=2
+    2      7.14-7.25            0.39              56-60          1.00
+    4      9.11                 0.78                90           1.27
+    6     11.95                 1.17               103           1.66
+
+Least squares through the three: cost ~= 4.8 us + 1.19 us x K, and the K=4 point lands 5 % off that line, which is
+close enough to accept "fixed + slope in K" and far enough to keep the residuals visible. The load-bearing number
+is the intercept: about 4.8 us of every bucket is NOT bytes -- at K=2 that is 67 % of the cost. Implications:
+
+  * D18 stands and sharpens: cost is per bucket, and most of a bucket is fixed overhead. Byte-rate models are
+    wrong mainly at low K, where the fixed part dominates.
+  * Tripling bytes (K=2 -> 6) costs 1.66x, so the card degrades sub-proportionally with quant while the parent
+    degrades super-proportionally (4.05 prefill is already 77 % copy, GLM 81 %).
+  * Effective trellis bandwidth rises 56 -> 103 GB/s across this range and is nowhere near the ~292 GB/s the copy
+    peak allows, which is the quantitative statement of why rows-deep and SLM staging could not win: the kernel is
+    leaving bandwidth on the table because per-bucket fixed cost, not DRAM, sets the pace.
+  * Still missing before this is a law: K=3 in this instrument (5.70 us/bucket came from engine-integrated prefill
+    and must not be blended with these probe numbers), and rows dependence (all three points are rows=64).
+== GEMM_MODE=A /home/treo/.cache/b70cases/gg_q268_E512 rows=64 ks=2  (K=3 rung, closes the gap in the 4.8+1.19K fit)
+missing meta.json
+
+=== CORRECTION to the "K=3 missing" line in READOUT v2 =====================================
+K=3 is not a missing rung of THIS family: Qwen3.8 exports are K=2 (2.05), K=2.5 (2.68 -- which is why the dumper
+refuses it, the ring math needs integers), K=4 (4.05), K=5 (4.18/5.05), K=6 (6.05). So 2/4/6 is the whole reachable
+integer ladder for Qwen, and the fit is not interpolated across a gap. The K=3 point that does exist belongs to
+GLM, measured separately at a different expert size in out_probe_gemm_glm.txt -- and that comparison is what shows
+there is no single fixed+slope*K law across geometries.

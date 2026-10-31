@@ -709,6 +709,10 @@ SLAB_MEASURED = {
     # and notes/b70/out_probe_gemm.txt (E=16). <1.0 means co-resident slabs of ONE launch (variant B) are faster.
     "flip": {"gate": {16: 1.05, 32: 0.91, 64: 0.85}, "down": {16: 1.00, 32: None, 64: 0.91}},
     "noflip": {"gate": {16: 0.97, 32: 1.15, 64: 1.02}, "down": {}},
+    # GLM geometry (K=3, tiles_n=128, E=64 of 288, 192 MiB = 8x L2): B/A 0.873 at rows=64 -- the only GLM-shape
+    # rung measured so far (out_probe_gemm_glm.txt). Kept separate from the Qwen tables on purpose: same rule,
+    # different shape, and borrowing one sign across geometries is the error LESSONS 85 names.
+    "glm": {"gate": {64: 0.873}},
 }
 
 
@@ -726,6 +730,16 @@ def slab_advice(E, rows, proj="gate", geom="qwen38", tn=40, ks=1, bytes_per_proj
     Returns (recommend, factor, note) where recommend is True/False/None (None = outside the measured grid, do not
     guess) and factor is the expected B/A time ratio when recommend is not None.
     """
+    if geom == "glm":
+        f = SLAB_MEASURED["glm"][proj].get(rows)
+        if f is None:
+            return (None, 1.0,
+                    f"{geom}: measured at rows=64 only (B/A {SLAB_MEASURED['glm']['gate'][64]:.3f} at E=64); "
+                    f"rows={rows} has no rung, and the Qwen sign must not be borrowed (LESSONS 85)")
+        return (f < 1.0, f,
+                f"{geom}: measured B/A {f:.3f} at rows={rows}, E<=64 of 288 (192 MiB = 8x L2) -> co-schedule "
+                f"worth {(1 / f - 1) * 100:.1f} %. Measured per-bucket cost 32.6-37.3 us, i.e. the card sustains "
+                f"84-97 GB/s at this shape, ~35 % below the 132 GB/s the tiering GLM rows borrowed")
     if geom != "qwen38":
         return None, 1.0, (f"{geom}: co-scheduling measured only on qwen38 geometry; GLM (tiles_n=128, K=3) runs "
                            f"are queued in run_plan_close.sh S3 - do not borrow Qwen's sign for it")
@@ -778,8 +792,12 @@ def _slab_selftest():
     assert r is None and "operative condition" in n, n           # names B as candidate, still not a rung
     r, _, n = slab_advice(124, 32, bytes_per_proj_mib=1.47 / 3)  # Qwen-sized experts at mid E: 5x L2
     assert r is None and "operative condition" not in n, n       # below the bracket: no candidate offered
-    r, _, n = slab_advice(512, 64, geom="glm")
-    assert r is None and "borrow" in n, n                            # no cross-geometry borrowing (LESSONS 85)
+    r, f, n = slab_advice(64, 64, geom="glm")
+    assert r is True and abs(f - 0.873) < 1e-9 and n.startswith("glm: measured"), (r, f, n)   # GLM answers for itself
+    r, _, n = slab_advice(64, 32, geom="glm")
+    assert r is None and "no rung" in n, n                                        # but only at its measured rows
+    r, _, n = slab_advice(512, 64, geom="deepseek")
+    assert r is None and "borrow" in n, n                             # unknown geometry still refuses
     print("slab_advice selftest ok")
 
 
