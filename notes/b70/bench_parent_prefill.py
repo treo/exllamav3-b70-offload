@@ -110,12 +110,23 @@ def mem_preflight(model_dir: str, mcpa: bool, allow_tight: bool) -> None:
     tot_g, avail_g = mi["MemTotal"] / 2.0 ** 20, mi["MemAvailable"] / 2.0 ** 20
     swap_g = mi.get("SwapTotal", 0) / 2.0 ** 20
     rgib = routed_expert_gib(model_dir)
-    need = 12.0 + (8.0 if mcpa else 0.0) + (20.0 if rgib > 0.5 * tot_g else 0.0)
+    # Demand is not "a few GiB of arena": loading this model puts ~rgib of expert bytes under memory pressure,
+    # and on top of it the CPU home pins staging slots that cannot be reclaimed. So the test is availability vs
+    # the WHOLE footprint, not vs a nominal reserve. The first version of this guard asked for 40 GiB and waved
+    # through the arm that hung the machine, which is the difference between a guard and a formality.
+    need = rgib + (12.0 if not mcpa else 24.0)
+    need = max(need, 0.25 * tot_g)
     print(f"  preflight: MemTotal {tot_g:.0f} GiB, MemAvailable {avail_g:.0f} GiB, swap {swap_g:.0f} GiB, "
           f"routed experts {rgib:.1f} GiB ({100 * rgib / tot_g:.0f} % of RAM) -> needs >= {need:.0f} GiB free")
+    if 0.8 * tot_g < rgib <= 1.0 * tot_g:
+        print(f"  WARNING: this model's expert set alone is {100 * rgib / tot_g:.0f} % of host RAM. Load is "
+              f"possible but there is no reserve; run it attended.")
     if avail_g < need and not allow_tight:
         raise SystemExit(
-            f"REFUSING to run: {avail_g:.0f} GiB available, {need:.0f} GiB wanted. This model's expert set is "
+            f"REFUSING to run: {avail_g:.0f} GiB available, {need:.0f} GiB wanted (footprint {rgib:.0f} GiB of "
+            f"experts + staging"
+            + (" + promotion arenas" if mcpa else "") +
+            "). This model's expert set is "
             f"{100 * rgib / tot_g:.0f} % of host RAM and the CPU home pins pages for staging"
             + (" while -mcpa asks for more" if mcpa else "") +
             ". Free memory or drop the arm: a hard hang costs the whole queue and the logs in /tmp with it. "
